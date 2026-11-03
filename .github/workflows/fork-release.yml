@@ -1,7 +1,8 @@
 name: Fork release
 
 # Builds and publishes camerontaylor/jcode releases for the hosts that run it:
-# Linux x86_64 (portable glibc 2.17 baseline), macOS arm64, macOS x86_64.
+# Linux x86_64 (portable glibc 2.17 baseline), Linux arm64 (native Ubuntu 24.04,
+# glibc 2.39 baseline; atlas), macOS arm64, macOS x86_64.
 # `jcode update`, auto-update and the agents repo's harness-update all read
 # this fork's latest release (GITHUB_REPO in crates/jcode-app-core/src/update.rs).
 #
@@ -53,6 +54,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: jcode-linux-x86_64
             compat_container: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: jcode-linux-aarch64
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: jcode-macos-aarch64
@@ -83,7 +87,7 @@ jobs:
           JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
           JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
 
-      - name: Build macOS binary
+      - name: Build native binary
         if: matrix.compat_container != true
         run: cargo build --locked --release --target ${{ matrix.target }}
         env:
@@ -91,8 +95,32 @@ jobs:
           JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
 
+      - name: Package Linux arm64 binary
+        if: runner.os == 'Linux' && matrix.compat_container != true
+        run: |
+          # Same layout as the portable x86_64 artifact: a launcher plus the
+          # .bin. jcode's updater installs the launcher (the non-.bin entry)
+          # and the files beside it; harness-update extracts the .bin.
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}.bin
+          cat > dist/${{ matrix.artifact }} <<'LAUNCHER'
+          #!/usr/bin/env sh
+          set -eu
+          self_path=$0
+          if command -v readlink >/dev/null 2>&1; then
+            resolved=$(readlink -f -- "$0" 2>/dev/null || true)
+            if [ -n "$resolved" ]; then
+              self_path=$resolved
+            fi
+          fi
+          self_dir=$(CDPATH= cd -- "$(dirname -- "$self_path")" && pwd)
+          exec "$self_dir/${{ matrix.artifact }}.bin" "$@"
+          LAUNCHER
+          chmod +x dist/${{ matrix.artifact }} dist/${{ matrix.artifact }}.bin
+          cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }} ${{ matrix.artifact }}.bin
+
       - name: Package macOS binary
-        if: matrix.compat_container != true
+        if: runner.os == 'macOS'
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}
@@ -134,7 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          for a in jcode-linux-x86_64 jcode-macos-aarch64 jcode-macos-x86_64; do
+          for a in jcode-linux-x86_64 jcode-linux-aarch64 jcode-macos-aarch64 jcode-macos-x86_64; do
             test -s "$a.tar.gz"
           done
           sha256sum *.tar.gz > SHA256SUMS
