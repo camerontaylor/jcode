@@ -2242,9 +2242,11 @@ mod tests {
         );
         assert!(parse_acp_slash_command("/compact now").unwrap().is_err());
         assert_eq!(
-            parse_acp_slash_command("/subagent --model gpt-6.1-sol --type review check the -- flags")
-                .unwrap()
-                .unwrap(),
+            parse_acp_slash_command(
+                "/subagent --model gpt-6.1-sol --type review check the -- flags"
+            )
+            .unwrap()
+            .unwrap(),
             AcpSlashCommand::Subagent(AcpSubagentSpec {
                 prompt: "check the -- flags".to_string(),
                 subagent_type: "review".to_string(),
@@ -2252,7 +2254,9 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_acp_slash_command("/subagent fix the build").unwrap().unwrap(),
+            parse_acp_slash_command("/subagent fix the build")
+                .unwrap()
+                .unwrap(),
             AcpSlashCommand::Subagent(AcpSubagentSpec {
                 prompt: "fix the build".to_string(),
                 subagent_type: "general".to_string(),
@@ -2260,8 +2264,16 @@ mod tests {
             })
         );
         assert!(parse_acp_slash_command("/subagent").unwrap().is_err());
-        assert!(parse_acp_slash_command("/subagent --model").unwrap().is_err());
-        assert!(parse_acp_slash_command("/subagent --bogus x").unwrap().is_err());
+        assert!(
+            parse_acp_slash_command("/subagent --model")
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            parse_acp_slash_command("/subagent --bogus x")
+                .unwrap()
+                .is_err()
+        );
         assert!(parse_acp_slash_command("/not-advertised").is_none());
         assert!(parse_acp_slash_command(" /model literal").is_none());
         assert!(parse_acp_slash_command("ordinary prompt").is_none());
