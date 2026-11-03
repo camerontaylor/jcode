@@ -21,6 +21,15 @@ pub(super) fn acp_available_commands() -> Vec<Value> {
             "description": "Set reasoning effort, or show the current effort",
             "input": { "hint": "none|minimal|low|medium|high|xhigh|max (optional)" },
         }),
+        json!({
+            "name": "compact",
+            "description": "Summarize older messages to free context (applied on the next prompt)",
+        }),
+        json!({
+            "name": "subagent",
+            "description": "Launch a background swarm worker with a prompt",
+            "input": { "hint": "[--model <id>] [--type <kind>] <prompt>" },
+        }),
     ]
 }
 

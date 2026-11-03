@@ -960,43 +960,39 @@ impl AcpRuntime {
         images: Vec<(String, String)>,
         explicit_skill: Option<String>,
     ) -> Result<()> {
+        let mut subagent = None;
         if let Some(command) = parse_acp_slash_command(&text) {
-            let response = match command {
-                Ok(command) => self.run_session_command(&session, command).await,
-                Err(err) => Err(err),
-            };
-            cleanup_prompt_state(&session).await;
-            let response = response?;
-            self.write_notification(
-                "session/update",
-                json!({
-                    "sessionId": session.session_id,
-                    "update": agent_message_chunk(response),
-                }),
-            )
-            .await?;
-            self.write_result(rpc_id, prompt_response("end_turn", &TurnUsage::default()))
-                .await?;
-            return Ok(());
+            if let Ok(AcpSlashCommand::Subagent(spec)) = command {
+                // A subagent launch is a streamed tool call, so it runs through
+                // the prompt event loop below instead of returning one message.
+                subagent = Some(spec);
+            } else {
+                return self.run_command_prompt(rpc_id, &session, command).await;
+            }
         }
 
-        // Explicit client metadata wins. Otherwise resolve `/skill [prompt]`
-        // (or `$skill [prompt]`, as some ACP hosts serialize command names)
-        // against the session's registry. Unknown or path-like slash text is
-        // passed through to the model unchanged.
         let mut text = text;
-        let skills = session.skills();
-        let selected_skill = match explicit_skill {
-            Some(name) => Some(name),
-            None => match resolve_acp_skill_invocation(&skills, &text) {
-                Some((name, prompt)) => {
-                    text = prompt.unwrap_or_default();
-                    Some(name)
-                }
-                None => None,
-            },
+        let selected_skill = if subagent.is_some() {
+            None
+        } else {
+            // Explicit client metadata wins. Otherwise resolve `/skill [prompt]`
+            // (or `$skill [prompt]`, as some ACP hosts serialize command names)
+            // against the session's registry. Unknown or path-like slash text is
+            // passed through to the model unchanged.
+            let skills = session.skills();
+            match explicit_skill {
+                Some(name) => Some(name),
+                None => match resolve_acp_skill_invocation(&skills, &text) {
+                    Some((name, prompt)) => {
+                        text = prompt.unwrap_or_default();
+                        Some(name)
+                    }
+                    None => None,
+                },
+            }
         };
         if let Some(name) = selected_skill {
+            let skills = session.skills();
             let Some(skill) = skills.get(&name) else {
                 cleanup_prompt_state(&session).await;
                 self.write_error_value(
@@ -1033,21 +1029,64 @@ impl AcpRuntime {
             *active = Some(prompt_id);
         }
 
-        let send_result = session
-            .send(&Request::Message {
+        let request = match subagent {
+            Some(spec) => Request::RunSubagent {
+                id: prompt_id,
+                prompt: spec.prompt,
+                subagent_type: spec.subagent_type,
+                model: spec.model,
+                session_id: None,
+            },
+            None => Request::Message {
                 id: prompt_id,
                 content: text,
                 images,
                 system_reminder: None,
                 active_skill,
                 no_reply: false,
-            })
-            .await;
+            },
+        };
+        let send_result = session.send(&request).await;
         if let Err(err) = send_result {
             cleanup_prompt_state(&session).await;
             return Err(err);
         }
+        self.stream_prompt_events(rpc_id, &session, prompt_id).await
+    }
 
+    async fn run_command_prompt(
+        &self,
+        rpc_id: Value,
+        session: &Arc<DaemonSession>,
+        command: Result<AcpSlashCommand>,
+    ) -> Result<()> {
+        let response = match command {
+            Ok(command) => self.run_session_command(session, command).await,
+            Err(err) => Err(err),
+        };
+        cleanup_prompt_state(session).await;
+        let response = response?;
+        self.write_notification(
+            "session/update",
+            json!({
+                "sessionId": session.session_id,
+                "update": agent_message_chunk(response),
+            }),
+        )
+        .await?;
+        self.write_result(rpc_id, prompt_response("end_turn", &TurnUsage::default()))
+            .await?;
+        Ok(())
+    }
+
+    /// Relay daemon events for `prompt_id` until it completes, then answer the
+    /// ACP `session/prompt` request.
+    async fn stream_prompt_events(
+        &self,
+        rpc_id: Value,
+        session: &Arc<DaemonSession>,
+        prompt_id: u64,
+    ) -> Result<()> {
         let mut mapper = EventMapper::new(session.session_id.clone(), self.profile);
         let mut stop_reason = "end_turn".to_string();
         let mut turn_usage = TurnUsage::default();
@@ -1055,7 +1094,7 @@ impl AcpRuntime {
             let event = match session.read_event().await {
                 Ok(event) => event,
                 Err(err) => {
-                    cleanup_prompt_state(&session).await;
+                    cleanup_prompt_state(session).await;
                     return Err(err);
                 }
             };
@@ -1070,7 +1109,7 @@ impl AcpRuntime {
                     stop_reason = "cancelled".to_string();
                 }
                 ServerEvent::Error { id, message, .. } if id == prompt_id => {
-                    cleanup_prompt_state(&session).await;
+                    cleanup_prompt_state(session).await;
                     self.write_error_value(rpc_id, JSONRPC_SERVER_ERROR, message)
                         .await?;
                     return Ok(());
@@ -1155,7 +1194,7 @@ impl AcpRuntime {
             }
         }
 
-        cleanup_prompt_state(&session).await;
+        cleanup_prompt_state(session).await;
         self.write_result(rpc_id, prompt_response(&stop_reason, &turn_usage))
             .await?;
         Ok(())
@@ -1251,6 +1290,14 @@ impl AcpRuntime {
                     .clone()
                     .unwrap_or(effort);
                 Ok(format!("Set reasoning effort to `{selected}`."))
+            }
+            AcpSlashCommand::Compact => {
+                let id = session.next_id();
+                session.send(&Request::Compact { id }).await?;
+                wait_for_compact_result(session, id).await
+            }
+            AcpSlashCommand::Subagent(_) => {
+                anyhow::bail!("/subagent streams through the prompt loop")
             }
         }
     }
@@ -1419,6 +1466,29 @@ async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Res
     }
 }
 
+/// Manual compaction only starts a background summary; the daemon applies it
+/// at the start of the next turn, so the result message is the whole reply.
+async fn wait_for_compact_result(session: &DaemonSession, request_id: u64) -> Result<String> {
+    loop {
+        match session.read_event().await? {
+            ServerEvent::CompactResult {
+                id,
+                message,
+                success,
+            } if id == request_id => {
+                if success {
+                    return Ok(message);
+                }
+                anyhow::bail!(message)
+            }
+            ServerEvent::Error { id, message, .. } if id == request_id => {
+                anyhow::bail!(message)
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn wait_for_effort_changed(session: &DaemonSession, request_id: u64) -> Result<()> {
     loop {
         match session.read_event().await? {
@@ -1553,7 +1623,9 @@ impl EventMapper {
                     }
                 }]
             })],
-            ServerEvent::Compaction { trigger, .. } if self.profile.is_extended() => vec![json!({
+            // Shown in every profile: a context summary replacing history is
+            // something the user needs to see, manual or automatic.
+            ServerEvent::Compaction { trigger, .. } => vec![json!({
                 "sessionUpdate": "agent_message_chunk",
                 "content": {
                     "type": "text",
@@ -1733,7 +1805,7 @@ fn resolve_acp_skill_invocation(
 /// contain whitespace or shadow built-in commands are not advertised (they can
 /// still be invoked by typing the slash command).
 fn acp_skill_commands(skills: &crate::skill::SkillRegistry) -> Vec<Value> {
-    const BUILTIN: [&str; 3] = ["model", "models", "effort"];
+    const BUILTIN: [&str; 5] = ["model", "models", "effort", "compact", "subagent"];
     skills
         .list()
         .into_iter()
@@ -1757,6 +1829,59 @@ enum AcpSlashCommand {
     Model(Option<String>),
     Models,
     Effort(Option<String>),
+    Compact,
+    Subagent(AcpSubagentSpec),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AcpSubagentSpec {
+    prompt: String,
+    subagent_type: String,
+    model: Option<String>,
+}
+
+/// Parse `/subagent [--model <id>] [--type <kind>] <prompt>`. Flags are only
+/// recognized before the prompt, so prompt text may contain `--`.
+fn parse_acp_subagent_spec(argument: Option<String>) -> Result<AcpSubagentSpec> {
+    let argument = argument.unwrap_or_default();
+    let mut rest = argument.trim_start();
+    let mut subagent_type = "general".to_string();
+    let mut model = None;
+    loop {
+        let (flag, after) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let target = match flag {
+            "--model" => &mut model,
+            "--type" => {
+                let (value, after) = split_flag_value(flag, after)?;
+                subagent_type = value;
+                rest = after;
+                continue;
+            }
+            flag if flag.starts_with("--") => anyhow::bail!("Unknown /subagent flag {flag}"),
+            _ => break,
+        };
+        let (value, after) = split_flag_value(flag, after)?;
+        *target = Some(value);
+        rest = after;
+    }
+    let prompt = rest.trim();
+    if prompt.is_empty() {
+        anyhow::bail!("Missing prompt. Usage: /subagent [--model <id>] [--type <kind>] <prompt>");
+    }
+    Ok(AcpSubagentSpec {
+        prompt: prompt.to_string(),
+        subagent_type,
+        model,
+    })
+}
+
+fn split_flag_value<'a>(flag: &str, after: &'a str) -> Result<(String, &'a str)> {
+    let after = after.trim_start();
+    let (value, rest) = after.split_once(char::is_whitespace).unwrap_or((after, ""));
+    if value.is_empty() {
+        anyhow::bail!("Missing value for {flag}");
+    }
+    Ok((value.to_string(), rest.trim_start()))
 }
 
 fn parse_acp_slash_command(text: &str) -> Option<Result<AcpSlashCommand>> {
@@ -1776,6 +1901,9 @@ fn parse_acp_slash_command(text: &str) -> Option<Result<AcpSlashCommand>> {
         "models" if argument.is_none() => Some(Ok(AcpSlashCommand::Models)),
         "models" => Some(Err(anyhow::anyhow!("/models does not accept an argument"))),
         "effort" => Some(Ok(AcpSlashCommand::Effort(argument))),
+        "compact" if argument.is_none() => Some(Ok(AcpSlashCommand::Compact)),
+        "compact" => Some(Err(anyhow::anyhow!("/compact does not accept an argument"))),
+        "subagent" => Some(parse_acp_subagent_spec(argument).map(AcpSlashCommand::Subagent)),
         _ => None,
     }
 }
@@ -2069,7 +2197,14 @@ mod tests {
             .iter()
             .map(|command| command["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["model", "models", "effort"]);
+        assert_eq!(names, ["model", "models", "effort", "compact", "subagent"]);
+        assert!(commands[3].get("input").is_none());
+        assert!(
+            commands[4]["input"]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("<prompt>")
+        );
         assert_eq!(commands[0]["input"]["hint"], "model id (optional)");
         assert!(commands[1].get("input").is_none());
         assert!(
@@ -2101,6 +2236,32 @@ mod tests {
             AcpSlashCommand::Effort(Some("xhigh".to_string()))
         );
         assert!(parse_acp_slash_command("/models now").unwrap().is_err());
+        assert_eq!(
+            parse_acp_slash_command("/compact").unwrap().unwrap(),
+            AcpSlashCommand::Compact
+        );
+        assert!(parse_acp_slash_command("/compact now").unwrap().is_err());
+        assert_eq!(
+            parse_acp_slash_command("/subagent --model gpt-6.1-sol --type review check the -- flags")
+                .unwrap()
+                .unwrap(),
+            AcpSlashCommand::Subagent(AcpSubagentSpec {
+                prompt: "check the -- flags".to_string(),
+                subagent_type: "review".to_string(),
+                model: Some("gpt-6.1-sol".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_acp_slash_command("/subagent fix the build").unwrap().unwrap(),
+            AcpSlashCommand::Subagent(AcpSubagentSpec {
+                prompt: "fix the build".to_string(),
+                subagent_type: "general".to_string(),
+                model: None,
+            })
+        );
+        assert!(parse_acp_slash_command("/subagent").unwrap().is_err());
+        assert!(parse_acp_slash_command("/subagent --model").unwrap().is_err());
+        assert!(parse_acp_slash_command("/subagent --bogus x").unwrap().is_err());
         assert!(parse_acp_slash_command("/not-advertised").is_none());
         assert!(parse_acp_slash_command(" /model literal").is_none());
         assert!(parse_acp_slash_command("ordinary prompt").is_none());

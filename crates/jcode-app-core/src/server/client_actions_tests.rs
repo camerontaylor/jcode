@@ -3,7 +3,7 @@
 use super::{
     NotifySessionContext, clone_split_session, create_transfer_child_session,
     handle_notify_session, handle_rename_session, handle_resume_all_sessions, handle_set_feature,
-    handle_split,
+    handle_split, subagent_swarm_spawn_input,
 };
 use crate::agent::Agent;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
@@ -1065,4 +1065,29 @@ async fn daemon_saved_flag_survives_later_session_writes() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[test]
+fn manual_subagent_launches_through_swarm_spawn() {
+    let input = subagent_swarm_spawn_input(
+        "  review the parser changes for regressions  ",
+        "general",
+        Some("gpt-6.1-sol".to_string()),
+        None,
+    )
+    .expect("spawn input");
+    assert_eq!(input["action"], "spawn");
+    assert_eq!(input["label"], "review the parser changes");
+    assert_eq!(input["prompt"], "review the parser changes for regressions");
+    assert_eq!(input["model"], "gpt-6.1-sol");
+
+    let typed = subagent_swarm_spawn_input("audit deps", "security", None, None).unwrap();
+    assert!(typed.get("model").is_none());
+    assert_eq!(typed["prompt"], "[subagent type: security]\n\naudit deps");
+}
+
+#[test]
+fn manual_subagent_rejects_continue_and_blank_prompt() {
+    assert!(subagent_swarm_spawn_input("x", "general", None, Some("s".into())).is_err());
+    assert!(subagent_swarm_spawn_input("   ", "general", None, None).is_err());
 }

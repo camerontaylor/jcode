@@ -1,0 +1,145 @@
+name: Fork release
+
+# Builds and publishes camerontaylor/jcode releases for the hosts that run it:
+# Linux x86_64 (portable glibc 2.17 baseline), macOS arm64, macOS x86_64.
+# `jcode update`, auto-update and the agents repo's harness-update all read
+# this fork's latest release (GITHUB_REPO in crates/jcode-app-core/src/update.rs).
+#
+# Tag scheme: upstream patch * 1000 + fork build, e.g. v0.99.1001 is upstream
+# v0.99.1 plus fork build 1. jcode compares versions numerically, so the patch
+# must stay numeric. Upstream's release.yml is gated to 1jehuang/jcode and
+# skips itself here.
+
+env:
+  JCODE_CI: "1"
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  CARGO_BUILD_RUSTC_WRAPPER: ""
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+  JUSTRUST_TOOLCHAIN: system
+  JUSTRUST_SLOTS: "0"
+  JUSTRUST_NO_TELEMETRY: "1"
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing fork tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+
+concurrency:
+  group: fork-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.artifact }})
+    if: github.repository == 'camerontaylor/jcode'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: jcode-linux-x86_64
+            compat_container: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: jcode-macos-aarch64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: jcode-macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          cache-all-crates: "true"
+
+      - name: Build portable Linux x86_64 binary
+        if: matrix.compat_container == true
+        run: scripts/build_linux_compat.sh dist
+        env:
+          JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
+          JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
+          JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
+
+      - name: Build macOS binary
+        if: matrix.compat_container != true
+        run: cargo build --locked --release --target ${{ matrix.target }}
+        env:
+          JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
+          JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
+
+      - name: Package macOS binary
+        if: matrix.compat_container != true
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}
+          chmod +x dist/${{ matrix.artifact }}
+          # Stable ad-hoc signing identity (see upstream release.yml, #621).
+          codesign --force --sign - --identifier com.jcode.cli dist/${{ matrix.artifact }}
+          cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Check embedded version
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=dist/${{ matrix.artifact }}
+          [ -f "$bin.bin" ] && bin="$bin.bin"
+          version="$("$bin" --no-update --no-selfdev version 2>/dev/null | head -1 || "$bin" --version)"
+          echo "$version"
+          case "$version" in
+            *"${RELEASE_TAG#v}"*) ;;
+            *) echo "binary does not report ${RELEASE_TAG}" >&2; exit 1 ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          for a in jcode-linux-x86_64 jcode-macos-aarch64 jcode-macos-x86_64; do
+            test -s "$a.tar.gz"
+          done
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_TAG" --latest \
+            --notes "Fork build of upstream jcode with Paseo ACP commands (/compact, /subagent). Branch: ct/paseo-acp." \
+            ./*.tar.gz SHA256SUMS

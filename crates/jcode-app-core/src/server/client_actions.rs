@@ -33,6 +33,48 @@ fn derive_subagent_description(prompt: &str) -> String {
     }
 }
 
+/// Tool input for a manual `/subagent` launch.
+///
+/// The direct `subagent` tool was removed in favor of `swarm` (1e7bd9d16), but
+/// `Request::RunSubagent` still dispatched to it and failed with
+/// "Unknown tool: subagent". Launch through `swarm` `action=spawn` instead,
+/// which joins the caller's swarm, creates the worker's todo lane, and returns
+/// the new session id. The worker runs in the background and reports back
+/// through the swarm like any model-initiated spawn.
+fn subagent_swarm_spawn_input(
+    prompt: &str,
+    subagent_type: &str,
+    model: Option<String>,
+    session_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if session_id.is_some() {
+        return Err(
+            "/subagent --continue is no longer supported; message or resume the worker through the swarm instead."
+                .to_string(),
+        );
+    }
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Err("Missing prompt. Add text after /subagent.".to_string());
+    }
+    let mut input = serde_json::json!({
+        "action": "spawn",
+        "label": derive_subagent_description(prompt),
+        "prompt": prompt,
+    });
+    if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+        input["model"] = serde_json::Value::String(model);
+    }
+    // swarm workers have no type selector; keep the requested type visible in
+    // the worker's prompt rather than silently dropping it.
+    let subagent_type = subagent_type.trim();
+    if !subagent_type.is_empty() && subagent_type != "general" {
+        input["prompt"] =
+            serde_json::Value::String(format!("[subagent type: {subagent_type}]\n\n{prompt}"));
+    }
+    Ok(input)
+}
+
 fn build_input_shell_command(command: &str) -> Command {
     #[cfg(windows)]
     {
@@ -356,17 +398,20 @@ pub(super) fn handle_run_subagent(
     let tx = client_event_tx.clone();
 
     crate::runtime_activity::spawn(async move {
-        let description = derive_subagent_description(&prompt);
         let tool_call_id = crate::id::new_id("call");
-        let tool_name = "subagent".to_string();
-        let tool_input = serde_json::json!({
-            "description": description,
-            "prompt": prompt,
-            "subagent_type": subagent_type,
-            "model": model,
-            "session_id": session_id,
-            "command": "/subagent",
-        });
+        let tool_name = "swarm".to_string();
+        let tool_input =
+            match subagent_swarm_spawn_input(&prompt, &subagent_type, model, session_id) {
+                Ok(input) => input,
+                Err(message) => {
+                    let _ = tx.send(ServerEvent::Error {
+                        id,
+                        message,
+                        retry_after_secs: None,
+                    });
+                    return;
+                }
+            };
 
         let message_id = {
             let mut agent_guard = agent.lock().await;
