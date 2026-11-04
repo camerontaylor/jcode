@@ -397,7 +397,6 @@ fn session_state_change(event: &ServerEvent) -> Option<SessionStateChange> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::TurnOriginKind;
 
     const OURS: &str = "acp-test";
     const PEER: &str = "acp-peer";

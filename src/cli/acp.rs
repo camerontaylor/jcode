@@ -5,7 +5,7 @@ use crate::transport::{ReadHalf, WriteHalf};
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -424,6 +424,7 @@ impl AcpRuntime {
             "session/prompt" => self.handle_session_prompt(message).await?,
             "session/cancel" => self.handle_session_cancel(message).await?,
             "session/close" => self.handle_session_close(message).await?,
+            "session/list" => self.handle_session_list(message).await?,
             "session/set_config_option" => self.handle_set_config_option(message).await?,
             "session/set_model" => {
                 self.handle_compat_config_option(
@@ -676,6 +677,53 @@ impl AcpRuntime {
         }
         self.write_result(id, json!({})).await?;
         Ok(())
+    }
+
+    /// `session/list`: stored sessions the client can attach to, newest first.
+    async fn handle_session_list(&self, message: JsonRpcMessage) -> Result<()> {
+        let Some(id) = message.id else {
+            return Ok(());
+        };
+        let cwd = match optional_cwd_from_params(&message.params) {
+            Ok(cwd) => cwd,
+            Err(err) => {
+                self.write_error_value(id, JSONRPC_INVALID_PARAMS, err)
+                    .await?;
+                return Ok(());
+            }
+        };
+        let cursor = match session_list_cursor(&message.params) {
+            Ok(cursor) => cursor,
+            Err(err) => {
+                self.write_error_value(id, JSONRPC_INVALID_PARAMS, err)
+                    .await?;
+                return Ok(());
+            }
+        };
+        let live = self.live_sessions().await;
+        let entries = jcode_harness_api_server::session_catalog::stored_session_catalog(None);
+        let result = session_list_result(entries, cwd.as_deref(), cursor.as_ref(), live.as_deref());
+        self.write_result(id, result).await
+    }
+
+    /// Session ids the daemon currently has live, from the `History` snapshots
+    /// this adapter already received. `None` when no snapshot is available, in
+    /// which case `_meta.jcode.live` is omitted rather than guessed.
+    async fn live_sessions(&self) -> Option<Vec<String>> {
+        let sessions: Vec<Arc<DaemonSession>> =
+            self.sessions.lock().await.values().cloned().collect();
+        let mut live: Option<Vec<String>> = None;
+        for session in sessions {
+            if let Some(ids) = session.live_sessions().await {
+                let live = live.get_or_insert_with(Vec::new);
+                live.extend(ids);
+            }
+        }
+        if let Some(live) = live.as_mut() {
+            live.sort_unstable();
+            live.dedup();
+        }
+        live
     }
 
     async fn handle_set_config_option(&self, message: JsonRpcMessage) -> Result<()> {
@@ -2019,6 +2067,7 @@ fn initialize_result(params: &Value, profile: AcpProfile) -> Value {
         "sessionCapabilities": {
             "close": {},
             "resume": {},
+            "list": {},
         }
     });
 
@@ -2046,6 +2095,169 @@ fn initialize_result(params: &Value, profile: AcpProfile) -> Value {
         },
         "authMethods": [],
     })
+}
+
+/// `session/list` page size.
+const SESSION_LIST_PAGE: usize = 50;
+
+/// Position of the last entry of a returned page, so the next page resumes
+/// exactly after it. Encoded as an opaque string for the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionListCursor {
+    updated_at_ms: Option<i64>,
+    session_id: String,
+}
+
+impl SessionListCursor {
+    fn encode(&self) -> String {
+        json!({
+            "updatedAt": self.updated_at_ms,
+            "sessionId": self.session_id,
+        })
+        .to_string()
+    }
+
+    fn decode(raw: &str) -> std::result::Result<Self, String> {
+        let value: Value = serde_json::from_str(raw)
+            .map_err(|_| "session/list cursor is not a cursor this server issued".to_string())?;
+        let session_id = value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|session_id| !session_id.is_empty())
+            .ok_or_else(|| "session/list cursor is missing sessionId".to_string())?;
+        Ok(Self {
+            updated_at_ms: value.get("updatedAt").and_then(Value::as_i64),
+            session_id: session_id.to_string(),
+        })
+    }
+}
+
+fn session_list_cursor(params: &Value) -> std::result::Result<Option<SessionListCursor>, String> {
+    match params.get("cursor").and_then(Value::as_str) {
+        Some(raw) if !raw.trim().is_empty() => SessionListCursor::decode(raw).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// `cwd` is optional for `session/list`; when present it must be absolute, like
+/// every other ACP path.
+fn optional_cwd_from_params(params: &Value) -> std::result::Result<Option<PathBuf>, String> {
+    match params.get("cwd").and_then(Value::as_str) {
+        Some(cwd) if !cwd.trim().is_empty() => {
+            let path = PathBuf::from(cwd);
+            if !path.is_absolute() {
+                return Err(format!("ACP cwd must be absolute: {}", path.display()));
+            }
+            Ok(Some(path))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Canonical form of a directory for comparison. Falls back to the given path
+/// when it no longer exists, so a deleted working directory still matches its
+/// own stored sessions.
+fn canonical_dir(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Build the `session/list` response: filter by `cwd`, newest first, one page
+/// at a time, with an opaque cursor for the rest.
+fn session_list_result(
+    mut entries: Vec<jcode_harness_api_server::session_catalog::SessionCatalogEntry>,
+    cwd: Option<&Path>,
+    cursor: Option<&SessionListCursor>,
+    live: Option<&[String]>,
+) -> Value {
+    if let Some(cwd) = cwd {
+        let wanted = canonical_dir(cwd);
+        entries.retain(|entry| {
+            entry
+                .working_dir
+                .as_deref()
+                .is_some_and(|working_dir| canonical_dir(Path::new(working_dir)) == wanted)
+        });
+    }
+    entries.sort_by(|left, right| {
+        right
+            .updated_at_ms
+            .cmp(&left.updated_at_ms)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    if let Some(cursor) = cursor {
+        entries.retain(|entry| entry_sorts_after_cursor(entry, cursor));
+    }
+    let has_more = entries.len() > SESSION_LIST_PAGE;
+    entries.truncate(SESSION_LIST_PAGE);
+    let sessions: Vec<Value> = entries
+        .iter()
+        .map(|entry| session_list_entry(entry, live))
+        .collect();
+    let next_cursor = has_more
+        .then(|| {
+            entries.last().map(|entry| {
+                SessionListCursor {
+                    updated_at_ms: entry.updated_at_ms,
+                    session_id: entry.session_id.clone(),
+                }
+                .encode()
+            })
+        })
+        .flatten();
+    let mut result = json!({ "sessions": sessions });
+    if let Some(next_cursor) = next_cursor
+        && let Some(object) = result.as_object_mut()
+    {
+        object.insert("nextCursor".to_string(), Value::String(next_cursor));
+    }
+    result
+}
+
+/// Whether `entry` sorts strictly after `cursor` in the newest-first listing
+/// (descending `updatedAt`, then ascending `sessionId`).
+fn entry_sorts_after_cursor(
+    entry: &jcode_harness_api_server::session_catalog::SessionCatalogEntry,
+    cursor: &SessionListCursor,
+) -> bool {
+    match entry.updated_at_ms.cmp(&cursor.updated_at_ms) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => entry.session_id > cursor.session_id,
+    }
+}
+
+fn session_list_entry(
+    entry: &jcode_harness_api_server::session_catalog::SessionCatalogEntry,
+    live: Option<&[String]>,
+) -> Value {
+    let mut session = json!({
+        "sessionId": entry.session_id,
+        "cwd": entry.working_dir,
+    });
+    let Some(object) = session.as_object_mut() else {
+        return session;
+    };
+    if let Some(title) = entry.title.as_deref().filter(|title| !title.is_empty()) {
+        object.insert("title".to_string(), Value::String(title.to_string()));
+    }
+    if let Some(updated_at) = entry
+        .updated_at_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+    {
+        object.insert(
+            "updatedAt".to_string(),
+            Value::String(updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        );
+    }
+    if let Some(live) = live {
+        object.insert(
+            "_meta".to_string(),
+            json!({
+                "jcode": { "live": live.iter().any(|id| id == &entry.session_id) }
+            }),
+        );
+    }
+    session
 }
 
 fn cwd_from_params(params: &Value) -> std::result::Result<PathBuf, String> {
@@ -2453,6 +2665,127 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn catalog_entry(
+        session_id: &str,
+        working_dir: Option<&str>,
+        updated_at_ms: Option<i64>,
+    ) -> jcode_harness_api_server::session_catalog::SessionCatalogEntry {
+        jcode_harness_api_server::session_catalog::SessionCatalogEntry {
+            session_id: session_id.to_string(),
+            working_dir: working_dir.map(str::to_string),
+            title: Some(format!("title {session_id}")),
+            updated_at_ms,
+        }
+    }
+
+    #[test]
+    fn session_list_filters_by_canonical_cwd_and_sorts_newest_first() {
+        let dir = tempfile::tempdir().expect("cwd");
+        let other = tempfile::tempdir().expect("other cwd");
+        let entries = vec![
+            catalog_entry("s-old", Some(&dir.path().display().to_string()), Some(10)),
+            catalog_entry("s-new", Some(&dir.path().display().to_string()), Some(30)),
+            catalog_entry(
+                "s-other",
+                Some(&other.path().display().to_string()),
+                Some(20),
+            ),
+            catalog_entry("s-nowhere", None, Some(40)),
+        ];
+
+        let result = session_list_result(entries.clone(), Some(dir.path()), None, None);
+        let ids: Vec<&str> = result["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .map(|session| session["sessionId"].as_str().expect("id"))
+            .collect();
+        assert_eq!(ids, ["s-new", "s-old"]);
+        assert_eq!(
+            result["sessions"][0]["cwd"],
+            dir.path().display().to_string()
+        );
+        assert_eq!(result["sessions"][0]["title"], "title s-new");
+        assert!(result["sessions"][0]["updatedAt"].is_string());
+        assert!(
+            result.get("nextCursor").is_none(),
+            "a short page has no cursor"
+        );
+
+        // Without `cwd` every session is listed, newest first.
+        let result = session_list_result(entries, None, None, None);
+        let ids: Vec<&str> = result["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .map(|session| session["sessionId"].as_str().expect("id"))
+            .collect();
+        assert_eq!(ids, ["s-nowhere", "s-new", "s-other", "s-old"]);
+    }
+
+    #[test]
+    fn session_list_pages_with_an_opaque_cursor() {
+        let entries: Vec<_> = (0..55)
+            .map(|index| catalog_entry(&format!("s-{index:02}"), Some("/tmp"), Some(1000 - index)))
+            .collect();
+
+        let first = session_list_result(entries.clone(), None, None, None);
+        let first_page = first["sessions"].as_array().expect("sessions");
+        assert_eq!(first_page.len(), SESSION_LIST_PAGE);
+        let cursor = first["nextCursor"]
+            .as_str()
+            .expect("next cursor")
+            .to_string();
+        assert_eq!(first_page[0]["sessionId"], "s-00");
+
+        let cursor = SessionListCursor::decode(&cursor).expect("cursor decodes");
+        let second = session_list_result(entries, None, Some(&cursor), None);
+        let second_page = second["sessions"].as_array().expect("sessions");
+        assert_eq!(second_page.len(), 5);
+        assert_eq!(second_page[0]["sessionId"], "s-50");
+        assert_eq!(second_page[4]["sessionId"], "s-54");
+        assert!(
+            second.get("nextCursor").is_none(),
+            "last page has no cursor"
+        );
+
+        assert!(SessionListCursor::decode("not a cursor").is_err());
+        assert!(SessionListCursor::decode(r#"{"sessionId":""}"#).is_err());
+    }
+
+    #[test]
+    fn session_list_reports_liveness_only_when_the_daemon_told_us() {
+        let entries = vec![catalog_entry("s-live", Some("/tmp"), Some(5))];
+        let without = session_list_result(entries.clone(), None, None, None);
+        assert!(
+            without["sessions"][0].get("_meta").is_none(),
+            "unknown liveness is omitted, never guessed"
+        );
+
+        let live = vec!["s-live".to_string()];
+        let with = session_list_result(entries, None, None, Some(&live));
+        assert_eq!(with["sessions"][0]["_meta"]["jcode"]["live"], true);
+    }
+
+    #[test]
+    fn initialize_advertises_session_list() {
+        let result = initialize_result(&json!({"protocolVersion": 1}), AcpProfile::Standard);
+        assert!(
+            result["agentCapabilities"]["sessionCapabilities"]["list"].is_object(),
+            "clients discover session/list from the capabilities"
+        );
+    }
+
+    #[test]
+    fn optional_cwd_must_be_absolute_when_present() {
+        assert_eq!(optional_cwd_from_params(&json!({})).unwrap(), None);
+        assert_eq!(
+            optional_cwd_from_params(&json!({"cwd": "/tmp"})).unwrap(),
+            Some(PathBuf::from("/tmp"))
+        );
+        assert!(optional_cwd_from_params(&json!({"cwd": "relative"})).is_err());
     }
 
     #[test]
