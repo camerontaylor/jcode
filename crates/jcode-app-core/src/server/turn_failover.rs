@@ -11,7 +11,7 @@
 //! be in countdown (automatic) mode.
 
 use crate::agent::Agent;
-use crate::protocol::ServerEvent;
+use crate::protocol::{ServerEvent, TurnOrigin};
 use crate::provider::RouteSelection;
 use jcode_provider_core::FailoverDecision;
 use std::sync::Arc;
@@ -160,21 +160,33 @@ pub(super) async fn process_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     enabled: bool,
+    origin: TurnOrigin,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
-    let result = super::client_lifecycle::process_message_streaming_mpsc(
-        Arc::clone(&agent),
+    // Hold the lock across the whole logical turn so the lifecycle pair is
+    // emitted only once the turn actually starts (queued turns wait here).
+    let mut guard = agent.lock().await;
+    let lifecycle = super::turn_lifecycle::TurnLifecycle::start(
+        &guard,
+        &event_tx,
+        origin,
+        super::turn_lifecycle::user_content(content),
+    );
+    let result = super::client_lifecycle::process_locked_message_streaming_mpsc(
+        &mut guard,
         content,
         images,
         system_reminder,
         event_tx.clone(),
     )
     .await;
-    if !enabled || result.is_ok() {
-        return result;
-    }
-    let mut guard = agent.lock().await;
-    retry_turn_with_server_failover(&mut guard, result, reminder, event_tx).await
+    let result = if enabled && result.is_err() {
+        retry_turn_with_server_failover(&mut guard, result, reminder, event_tx.clone()).await
+    } else {
+        result
+    };
+    lifecycle.finish(&guard, &event_tx, &result);
+    result
 }
 
 /// Server-initiated turn (swarm spawn/assign, wake, headless reload recovery)
@@ -186,8 +198,15 @@ pub(super) async fn process_locked_message_with_server_failover(
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
+    origin: TurnOrigin,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
+    let lifecycle = super::turn_lifecycle::TurnLifecycle::start(
+        agent,
+        &event_tx,
+        origin,
+        super::turn_lifecycle::user_content(content),
+    );
     let result = super::client_lifecycle::process_locked_message_streaming_mpsc(
         agent,
         content,
@@ -196,7 +215,9 @@ pub(super) async fn process_locked_message_with_server_failover(
         event_tx.clone(),
     )
     .await;
-    retry_turn_with_server_failover(agent, result, reminder, event_tx).await
+    let result = retry_turn_with_server_failover(agent, result, reminder, event_tx.clone()).await;
+    lifecycle.finish(agent, &event_tx, &result);
+    result
 }
 
 /// [`process_locked_message_with_server_failover`] for callers holding an
@@ -207,6 +228,7 @@ pub(super) async fn process_server_initiated_message(
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
+    origin: TurnOrigin,
 ) -> anyhow::Result<()> {
     let mut guard = agent.lock().await;
     process_locked_message_with_server_failover(
@@ -215,6 +237,7 @@ pub(super) async fn process_server_initiated_message(
         images,
         system_reminder,
         event_tx,
+        origin,
     )
     .await
 }
@@ -385,6 +408,7 @@ mod tests {
             None,
             tx,
             true,
+            crate::protocol::TurnOrigin::client(Some("test-client".into()), 1),
         )
         .await;
 
@@ -465,6 +489,7 @@ mod tests {
             Vec::new(),
             None,
             tx,
+            crate::protocol::TurnOrigin::server(crate::protocol::TurnOriginKind::Swarm),
         )
         .await;
         let calls = provider.calls.lock().unwrap().clone();
@@ -492,8 +517,16 @@ mod tests {
         let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
         let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
         let (tx, _rx) = mpsc::unbounded_channel();
-        let result =
-            process_message_with_server_failover(agent, "hello", Vec::new(), None, tx, false).await;
+        let result = process_message_with_server_failover(
+            agent,
+            "hello",
+            Vec::new(),
+            None,
+            tx,
+            false,
+            crate::protocol::TurnOrigin::client(None, 1),
+        )
+        .await;
         assert!(result.is_err());
         assert_eq!(provider.calls.lock().unwrap().len(), 1);
     }

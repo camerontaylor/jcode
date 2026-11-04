@@ -5,6 +5,7 @@ use super::state::{
 };
 use super::{SessionAgents, SwarmMember};
 use crate::config::SafetyConfig;
+use crate::protocol::{TurnOrigin, TurnOriginKind};
 use crate::session::Session;
 use anyhow::{Context, Result};
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
@@ -1219,7 +1220,15 @@ async fn deliver_to_session(
         agent_guard.message_count()
     };
     let event_tx = session_event_fanout_sender(session_id.to_string(), swarm_members);
-    process_message_streaming_mpsc(Arc::clone(&agent), text, Vec::new(), None, event_tx).await?;
+    process_message_streaming_mpsc(
+        Arc::clone(&agent),
+        text,
+        Vec::new(),
+        None,
+        event_tx,
+        TurnOrigin::server(TurnOriginKind::Relay),
+    )
+    .await?;
     let reply = {
         let agent_guard = agent.lock().await;
         agent_guard.latest_assistant_text_after(start_message_index)
@@ -1250,7 +1259,15 @@ async fn deliver_to_launched_session(
         agent_guard.message_count()
     };
     let event_tx = session_event_fanout_sender(session_id.to_string(), swarm_members);
-    process_message_streaming_mpsc(Arc::clone(&agent), text, Vec::new(), None, event_tx).await?;
+    process_message_streaming_mpsc(
+        Arc::clone(&agent),
+        text,
+        Vec::new(),
+        None,
+        event_tx,
+        TurnOrigin::server(TurnOriginKind::Relay),
+    )
+    .await?;
     let reply = {
         let agent_guard = agent.lock().await;
         agent_guard.latest_assistant_text_after(start_message_index)

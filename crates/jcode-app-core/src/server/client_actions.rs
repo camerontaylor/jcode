@@ -8,7 +8,7 @@ use super::{
     remove_session_from_swarm, swarm_id_for_session, truncate_detail, update_member_status,
 };
 use crate::agent::Agent;
-use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
+use crate::protocol::{FeatureToggle, NotificationType, ServerEvent, TurnOrigin, TurnOriginKind};
 use crate::session::Session;
 use crate::util::truncate_str;
 use jcode_agent_runtime::{SoftInterruptSource, StreamError};
@@ -1353,6 +1353,7 @@ pub(super) async fn handle_agent_task(
         vec![],
         None,
         ctx.client_event_tx.clone(),
+        TurnOrigin::server(TurnOriginKind::Debug),
     )
     .await;
     match result {

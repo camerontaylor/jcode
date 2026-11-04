@@ -677,6 +677,7 @@ fn spawn_assigned_task_run(
             vec![],
             None,
             event_tx,
+            crate::protocol::TurnOrigin::server(crate::protocol::TurnOriginKind::Swarm),
         )
         .await;
         let completion_report = if result.is_ok() {

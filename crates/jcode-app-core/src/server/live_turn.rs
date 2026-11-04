@@ -19,7 +19,7 @@ use super::{
     update_member_status_with_report,
 };
 use crate::agent::Agent;
-use crate::protocol::ServerEvent;
+use crate::protocol::{ServerEvent, TurnOrigin, TurnOriginKind};
 use futures::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -130,7 +130,13 @@ pub(super) async fn spawn_tracked_live_turn(
         let pending_queue = agent.soft_interrupt_queue();
         let (result, stop_reason) = catch_live_turn_panic(async {
             if let Some(display_role) = display_role {
-                agent
+                let lifecycle = super::turn_lifecycle::TurnLifecycle::start(
+                    &agent,
+                    &event_tx,
+                    TurnOrigin::server(TurnOriginKind::Background),
+                    super::turn_lifecycle::user_content(&message),
+                );
+                let result = agent
                     .run_once_streaming_mpsc_with_display_role(
                         &message,
                         vec![],
@@ -138,7 +144,9 @@ pub(super) async fn spawn_tracked_live_turn(
                         event_tx.clone(),
                         Some(display_role),
                     )
-                    .await
+                    .await;
+                lifecycle.finish(&agent, &event_tx, &result);
+                result
             } else {
                 process_locked_message_with_server_failover(
                     &mut agent,
@@ -146,6 +154,7 @@ pub(super) async fn spawn_tracked_live_turn(
                     vec![],
                     system_reminder,
                     event_tx.clone(),
+                    TurnOrigin::server(TurnOriginKind::Background),
                 )
                 .await
             }

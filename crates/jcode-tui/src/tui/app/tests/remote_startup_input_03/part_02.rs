@@ -167,6 +167,9 @@ fn test_initial_history_bootstrap_preserves_restored_interleave_state() {
                 activity: None,
                 side_panel: crate::side_panel::SidePanelSnapshot::default(),
                 applets: Default::default(),
+            
+                server_features: Vec::new(),
+                active_turn: None,
             },
             &mut remote,
         );
@@ -266,6 +269,9 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
                 activity: None,
                 side_panel: crate::side_panel::SidePanelSnapshot::default(),
                 applets: Default::default(),
+            
+                server_features: Vec::new(),
+                active_turn: None,
             },
             &mut remote,
         );
