@@ -1,6 +1,6 @@
 use super::dispatch;
 use super::provider_init::ProviderChoice;
-use crate::protocol::{Request, ServerEvent};
+use crate::protocol::{Request, ServerEvent, TurnEndStatus, TurnOrigin};
 use crate::transport::{ReadHalf, WriteHalf};
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -1435,25 +1435,110 @@ impl AcpRuntime {
         &self,
         session: &Arc<DaemonSession>,
         action: RouteAction,
-        _peer_mapper: &mut Option<EventMapper>,
+        peer_mapper: &mut Option<EventMapper>,
     ) -> Result<()> {
         let session_id = session.session_id().await;
         match action {
+            RouteAction::PeerTurnStarted {
+                turn_id,
+                origin,
+                user_content,
+            } => {
+                // A fresh mapper per peer turn: tool-call ids and streamed
+                // inputs must not leak between turns or into this adapter's own
+                // prompt mapping.
+                *peer_mapper = Some(EventMapper::new(session_id.clone(), self.profile));
+                self.write_turn_notification(&session_id, &turn_id, "started", Some(&origin), None)
+                    .await?;
+                if let Some(content) = user_content.filter(|content| !content.trim().is_empty()) {
+                    self.write_notification(
+                        "session/update",
+                        json!({
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "user_message_chunk",
+                                "content": { "type": "text", "text": content },
+                            }
+                        }),
+                    )
+                    .await?;
+                }
+            }
+            RouteAction::PeerTurnEvent(event) => {
+                let mapper = peer_mapper
+                    .get_or_insert_with(|| EventMapper::new(session_id.clone(), self.profile));
+                for update in mapper.map_event(event) {
+                    self.write_notification(
+                        "session/update",
+                        json!({ "sessionId": session_id, "update": update }),
+                    )
+                    .await?;
+                }
+            }
+            RouteAction::PeerTurnEnded {
+                turn_id,
+                status,
+                message,
+            } => {
+                *peer_mapper = None;
+                let state = match status {
+                    TurnEndStatus::Completed => "completed",
+                    TurnEndStatus::Failed => "failed",
+                    TurnEndStatus::Cancelled => "canceled",
+                };
+                self.write_turn_notification(
+                    &session_id,
+                    &turn_id,
+                    state,
+                    None,
+                    message.as_deref(),
+                )
+                .await?;
+            }
             RouteAction::SessionState(change) => {
                 self.apply_session_state(session, &session_id, change)
                     .await?;
             }
-            RouteAction::PeerTurnStarted { turn_id, .. } => {
-                crate::logging::debug(&format!(
-                    "acp: peer turn {turn_id} started (mirroring disabled)"
-                ));
-            }
-            RouteAction::PeerTurnEvent(_) => {}
-            RouteAction::PeerTurnEnded { turn_id, .. } => {
-                crate::logging::debug(&format!("acp: peer turn {turn_id} ended"));
-            }
         }
         Ok(())
+    }
+
+    /// `_jcode/turn`: the peer-turn bracket. Sent in every profile; ACP
+    /// extension notifications are ignored by clients that do not know them,
+    /// and standard clients still receive the content through `session/update`.
+    /// Only peer turns get one: a `session/prompt` response already brackets the
+    /// client's own turn.
+    async fn write_turn_notification(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        state: &str,
+        origin: Option<&TurnOrigin>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let mut params = json!({
+            "sessionId": session_id,
+            "turnId": turn_id,
+            "state": state,
+        });
+        if let Some(object) = params.as_object_mut() {
+            if let Some(origin) = origin {
+                let mut wire = json!({ "kind": turn_origin_kind(origin) });
+                if let Some(object) = wire.as_object_mut()
+                    && let Some(instance_id) = origin.client_instance_id.as_deref()
+                {
+                    object.insert(
+                        "clientInstanceId".to_string(),
+                        Value::String(instance_id.to_string()),
+                    );
+                }
+                object.insert("origin".to_string(), wire);
+            }
+            if let Some(error) = error {
+                object.insert("error".to_string(), json!({ "message": error }));
+            }
+        }
+        self.write_notification("_jcode/turn", params).await
     }
 
     /// Apply a session-wide state change another client caused, then surface it
@@ -1523,6 +1608,17 @@ impl AcpRuntime {
         stdout.write_all(line.as_bytes()).await?;
         stdout.flush().await?;
         Ok(())
+    }
+}
+
+/// Wire name of a turn origin kind.
+fn turn_origin_kind(origin: &TurnOrigin) -> &'static str {
+    match origin.kind {
+        crate::protocol::TurnOriginKind::Client => "client",
+        crate::protocol::TurnOriginKind::Swarm => "swarm",
+        crate::protocol::TurnOriginKind::Background => "background",
+        crate::protocol::TurnOriginKind::Relay => "relay",
+        crate::protocol::TurnOriginKind::Debug => "debug",
     }
 }
 
