@@ -2356,6 +2356,16 @@ fn canonical_dir(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// [`canonical_dir`] memoised for one `session/list` call.
+fn canonical_dir_cached(cache: &mut HashMap<PathBuf, PathBuf>, path: &Path) -> PathBuf {
+    if let Some(canonical) = cache.get(path) {
+        return canonical.clone();
+    }
+    let canonical = canonical_dir(path);
+    cache.insert(path.to_path_buf(), canonical.clone());
+    canonical
+}
+
 /// Build the `session/list` response: filter by `cwd`, newest first, one page
 /// at a time, with an opaque cursor for the rest.
 fn session_list_result(
@@ -2364,13 +2374,21 @@ fn session_list_result(
     cursor: Option<&SessionListCursor>,
     live: Option<&[String]>,
 ) -> Value {
+    // ACP requires a string `cwd`, so a stored session with no recorded
+    // working directory cannot be listed at all.
+    entries.retain(|entry| entry.working_dir.is_some());
     if let Some(cwd) = cwd {
-        let wanted = canonical_dir(cwd);
+        // Canonicalise at most once per distinct directory: the catalog can
+        // hold thousands of sessions, and each `canonicalize` is a syscall.
+        let mut canonical: HashMap<PathBuf, PathBuf> = HashMap::new();
+        let wanted = canonical_dir_cached(&mut canonical, cwd);
         entries.retain(|entry| {
-            entry
-                .working_dir
-                .as_deref()
-                .is_some_and(|working_dir| canonical_dir(Path::new(working_dir)) == wanted)
+            let Some(working_dir) = entry.working_dir.as_deref() else {
+                return false;
+            };
+            let working_dir = Path::new(working_dir);
+            // An exact match needs no syscall at all.
+            working_dir == cwd || canonical_dir_cached(&mut canonical, working_dir) == wanted
         });
     }
     entries.sort_by(|left, right| {
@@ -2427,7 +2445,9 @@ fn session_list_entry(
 ) -> Value {
     let mut session = json!({
         "sessionId": entry.session_id,
-        "cwd": entry.working_dir,
+        // Entries without a working directory are filtered out before this
+        // point: ACP requires a string here.
+        "cwd": entry.working_dir.as_deref().unwrap_or_default(),
     });
     let Some(object) = session.as_object_mut() else {
         return session;
@@ -2909,7 +2929,8 @@ mod tests {
             "a short page has no cursor"
         );
 
-        // Without `cwd` every session is listed, newest first.
+        // Without `cwd` every session with a working directory is listed,
+        // newest first (ACP requires a string cwd, so `s-nowhere` is omitted).
         let result = session_list_result(entries, None, None, None);
         let ids: Vec<&str> = result["sessions"]
             .as_array()
@@ -2917,7 +2938,50 @@ mod tests {
             .iter()
             .map(|session| session["sessionId"].as_str().expect("id"))
             .collect();
-        assert_eq!(ids, ["s-nowhere", "s-new", "s-other", "s-old"]);
+        assert_eq!(ids, ["s-new", "s-other", "s-old"]);
+    }
+
+    #[test]
+    fn session_list_omits_sessions_without_a_working_directory() {
+        let entries = vec![
+            catalog_entry("s-with-dir", Some("/tmp"), Some(10)),
+            catalog_entry("s-no-dir", None, Some(20)),
+        ];
+        let result = session_list_result(entries, None, None, None);
+        let ids: Vec<&str> = result["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .map(|session| session["sessionId"].as_str().expect("id"))
+            .collect();
+        assert_eq!(ids, ["s-with-dir"]);
+        assert_eq!(
+            result["sessions"][0]["cwd"], "/tmp",
+            "cwd is always a string"
+        );
+    }
+
+    #[test]
+    fn session_list_matches_equivalent_cwd_spellings() {
+        let dir = tempfile::tempdir().expect("cwd");
+        let dot_spelling = format!("{}/.", dir.path().display());
+        let entries = vec![
+            catalog_entry("s-plain", Some(&dir.path().display().to_string()), Some(10)),
+            catalog_entry("s-dotted", Some(&dot_spelling), Some(20)),
+            catalog_entry("s-elsewhere", Some("/"), Some(30)),
+        ];
+        let result = session_list_result(entries, Some(dir.path()), None, None);
+        let ids: Vec<&str> = result["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .map(|session| session["sessionId"].as_str().expect("id"))
+            .collect();
+        assert_eq!(
+            ids,
+            ["s-dotted", "s-plain"],
+            "both spellings canonicalise to the requested cwd"
+        );
     }
 
     #[test]
