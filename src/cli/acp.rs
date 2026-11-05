@@ -1340,29 +1340,12 @@ impl AcpRuntime {
                     cache_creation_input,
                 } => {
                     turn_usage.add(input, output, cache_read_input, cache_creation_input);
-                    let (provider_name, context_limit) = {
-                        let state = session.ui_state.lock().await;
-                        (
-                            state.provider_name.clone().unwrap_or_default(),
-                            state.context_limit(),
-                        )
-                    };
-                    let used = crate::compaction::effective_context_tokens_from_usage(
-                        &provider_name,
+                    self.write_usage_update(
+                        &session_id,
+                        &session.ui_state,
                         input,
                         cache_read_input,
                         cache_creation_input,
-                    );
-                    self.write_notification(
-                        "session/update",
-                        json!({
-                            "sessionId": session_id,
-                            "update": {
-                                "sessionUpdate": "usage_update",
-                                "used": used,
-                                "size": context_limit,
-                            }
-                        }),
                     )
                     .await?;
                 }
@@ -1496,6 +1479,30 @@ impl AcpRuntime {
                 anyhow::bail!("/subagent streams through the prompt loop")
             }
         }
+    }
+
+    /// `usage_update` for one reported token usage event. Shared by this
+    /// adapter's own turn and the peer-turn mirror, so both show the same
+    /// context gauge.
+    async fn write_usage_update(
+        &self,
+        session_id: &str,
+        ui_state: &Arc<Mutex<SessionUiState>>,
+        input: u64,
+        cache_read_input: Option<u64>,
+        cache_creation_input: Option<u64>,
+    ) -> Result<()> {
+        let payload = {
+            let state = ui_state.lock().await;
+            usage_update_payload(
+                session_id,
+                &state,
+                input,
+                cache_read_input,
+                cache_creation_input,
+            )
+        };
+        self.write_notification("session/update", payload).await
     }
 
     async fn write_config_option_update(&self, session: &DaemonSession) -> Result<()> {
@@ -1636,6 +1643,21 @@ impl AcpRuntime {
                     )
                     .await?;
                 }
+            }
+            RouteAction::PeerTurnEvent(ServerEvent::TokenUsage {
+                input,
+                cache_read_input,
+                cache_creation_input,
+                ..
+            }) => {
+                self.write_usage_update(
+                    &session_id,
+                    ui_state,
+                    input,
+                    cache_read_input,
+                    cache_creation_input,
+                )
+                .await?;
             }
             RouteAction::PeerTurnEvent(event) => {
                 let updates = {
@@ -1786,6 +1808,31 @@ impl AcpRuntime {
         stdout.flush().await?;
         Ok(())
     }
+}
+
+/// `session/update` payload for a `usage_update` notification.
+fn usage_update_payload(
+    session_id: &str,
+    state: &SessionUiState,
+    input: u64,
+    cache_read_input: Option<u64>,
+    cache_creation_input: Option<u64>,
+) -> Value {
+    let provider_name = state.provider_name.clone().unwrap_or_default();
+    let used = crate::compaction::effective_context_tokens_from_usage(
+        &provider_name,
+        input,
+        cache_read_input,
+        cache_creation_input,
+    );
+    json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "usage_update",
+            "used": used,
+            "size": state.context_limit(),
+        }
+    })
 }
 
 /// Client instance id of one daemon connection.
@@ -2967,6 +3014,24 @@ mod tests {
             other => panic!("unexpected action {other:?}"),
         };
         assert_eq!(first, format!("chunk-{}", 8));
+    }
+
+    #[test]
+    fn usage_updates_carry_the_session_context_gauge() {
+        let state = SessionUiState {
+            provider_name: Some("anthropic".to_string()),
+            model: Some("claude-opus-4-6".to_string()),
+            available_models: Vec::new(),
+            reasoning_effort: None,
+        };
+        let payload = usage_update_payload("session-1", &state, 1_000, Some(4_000), None);
+        assert_eq!(payload["sessionId"], "session-1");
+        assert_eq!(payload["update"]["sessionUpdate"], "usage_update");
+        assert_eq!(payload["update"]["size"], state.context_limit());
+        assert!(
+            payload["update"]["used"].as_u64().unwrap_or_default() > 0,
+            "the reported input tokens count toward the gauge: {payload}"
+        );
     }
 
     #[test]
