@@ -124,6 +124,28 @@ struct PeerActionGate {
 /// unbounded output; the newest events are the ones still on screen.
 const MAX_BUFFERED_PEER_ACTIONS: usize = 512;
 
+/// Drain held peer actions while keeping live dispatch ordered behind them.
+///
+/// The gate guard is held for the whole flush: a live action that arrives while
+/// a held action is being rendered blocks in [`PeerActionGate::hold`] and is
+/// therefore rendered after it, never between or ahead of the buffer.
+async fn flush_peer_actions<'a, F>(
+    gate: &'a Arc<Mutex<PeerActionGate>>,
+    mut render: F,
+) -> Result<()>
+where
+    F: FnMut(RouteAction) -> futures::future::BoxFuture<'a, Result<()>>,
+{
+    let mut guard = gate.lock().await;
+    guard.ready = true;
+    let buffered = std::mem::take(&mut guard.buffered);
+    for action in buffered {
+        render(action).await?;
+    }
+    drop(guard);
+    Ok(())
+}
+
 impl PeerActionGate {
     /// Hold `action` while output is deferred. Returns `true` when it was
     /// buffered, `false` when the caller should render it now.
@@ -136,12 +158,6 @@ impl PeerActionGate {
         }
         self.buffered.push(action);
         true
-    }
-
-    /// Let live output through and return what was held, in arrival order.
-    fn release(&mut self) -> Vec<RouteAction> {
-        self.ready = true;
-        std::mem::take(&mut self.buffered)
     }
 }
 
@@ -1596,17 +1612,18 @@ impl AcpRuntime {
     /// Flush peer output held during an attach handshake, then let live peer
     /// events through.
     async fn release_peer_actions(&self, session: &Arc<DaemonSession>) -> Result<()> {
-        let buffered = session.peer_gate.lock().await.release();
-        for action in buffered {
-            self.apply_peer_action(
-                &session.router,
-                &session.ui_state,
-                &session.peer_mapper,
-                action,
-            )
-            .await?;
-        }
-        Ok(())
+        flush_peer_actions(&session.peer_gate, |action| {
+            Box::pin(async move {
+                self.apply_peer_action(
+                    &session.router,
+                    &session.ui_state,
+                    &session.peer_mapper,
+                    action,
+                )
+                .await
+            })
+        })
+        .await
     }
 
     /// Render one peer-turn action for the ACP client.
@@ -3030,56 +3047,141 @@ mod tests {
         assert_eq!(with["sessions"][0]["_meta"]["jcode"]["live"], true);
     }
 
-    #[test]
-    fn peer_output_is_held_until_the_attach_handshake_releases_it() {
-        let mut gate = PeerActionGate::default();
-        let started = RouteAction::PeerTurnStarted {
-            turn_id: "t1".to_string(),
-            origin: TurnOrigin::client(Some("peer".to_string()), 3),
-            user_content: Some("peer prompt".to_string()),
-        };
-        let event = RouteAction::PeerTurnEvent(ServerEvent::TextDelta {
-            text: "peer output".to_string(),
-        });
-        assert!(gate.hold(started));
-        assert!(gate.hold(event));
-        assert_eq!(gate.buffered.len(), 2);
+    #[tokio::test]
+    async fn peer_output_is_held_until_the_attach_handshake_releases_it() {
+        let gate = Arc::new(Mutex::new(PeerActionGate::default()));
+        let rendered = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        {
+            let mut gate = gate.lock().await;
+            assert!(gate.hold(RouteAction::PeerTurnStarted {
+                turn_id: "t1".to_string(),
+                origin: TurnOrigin::client(Some("peer".to_string()), 3),
+                user_content: Some("peer prompt".to_string()),
+            }));
+            assert!(gate.hold(delta_action("peer output")));
+            assert_eq!(gate.buffered.len(), 2);
+        }
 
-        let released = gate.release();
-        assert_eq!(released.len(), 2);
-        assert!(
-            matches!(released[0], RouteAction::PeerTurnStarted { .. }),
+        let record = |action: RouteAction| {
+            let rendered = Arc::clone(&rendered);
+            Box::pin(async move {
+                rendered
+                    .lock()
+                    .expect("render log")
+                    .push(action_label(&action));
+                Ok(())
+            }) as futures::future::BoxFuture<'static, Result<()>>
+        };
+        flush_peer_actions(&gate, record).await.expect("flush");
+        assert_eq!(
+            rendered.lock().expect("render log").as_slice(),
+            ["started t1", "delta peer output"],
             "held actions flush in arrival order"
         );
-        assert!(matches!(released[1], RouteAction::PeerTurnEvent(_)));
-        assert!(gate.buffered.is_empty());
 
         // Once released, live output is rendered immediately.
+        assert!(!gate.lock().await.hold(delta_action("live")));
+    }
+
+    fn action_label(action: &RouteAction) -> String {
+        match action {
+            RouteAction::PeerTurnStarted { turn_id, .. } => format!("started {turn_id}"),
+            RouteAction::PeerTurnEvent(ServerEvent::TextDelta { text }) => format!("delta {text}"),
+            RouteAction::PeerTurnEvent(other) => format!("event {other:?}"),
+            RouteAction::PeerTurnEnded { turn_id, .. } => format!("ended {turn_id}"),
+            RouteAction::SessionState(change) => format!("state {change:?}"),
+        }
+    }
+
+    fn delta_action(text: &str) -> RouteAction {
+        RouteAction::PeerTurnEvent(ServerEvent::TextDelta {
+            text: text.to_string(),
+        })
+    }
+
+    /// A live peer event that arrives while the handshake flush is rendering a
+    /// held event must render after it, never between or ahead of the buffer.
+    #[tokio::test]
+    async fn live_peer_output_renders_after_a_flush_in_progress() {
+        let gate = Arc::new(Mutex::new(PeerActionGate::default()));
+        {
+            let mut gate = gate.lock().await;
+            assert!(gate.hold(delta_action("held-1")));
+            assert!(gate.hold(delta_action("held-2")));
+        }
+        let rendered = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        let flush = {
+            let gate = Arc::clone(&gate);
+            let rendered = Arc::clone(&rendered);
+            tokio::spawn(async move {
+                flush_peer_actions(&gate, move |action| {
+                    let rendered = Arc::clone(&rendered);
+                    Box::pin(async move {
+                        // Let the reader try to dispatch a live action now.
+                        tokio::task::yield_now().await;
+                        rendered
+                            .lock()
+                            .expect("render log")
+                            .push(action_label(&action));
+                        Ok(())
+                    })
+                })
+                .await
+                .expect("flush succeeds")
+            })
+        };
+
+        // The reader's next dispatch races the flush.
+        tokio::task::yield_now().await;
+        let held = gate.lock().await.hold(delta_action("live"));
         assert!(
-            !gate.hold(RouteAction::PeerTurnEvent(ServerEvent::TextDelta {
-                text: "live".to_string(),
-            }))
+            !held,
+            "the flush already marked the gate ready, so this renders live"
+        );
+        rendered
+            .lock()
+            .expect("render log")
+            .push(action_label(&delta_action("live")));
+
+        flush.await.expect("flush task");
+        assert_eq!(
+            rendered.lock().expect("render log").as_slice(),
+            ["delta held-1", "delta held-2", "delta live"],
+            "live output renders only after every held action"
         );
     }
 
-    #[test]
-    fn held_peer_output_is_bounded() {
-        let mut gate = PeerActionGate::default();
-        for index in 0..MAX_BUFFERED_PEER_ACTIONS + 8 {
-            assert!(
-                gate.hold(RouteAction::PeerTurnEvent(ServerEvent::TextDelta {
-                    text: format!("chunk-{index}"),
-                }))
-            );
+    #[tokio::test]
+    async fn held_peer_output_is_bounded() {
+        let gate = Arc::new(Mutex::new(PeerActionGate::default()));
+        {
+            let mut gate = gate.lock().await;
+            for index in 0..MAX_BUFFERED_PEER_ACTIONS + 8 {
+                assert!(gate.hold(delta_action(&format!("chunk-{index}"))));
+            }
+            assert_eq!(gate.buffered.len(), MAX_BUFFERED_PEER_ACTIONS);
         }
-        assert_eq!(gate.buffered.len(), MAX_BUFFERED_PEER_ACTIONS);
-        let released = gate.release();
+        let rendered = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        flush_peer_actions(&gate, {
+            let rendered = Arc::clone(&rendered);
+            move |action| {
+                let rendered = Arc::clone(&rendered);
+                Box::pin(async move {
+                    rendered
+                        .lock()
+                        .expect("render log")
+                        .push(action_label(&action));
+                    Ok(())
+                })
+            }
+        })
+        .await
+        .expect("flush");
+        let rendered = rendered.lock().expect("render log");
         // The newest events survive: the oldest were dropped.
-        let first = match &released[0] {
-            RouteAction::PeerTurnEvent(ServerEvent::TextDelta { text }) => text.clone(),
-            other => panic!("unexpected action {other:?}"),
-        };
-        assert_eq!(first, format!("chunk-{}", 8));
+        assert_eq!(rendered.first().map(String::as_str), Some("delta chunk-8"));
+        assert_eq!(rendered.len(), MAX_BUFFERED_PEER_ACTIONS);
     }
 
     #[test]
