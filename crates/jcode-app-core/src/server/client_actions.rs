@@ -385,6 +385,10 @@ pub(super) async fn handle_set_subagent_model(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a launch carries the client's request id, prompt, worker options, and origin identity"
+)]
 pub(super) fn handle_run_subagent(
     id: u64,
     prompt: String,
