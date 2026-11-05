@@ -241,11 +241,16 @@ Rules:
   visibly running turn untouched is broken UX. A TUI user sees the usual
   "interrupted" notice.
 - **`session/close` does not stop a peer's turn.** Closing the ACP view is not
-  a user cancel: send `Cancel` only when this adapter still owns a prompt
-  (running or queued behind a peer turn). Closing a view of a session another
-  client is driving must leave that turn alone, and the daemon detaches this
-  connection on its own. Dropping the session also stops its reader, so no
-  further peer output is written for a closed view.
+  a user cancel: send `Cancel` only when *this connection's own turn is
+  running* (`router.own_turn` set). A prompt that is merely queued behind a
+  peer's turn does not qualify — the peer holds the daemon's agent, so a
+  session-wide `Cancel` would interrupt it, which is the bug this rule exists
+  to prevent. With a queued prompt the connection is simply closed: the daemon
+  detaches this connection without touching the peer's turn, and our queued
+  turn is aborted by disconnect cleanup on a solo session or detached (its
+  output discarded) when another client keeps the session alive. Dropping the
+  session also stops its reader, so no further peer output is written for a
+  closed view.
 
 ### D5. `session/list`
 
@@ -415,8 +420,10 @@ extend the numbered list above where they overlap.
     cleared early by our own `TurnStarted`, which is what made the old
     single-marker scheme racy when the daemon reported a finished turn after the
     queued turn had already started.
-16. **`session/close` no longer cancels a peer's turn.** See D4. Only a prompt
-    this adapter still owns is cancelled on close.
+16. **`session/close` no longer cancels a peer's turn.** See D4. Only a turn
+    this connection is actually running is cancelled on close; a prompt that is
+    only queued behind a peer's turn is left to the daemon's disconnect
+    handling.
 17. **The reader no longer keeps its session alive.** The reader task holds the
     shared router and UI state instead of an `Arc<DaemonSession>`; previously
     `Drop` (which aborts the reader) could never run, so closing a session
@@ -448,3 +455,42 @@ extend the numbered list above where they overlap.
     `History`, `ModelChanged`, `ReasoningEffortChanged`, `CompactResult`)
     carries the request id it answers, so the pending-request table alone routes
     them. There is no id-less reply to disambiguate by kind.
+23. **The attach flush is atomic with respect to live peer output.** Marking
+    the gate ready and draining it happen under the same guard, and live
+    dispatch takes that guard, so a live peer event can only render after the
+    last held one. Previously the lock was released before rendering, and a
+    live delta could land between held actions.
+24. **Gate overflow never drops a `_jcode/turn` bracket.** Only streamed
+    `PeerTurnEvent` entries are evicted; a `PeerTurnStarted`/`PeerTurnEnded` is
+    kept, so a saturated mid-turn attach still yields a balanced bracket (while
+    the buffer holds brackets only, new events are dropped instead).
+25. **Peer terminal markers expire with their turn.** A peer turn closed by
+    synthesis (the next turn started before its end) or by a cancelled
+    `turn_ended` will never deliver its own terminal event to this connection —
+    the daemon sends a cancelled turn's terminal only to the cancelling
+    connection — so its `(turn_id, request_id)` marker is dropped then. A marker
+    that survived would swallow a later terminal event reusing that
+    connection-local id.
+26. **`/subagent` launches are serialised with model turns.** The launch holds
+    the agent guard for its whole duration, so a queued or peer model turn
+    cannot start in the middle and interleave its fanned-out stream with the
+    launch's connection-local tool events (which the adapter would otherwise
+    mirror as the peer turn's output). The `swarm` tool never re-enters this
+    session's agent, and the spawn-path test confirms it. An invalid launch is
+    validated before the lock and answers immediately. Peers get no live view of
+    a launch: the pair and its tool events go only to the requesting
+    connection, though the tool call is persisted in the shared transcript.
+27. **`TurnLifecycle::finish` takes no agent.** It captures the agent's cancel
+    signal at start, so a turn that does not hold the lock (a `/subagent`
+    launch) reports its end without waiting for a queued model turn and without
+    borrowing that turn's cancel epoch. The `Drop`-without-`finish` message now
+    covers both an aborted turn and an early return; the status stays
+    `cancelled` for the non-panicking case, which is the abort path. The daemon
+    can emit two terminal `done`s for one cancelled request id (the turn task's
+    own terminal plus the cancel path's); the router tolerates the duplicate.
+28. **Cancel-path coverage.** The cancel path has two orderings to survive: the
+    turn can stop cooperatively so its own terminal `done` reaches the
+    cancelling connection before the cancel path's `interrupted` + `done`, and
+    the relayed `turn_ended` travels through a separate forwarder task. A
+    daemon test drives the real path with a peer attached and a router test
+    replays both sequences, asserting consistent state and no misrouting.
