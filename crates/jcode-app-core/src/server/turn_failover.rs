@@ -283,6 +283,9 @@ pub(super) async fn retry_turn_with_server_failover(
 
 #[cfg(test)]
 mod tests {
+    // Tests hold the env/home serialization lock across awaits on purpose.
+    #![cfg_attr(test, allow(clippy::await_holding_lock))]
+
     use super::*;
 
     #[test]
