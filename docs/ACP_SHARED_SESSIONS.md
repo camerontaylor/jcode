@@ -307,3 +307,75 @@ Rules:
 3. **Leaking `user_content` to peers.** It holds the full prompt text sent to
    every attachment. That matches `PeerUserMessage` today; confirm no prompt
    source (for example a hidden system reminder) should be redacted.
+
+## Deviations
+
+Recorded while implementing phases 1–4. Each is the smallest sound change the
+real code allowed; none of them weakens the goals.
+
+1. **The D1 call-site list was incomplete.** Besides
+   `process_message_with_server_failover`,
+   `process_locked_message_with_server_failover`, `jade_relay.rs` and
+   `client_actions.rs`, two more paths stream a turn:
+   `live_turn.rs` runs `run_once_streaming_mpsc_with_display_role` directly for
+   display-role wake turns (bypassing the failover wrapper), and
+   `client_actions::handle_agent_task` (`agent_task`) goes through
+   `process_message_streaming_mpsc`. All four entry points now emit the pair;
+   `process_message_with_server_failover` takes the agent lock itself and calls
+   the locked primitive, so a logical turn emits one pair and failover retries
+   stay inside it.
+2. **Detecting a cancelled turn.** The streaming turn loop `break`s instead of
+   returning an error when its cancel signal fires, so the result is `Ok`. The
+   pair reports `cancelled` when the agent's cancel-signal *epoch* advanced
+   during the turn — the same signal the loop checks. A graceful daemon
+   shutdown fires that signal too and would also read as `cancelled`; today
+   only a debug command does that.
+3. **Cancel ordering.** `cancel_processing_message` publishes its
+   `TurnStopped { Interrupted }` notice *before* signalling the turn (by
+   design, so a cooperative finish cannot race it). A cancelled turn's stream is
+   therefore `TurnStarted … TurnStopped … TurnEnded(cancelled) … Done`.
+   `TurnEnded` still precedes the terminal `Done`/`Error` and
+   `SoftInterruptQueue`; moving it before the pre-cancel notice would mean
+   changing existing cancel behaviour.
+4. **Wire field names.** `TurnOrigin` uses snake_case on the daemon wire
+   (`client_instance_id`, `request_id`) like every other protocol field, while
+   the ACP `_jcode/turn` extension uses the spec's camelCase
+   (`clientInstanceId`).
+5. **Peer terminal events with colliding ids.** The spec says to ignore a
+   `Done`/`Error` whose id is not pending. That is not sufficient on its own: a
+   peer turn's completion carries the *originator's* connection-local id, which
+   can collide with one of ours. The router remembers the last peer turn's
+   request id and consumes the first terminal event carrying it, so a peer
+   completion cannot finish this adapter's prompt while the adapter's own
+   terminal event with the same id still lands.
+6. **`session/list` liveness** comes from the `all_sessions` snapshot in the
+   `History` events the adapter already receives, not from a new daemon
+   request (Open question 1). `_meta.jcode.live` is omitted until such a
+   snapshot exists.
+7. **Headless swarm workers are not excluded** from `session/list`. The
+   persisted catalog cannot distinguish them from any other stored session, and
+   the daemon protocol exposes no cheap headless flag to the adapter (Open
+   question 1). This is the one piece of D5 left unimplemented.
+8. **Shared catalog helper location.** The stored-id/metadata/title loading
+   lives in a new public module
+   `jcode_harness_api_server::session_catalog`, not inside `translate.rs`,
+   because the ACP adapter lives in the `jcode` binary crate and must call it.
+   `translate.rs`'s `list_sessions` handler now uses
+   `load_session_metadata`/`stored_session_ids`/`saved_session_ids` from that
+   module instead of its own copy.
+9. **Mid-turn attach ordering.** `History.active_turn` opens the peer turn as
+   soon as the attach `History` arrives, so `_jcode/turn` `started` can precede
+   the `session/load` response on the wire. Buffering it until after the
+   response would instead drop peer stream events that arrive in between.
+10. **Prompts that produce no turn.** A `session/prompt` that never streams a
+    model turn (a slash command, `RunSubagent`) has no lifecycle pair, so its
+    `Done`/`Error` is routed to the prompt by pending request id in every mode,
+    not only on legacy daemons.
+11. **No new dependency for randomness.** `client_instance_id` (`acp-<uuid
+    v4>`) and the request-id base are derived from `RandomState` hashing, which
+    is OS-seeded, rather than adding `rand`/`uuid` to the binary.
+12. **No debug assertion for unwrapped turn paths.** The spec suggested one;
+    it would fire for agent-internal turns (`jcode run`, agent tests) that never
+    touch the daemon stream. Coverage is instead the two-connection daemon test
+    (ordering, non-nesting, per-origin request ids) plus the fact that the
+    events are emitted from one shared helper at four entry points.
