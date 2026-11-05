@@ -742,14 +742,15 @@ impl AcpRuntime {
             }
         };
         if let Some(session) = self.sessions.lock().await.remove(&session_id) {
-            // Closing the ACP view must not interrupt a turn another client
-            // started: `Cancel` is session-wide. Only a prompt this adapter
-            // still owns needs cancelling, and that is exactly when the
-            // prompt loop is waiting or queued behind a peer.
-            if should_cancel_on_close(
-                session.prompt_running.load(Ordering::SeqCst),
-                session.active_prompt_id.lock().await.is_some(),
-            ) {
+            // `Cancel` is session-wide: it interrupts whatever turn holds the
+            // daemon's agent, including a peer's. Closing this view must not do
+            // that, so cancel only when our *own* turn is running. A prompt
+            // that is merely queued behind a peer's turn leaves the agent to
+            // that peer, and closing the connection is enough: the daemon's
+            // disconnect handling ends or detaches our queued turn without
+            // touching the peer's.
+            let own_turn_running = session.router.lock().await.own_turn_running();
+            if should_cancel_on_close(own_turn_running) {
                 let cancel_id = session.next_id();
                 let _ = session.send(&Request::Cancel { id: cancel_id }).await;
             }
@@ -1900,10 +1901,11 @@ fn random_uuid_v4() -> String {
 /// Whether closing an ACP session should send a session-wide `Cancel`.
 ///
 /// `Cancel` interrupts whatever turn is running in the daemon session, so it is
-/// only appropriate when the turn belongs to this adapter. Closing a view of a
-/// session another client is driving must leave that turn alone.
-fn should_cancel_on_close(prompt_running: bool, has_active_prompt: bool) -> bool {
-    prompt_running || has_active_prompt
+/// only appropriate when this adapter's own turn is running. A prompt that is
+/// only queued behind a peer's turn does not qualify: the peer owns the agent,
+/// and closing the connection already ends or detaches our queued prompt.
+fn should_cancel_on_close(own_turn_running: bool) -> bool {
+    own_turn_running
 }
 
 async fn cleanup_prompt_state(session: &DaemonSession) {
@@ -3099,14 +3101,42 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_view_only_cancels_its_own_prompt() {
+    fn closing_a_view_only_cancels_a_running_own_turn() {
         assert!(
-            !should_cancel_on_close(false, false),
-            "closing a view of a peer's turn must not cancel it"
+            !should_cancel_on_close(false),
+            "closing a view of a peer's turn must not cancel it, even with a              prompt queued behind it"
         );
-        assert!(should_cancel_on_close(true, true));
-        assert!(should_cancel_on_close(true, false));
-        assert!(should_cancel_on_close(false, true));
+        assert!(
+            should_cancel_on_close(true),
+            "our own running turn is cancelled on close"
+        );
+    }
+
+    #[test]
+    fn a_queued_prompt_is_not_a_running_own_turn() {
+        // A peer's turn is running; our prompt is queued behind it.
+        let mut router = RouterState::new("acp-test/0", "session-1");
+        router.route(
+            serde_json::from_value(serde_json::json!({
+                "type": "history",
+                "id": 1,
+                "session_id": "session-1",
+                "messages": [],
+                "server_features": ["turn_lifecycle"],
+            }))
+            .expect("history decodes"),
+        );
+        let _prompt = router.register(77, PendingKind::Prompt);
+        router.route(ServerEvent::TurnStarted {
+            turn_id: "peer-turn".to_string(),
+            origin: TurnOrigin::client(Some("other-client".to_string()), 5),
+            user_content: Some("peer prompt".to_string()),
+        });
+        assert!(
+            !router.own_turn_running(),
+            "a queued prompt behind a peer's turn is not our running turn"
+        );
+        assert!(!should_cancel_on_close(router.own_turn_running()));
     }
 
     #[test]

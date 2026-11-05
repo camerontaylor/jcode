@@ -154,6 +154,13 @@ impl RouterState {
         self.live_sessions.as_deref()
     }
 
+    /// Whether this adapter's own turn is running right now. A prompt that is
+    /// only queued behind a peer's turn is *not* running: nothing of ours holds
+    /// the daemon's agent, so a session-wide cancel would hit the peer.
+    pub(super) fn own_turn_running(&self) -> bool {
+        self.own_turn.is_some()
+    }
+
     pub(super) fn supports_turn_lifecycle(&self) -> bool {
         self.features
             .iter()

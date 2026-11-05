@@ -142,6 +142,15 @@ impl AcpClient {
         }
     }
 
+    /// Send a request without waiting for its response, for calls whose answer
+    /// cannot arrive (a prompt that is closed before it runs).
+    async fn send_request(&mut self, method: &str, params: serde_json::Value) -> Result<u64> {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(json_request(id, method, params)).await?;
+        Ok(id)
+    }
+
     /// Wait for a notification matching `predicate`, reading more messages as
     /// needed. Non-matching notifications are buffered for later checks.
     async fn wait_for_notification(
@@ -255,7 +264,7 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
     let debug_socket_path = runtime_dir.join("jcode-debug.sock");
 
     let words: VecDeque<String> = [
-        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
     ]
     .into_iter()
     .map(str::to_string)
@@ -575,6 +584,68 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
                 .any(|event| matches!(event, ServerEvent::Done { .. })),
             "the daemon still serves the session after the ACP view closed"
         );
+
+        // --- Scenario 4b: a prompt queued behind a peer's turn, then a close.
+        // The queued prompt must not drag a session-wide cancel into the peer's
+        // running turn.
+        let mut queued_client = AcpClient::spawn()?;
+        queued_client
+            .request("initialize", serde_json::json!({ "protocolVersion": 1 }))
+            .await?;
+        queued_client
+            .request(
+                "session/load",
+                serde_json::json!({ "sessionId": session_id, "cwd": cwd }),
+            )
+            .await?;
+        queued_client.take_notifications();
+
+        let message_id = other
+            .send_message("Reply with exactly the word: hotel")
+            .await?;
+        queued_client
+            .wait_for_notification(|notification| {
+                notification["method"] == "session/update"
+                    && notification["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+                    && notification["params"]["update"]["content"]["text"] == "hotel"
+            })
+            .await?;
+        // Our prompt is now queued behind the peer's running turn.
+        queued_client
+            .send_request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "prompt": [{ "type": "text", "text": "Reply with exactly the word: india" }],
+                }),
+            )
+            .await?;
+        let closed = queued_client
+            .request(
+                "session/close",
+                serde_json::json!({ "sessionId": session_id }),
+            )
+            .await?;
+        assert!(closed.is_object(), "session/close answers: {closed}");
+
+        let peer_events = collect_until_done_unix(&mut other, message_id).await?;
+        assert!(
+            !peer_events.iter().any(|event| matches!(
+                event,
+                ServerEvent::TurnStopped {
+                    reason: jcode::protocol::TurnStopReason::Interrupted,
+                    ..
+                }
+            )),
+            "closing with a queued prompt must not cancel the peer's turn: {peer_events:?}"
+        );
+        assert!(
+            peer_events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::TextDelta { text } if text == "hotel")),
+            "the peer's turn completed normally"
+        );
+        queued_client.shutdown().await;
 
         acp.shutdown().await;
         Ok::<(), anyhow::Error>(())
