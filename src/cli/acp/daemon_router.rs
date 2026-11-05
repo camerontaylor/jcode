@@ -196,6 +196,7 @@ impl RouterState {
         self.close_peer_turn(
             TurnEndStatus::Cancelled,
             Some("The connection closed before the turn ended.".to_string()),
+            false,
         )
     }
 
@@ -265,7 +266,7 @@ impl RouterState {
                             ServerEvent::Error { message, .. } => Some(message.clone()),
                             _ => None,
                         };
-                        actions.extend(self.close_peer_turn(status, message));
+                        actions.extend(self.close_peer_turn(status, message, true));
                     }
                     return actions;
                 }
@@ -312,6 +313,7 @@ impl RouterState {
                 actions.extend(self.close_peer_turn(
                     TurnEndStatus::Cancelled,
                     Some("The turn ended without a lifecycle end event.".to_string()),
+                    false,
                 ));
                 if self.is_own_origin(&origin) {
                     self.own_turn = Some(OwnTurn {
@@ -344,12 +346,11 @@ impl RouterState {
                     .as_ref()
                     .is_some_and(|turn| turn.turn_id == turn_id)
                 {
-                    self.peer_turn = None;
-                    actions.push(RouteAction::PeerTurnEnded {
-                        turn_id,
-                        status,
-                        message,
-                    });
+                    // A cancelled turn's terminal `done` is delivered only to the
+                    // connection that cancelled it, so this connection will never
+                    // see one.
+                    let terminal_pending = status != TurnEndStatus::Cancelled;
+                    actions.extend(self.close_peer_turn(status, message, terminal_pending));
                 }
             }
             // Superseded by `turn_started.user_content`.
@@ -400,14 +401,26 @@ impl RouterState {
     }
 
     /// Close the peer turn that is currently open, if any.
+    ///
+    /// `terminal_pending` says whether the daemon can still deliver that turn's
+    /// own terminal `done`/`error` to this connection. When it cannot — the turn
+    /// was closed by synthesis, or its `turn_ended` says it was cancelled, which
+    /// the daemon reports only to the cancelling connection — the turn's request
+    /// id marker is dropped. Otherwise a later terminal event reusing that id
+    /// would be swallowed as if it belonged to this dead peer turn.
     fn close_peer_turn(
         &mut self,
         status: TurnEndStatus,
         message: Option<String>,
+        terminal_pending: bool,
     ) -> Vec<RouteAction> {
         let Some(peer) = self.peer_turn.take() else {
             return Vec::new();
         };
+        if !terminal_pending {
+            self.peer_terminals
+                .retain(|marker| marker.turn_id != peer.turn_id);
+        }
         vec![RouteAction::PeerTurnEnded {
             turn_id: peer.turn_id,
             status,
@@ -969,6 +982,55 @@ mod tests {
         // Our own terminal event still lands.
         router.route(ServerEvent::Done { id: 77 });
         assert!(saw_done(&drain(&mut prompt), 77));
+    }
+
+    /// A peer turn that is closed by synthesis will never send its terminal
+    /// event, so its id marker must not survive to swallow a later terminal
+    /// event that reuses the id.
+    #[test]
+    fn a_synthesised_peer_end_clears_its_terminal_marker() {
+        let mut router = lifecycle_router();
+        // The peer turn starts and never ends; the next turn (ours) starts.
+        router.route(turn_started("t1", peer(77), Some("peer prompt")));
+        let mut prompt = router.register(77, PendingKind::Prompt);
+        let actions = router.route(turn_started("t2", ours(77), Some("mine")));
+        assert!(
+            matches!(actions.as_slice(), [RouteAction::PeerTurnEnded { .. }]),
+            "the stale peer turn is closed: {actions:?}"
+        );
+
+        router.route(delta("own answer"));
+        router.route(ServerEvent::Done { id: 77 });
+        let events = drain(&mut prompt);
+        assert!(
+            saw_done(&events, 77),
+            "the dead peer turn must not swallow our own done: {events:?}"
+        );
+    }
+
+    /// A cancelled peer turn reports its terminal event only to the connection
+    /// that cancelled it, so this connection must not keep its marker.
+    #[test]
+    fn an_aborted_peer_turn_does_not_swallow_a_later_terminal_with_its_id() {
+        let mut router = lifecycle_router();
+        router.route(turn_started("t1", peer(77), Some("peer prompt")));
+        let actions = router.route(turn_ended("t1", TurnEndStatus::Cancelled));
+        assert!(
+            matches!(actions.as_slice(), [RouteAction::PeerTurnEnded { .. }]),
+            "the cancelled peer turn closes: {actions:?}"
+        );
+
+        // Our own prompt reuses the connection-local id.
+        let mut prompt = router.register(77, PendingKind::Prompt);
+        router.route(turn_started("t2", ours(77), Some("mine")));
+        router.route(delta("own answer"));
+        router.route(ServerEvent::Done { id: 77 });
+        let events = drain(&mut prompt);
+        assert_eq!(texts(&events), vec!["own answer".to_string()]);
+        assert!(
+            saw_done(&events, 77),
+            "the aborted peer turn's marker is gone: {events:?}"
+        );
     }
 
     /// Closing the connection fails its waiters, refuses new ones, and ends a
