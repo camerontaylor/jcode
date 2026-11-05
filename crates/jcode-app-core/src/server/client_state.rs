@@ -379,10 +379,7 @@ pub(super) async fn handle_get_model_catalog(
         activity: None,
         side_panel: Default::default(),
         applets: Default::default(),
-        server_features: crate::protocol::SERVER_FEATURES
-            .iter()
-            .map(|feature| feature.to_string())
-            .collect(),
+        server_features: crate::protocol::server_features(),
         active_turn: crate::turn_lifecycle_registry::active_turn(session_id),
     };
     let json = encode_event(&event);
@@ -801,10 +798,7 @@ async fn send_history_from_persisted_session(
         activity,
         side_panel,
         applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
-        server_features: crate::protocol::SERVER_FEATURES
-            .iter()
-            .map(|feature| feature.to_string())
-            .collect(),
+        server_features: crate::protocol::server_features(),
         active_turn: crate::turn_lifecycle_registry::active_turn(session_id),
     };
 
@@ -1107,10 +1101,7 @@ async fn send_history_with_guard(
         activity,
         side_panel,
         applets,
-        server_features: crate::protocol::SERVER_FEATURES
-            .iter()
-            .map(|feature| feature.to_string())
-            .collect(),
+        server_features: crate::protocol::server_features(),
         active_turn: crate::turn_lifecycle_registry::active_turn(session_id),
     };
     let build_ms = build_start.elapsed().as_millis();

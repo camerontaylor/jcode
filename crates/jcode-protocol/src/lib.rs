@@ -354,7 +354,7 @@ mod wire;
 pub use wire::{AccountUsageSnapshot, Request, ServerEvent};
 pub use wire::{
     ActiveTurn, SERVER_FEATURE_TURN_LIFECYCLE, SERVER_FEATURES, TurnEndStatus, TurnOrigin,
-    TurnOriginKind,
+    TurnOriginKind, server_features,
 };
 pub use wire::{SessionToolConfig, SessionToolDefinition};
 

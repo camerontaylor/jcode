@@ -69,6 +69,15 @@ pub const SERVER_FEATURE_TURN_LIFECYCLE: &str = "turn_lifecycle";
 /// rather than on a version comparison.
 pub const SERVER_FEATURES: &[&str] = &[SERVER_FEATURE_TURN_LIFECYCLE];
 
+/// [`SERVER_FEATURES`] as the wire field wants it. Every `History` the daemon
+/// builds advertises the same list.
+pub fn server_features() -> Vec<String> {
+    SERVER_FEATURES
+        .iter()
+        .map(|feature| (*feature).to_string())
+        .collect()
+}
+
 /// Who started a turn. Emitted with [`ServerEvent::TurnStarted`] so every
 /// attached client can tell its own turns from a peer's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
