@@ -984,6 +984,80 @@ mod tests {
         assert!(saw_done(&drain(&mut prompt), 77));
     }
 
+    /// The real cancel path, as the daemon emits it: the cancelling connection
+    /// gets the interrupt notice, the turn's own terminal `done` (a cooperative
+    /// stop can beat the grace period), the cancel path's `interrupted` + `done`,
+    /// and the relayed `turn_ended` somewhere in that sequence. A peer gets the
+    /// interrupt notice and the relayed end, never the canceller's `done`.
+    ///
+    /// Both routers must end in a consistent state with nothing misrouted. The
+    /// daemon-side test of the same path is
+    /// `server::client_lifecycle::turn_lifecycle_tests::cancelled_turn_relays_its_end_to_every_attachment`.
+    #[test]
+    fn the_cancel_path_leaves_both_routers_consistent() {
+        // The cancelling adapter's connection.
+        let mut canceller = lifecycle_router();
+        let mut prompt = canceller.register(31, PendingKind::Prompt);
+        canceller.route(turn_started("t1", ours(31), Some("cancel me")));
+        canceller.route(delta("streaming"));
+        let actions = canceller.route(ServerEvent::TurnStopped {
+            reason: crate::protocol::TurnStopReason::Interrupted,
+            message: "The turn was interrupted by a cancellation request.".to_string(),
+            provider_stop_reason: None,
+        });
+        assert!(actions.is_empty(), "own turn events stay on the prompt");
+        canceller.route(turn_ended("t1", TurnEndStatus::Cancelled));
+        canceller.route(ServerEvent::Done { id: 31 });
+        canceller.route(ServerEvent::Interrupted);
+        // The cancel path's own terminal for the same request id.
+        canceller.route(ServerEvent::Done { id: 31 });
+
+        let events = drain(&mut prompt);
+        assert_eq!(texts(&events), vec!["streaming".to_string()]);
+        assert!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ServerEvent::Done { .. }))
+                .count()
+                == 2,
+            "the prompt receives the daemon's two terminals in order: {events:?}"
+        );
+        assert!(!canceller.own_turn_running(), "the turn is closed");
+
+        // A peer adapter attached to the same session.
+        let mut peer_router = lifecycle_router();
+        let mut peer_prompt = peer_router.register(90, PendingKind::Prompt);
+        peer_router.route(turn_started("t1", peer(31), Some("cancel me")));
+        peer_router.route(delta("streaming"));
+        let actions = peer_router.route(ServerEvent::TurnStopped {
+            reason: crate::protocol::TurnStopReason::Interrupted,
+            message: "The turn was interrupted by a cancellation request.".to_string(),
+            provider_stop_reason: None,
+        });
+        assert!(
+            matches!(actions.as_slice(), [RouteAction::PeerTurnEvent(_)]),
+            "the interrupt notice is mirrored inside the peer turn: {actions:?}"
+        );
+        let actions = peer_router.route(turn_ended("t1", TurnEndStatus::Cancelled));
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [RouteAction::PeerTurnEnded {
+                    status: TurnEndStatus::Cancelled,
+                    ..
+                }]
+            ),
+            "the relayed end closes the peer turn exactly once: {actions:?}"
+        );
+        // The peer never sees the canceller's connection-local terminal, and a
+        // stray one is not misrouted into its own prompt.
+        assert!(peer_router.route(ServerEvent::Done { id: 31 }).is_empty());
+        assert!(
+            drain(&mut peer_prompt).is_empty(),
+            "nothing lands on a prompt that did not own the turn"
+        );
+    }
+
     /// A peer turn that is closed by synthesis will never send its terminal
     /// event, so its id marker must not survive to swallow a later terminal
     /// event that reuses the id.

@@ -294,6 +294,20 @@ async fn read_until(
     }
 }
 
+/// Read events until `predicate` accepts everything read so far.
+async fn read_until_all(
+    rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
+    predicate: impl Fn(&[ServerEvent]) -> bool,
+) -> Vec<ServerEvent> {
+    let mut events = Vec::new();
+    loop {
+        events.push(next_event(rx).await);
+        if predicate(&events) {
+            return events;
+        }
+    }
+}
+
 async fn next_event(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> ServerEvent {
     tokio::time::timeout(Duration::from_secs(10), rx.recv())
         .await
@@ -712,6 +726,147 @@ async fn panicking_turn_reports_a_failed_end_to_every_attachment() {
     if let Some(handle) = task.take() {
         let _ = handle.await;
     }
+    assert_eq!(
+        crate::turn_lifecycle_registry::active_turn(&harness.session_id),
+        None
+    );
+}
+
+/// The real cancel path: the cancelling connection gets its direct
+/// `Interrupted`/`Done` while the relayed `turn_ended` arrives through the
+/// per-turn forwarder, so the two can arrive in either order. Every attachment
+/// must still learn the turn ended, and the peer must not see the canceller's
+/// terminal `done`.
+#[tokio::test]
+async fn cancelled_turn_relays_its_end_to_every_attachment() {
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let mut harness = TurnHarness::with_provider(
+        "session_turn_lifecycle_cancel",
+        &["conn-a", "conn-b"],
+        Arc::new(HangingStreamProvider),
+    )
+    .await;
+    let mut origin_rx = harness.take_receiver(0);
+    let mut peer_rx = harness.take_receiver(1);
+
+    let mut client_is_processing = false;
+    let mut message_id = None;
+    let mut processing_session_id = None;
+    let mut task = None;
+    harness
+        .start_prompt(
+            0,
+            31,
+            "cancel me",
+            Some("conn-a".to_string()),
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut message_id,
+                session_id: &mut processing_session_id,
+                task: &mut task,
+            },
+        )
+        .await;
+
+    for rx in [&mut origin_rx, &mut peer_rx] {
+        let events = read_until(rx, |event| matches!(event, ServerEvent::TextDelta { .. })).await;
+        assert!(matches!(
+            events.first(),
+            Some(ServerEvent::TurnStarted { .. })
+        ));
+    }
+
+    // Cancel exactly as the connection loop does for `Request::Cancel`.
+    let control = SessionControlHandle::cancel_only(
+        harness.session_id.clone(),
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+        InterruptSignal::new(),
+    );
+    let origin_tx = harness.senders[0].clone();
+    cancel_processing_message(
+        &mut ProcessingState {
+            client_is_processing: &mut client_is_processing,
+            message_id: &mut message_id,
+            session_id: &mut processing_session_id,
+            task: &mut task,
+        },
+        &control,
+        &origin_tx,
+        &SwarmStatusRefs {
+            members: &harness.swarm_members,
+            swarms_by_id: &harness.swarms_by_id,
+            event_history: &harness.event_history,
+            event_counter: &harness.event_counter,
+            event_tx: &harness.swarm_event_tx,
+        },
+        Some(31),
+        None,
+    )
+    .await;
+
+    // The cancelling connection: interrupted notice, its own terminal `done`,
+    // and the relayed `turn_ended` (either order).
+    // The turn can stop cooperatively before the cancel path's grace period
+    // expires, so this connection legitimately sees the turn's own terminal
+    // `done` and then the cancel path's `interrupted` + `done`. The relayed
+    // `turn_ended` can arrive at any point after the interrupt notice.
+    let origin_events = read_until_all(&mut origin_rx, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::Done { id } if *id == 31))
+            && events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::TurnEnded { .. }))
+            && events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Interrupted))
+    })
+    .await;
+    assert!(
+        origin_events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::TurnStopped { .. })),
+        "the cancelling connection is told the turn stopped: {origin_events:?}"
+    );
+    let ended = origin_events
+        .iter()
+        .find(|event| matches!(event, ServerEvent::TurnEnded { .. }))
+        .expect("the relayed turn end arrives");
+    assert!(
+        matches!(
+            ended,
+            ServerEvent::TurnEnded {
+                status: crate::protocol::TurnEndStatus::Cancelled,
+                ..
+            }
+        ),
+        "a cancelled turn reports a cancelled end: {ended:?}"
+    );
+
+    // The peer: the interrupt notice and the relayed end, but never the
+    // canceller's terminal `done`.
+    let peer_events = read_until(&mut peer_rx, |event| {
+        matches!(event, ServerEvent::TurnEnded { .. })
+    })
+    .await;
+    assert!(
+        peer_events.iter().any(|event| matches!(
+            event,
+            ServerEvent::TurnStopped {
+                reason: crate::protocol::TurnStopReason::Interrupted,
+                ..
+            }
+        )),
+        "the peer is told the turn was interrupted: {peer_events:?}"
+    );
+    assert!(
+        !peer_events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::Done { id } if *id == 31)),
+        "a peer never receives the canceller's connection-local done: {peer_events:?}"
+    );
+
     assert_eq!(
         crate::turn_lifecycle_registry::active_turn(&harness.session_id),
         None
