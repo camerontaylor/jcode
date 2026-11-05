@@ -2069,6 +2069,7 @@ pub(super) async fn handle_client(
                     subagent_type,
                     model,
                     session_id,
+                    current_client_instance_id.clone(),
                     &agent,
                     &client_event_tx,
                 );
