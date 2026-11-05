@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 //! Daemon turn lifecycle tests: two connections on one session.
 //!
 //! These drive the real server turn path (`start_processing_message` →

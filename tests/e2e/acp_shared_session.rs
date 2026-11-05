@@ -334,8 +334,8 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
         );
         // Wire order: the bracket opens, then the prompt and the stream, then it
         // closes.
-        let started_at = notification_position(&mirrored, &started);
-        let ended_at = notification_position(&mirrored, &ended);
+        let started_at = notification_position(&mirrored, started);
+        let ended_at = notification_position(&mirrored, ended);
         let text_at = mirrored
             .iter()
             .position(|notification| {

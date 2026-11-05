@@ -83,6 +83,10 @@ pub(super) enum SessionStateChange {
 
 /// What the adapter must render for a peer turn or a session-state change.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "routing actions carry wire events unchanged; boxing them would only add allocation per streamed event"
+)]
 pub(super) enum RouteAction {
     PeerTurnStarted {
         turn_id: String,
