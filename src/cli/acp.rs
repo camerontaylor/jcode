@@ -87,11 +87,17 @@ impl JsonRpcMessage {
 struct DaemonSession {
     writer: Mutex<WriteHalf>,
     next_request_id: AtomicU64,
-    /// Event routing state, shared with this connection's reader task.
-    router: Mutex<RouterState>,
+    /// Client instance id of *this connection*: `{process}/{n}`. Two sessions
+    /// in one adapter process must not look like each other's peer, so the
+    /// per-process id is not enough.
+    instance_id: String,
+    /// Event routing state, shared with this connection's reader task. The
+    /// reader owns clones of the shared state, never the session itself, so
+    /// dropping the session really does stop reading the daemon.
+    router: Arc<Mutex<RouterState>>,
     active_prompt_id: Mutex<Option<u64>>,
     prompt_running: AtomicBool,
-    ui_state: Mutex<SessionUiState>,
+    ui_state: Arc<Mutex<SessionUiState>>,
     /// Workspace root reported by the ACP client, used to compose the
     /// project-local skill overlay for slash-skill resolution.
     working_dir: Option<PathBuf>,
@@ -211,20 +217,26 @@ impl DaemonSession {
         session_id: impl Into<String>,
         working_dir: Option<PathBuf>,
         writer: WriteHalf,
-        instance_id: &str,
+        instance_id: String,
         next_request_id: u64,
     ) -> Self {
         Self {
             writer: Mutex::new(writer),
             next_request_id: AtomicU64::new(next_request_id),
-            router: Mutex::new(RouterState::new(instance_id, session_id)),
+            instance_id: instance_id.clone(),
+            router: Arc::new(Mutex::new(RouterState::new(instance_id, session_id))),
             active_prompt_id: Mutex::new(None),
             prompt_running: AtomicBool::new(false),
-            ui_state: Mutex::new(SessionUiState::default()),
+            ui_state: Arc::new(Mutex::new(SessionUiState::default())),
             working_dir,
             active_skill: Mutex::new(None),
             reader_task: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Client instance id reported to the daemon for this connection.
+    fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// Effective skills for this session: global skills plus the workspace's
@@ -281,7 +293,11 @@ impl DaemonSession {
     /// every event. A single undecodable line never ends the session: a newer
     /// daemon's event that this build does not know is skipped and logged.
     fn spawn_reader(self: &Arc<Self>, reader: ReadHalf, acp: AcpRuntime) {
-        let session = Arc::clone(self);
+        // Only shared state, never `Arc<DaemonSession>`: a task holding the
+        // session would keep it (and its socket) alive forever, because the
+        // session's `Drop` is what aborts this task.
+        let router = Arc::clone(&self.router);
+        let ui_state = Arc::clone(&self.ui_state);
         let handle = tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
@@ -299,10 +315,10 @@ impl DaemonSession {
                 let Some(event) = decode_daemon_line(&line) else {
                     continue;
                 };
-                let actions = session.router.lock().await.route(event);
+                let actions = router.lock().await.route(event);
                 for action in actions {
                     if let Err(err) = acp
-                        .apply_route_action(&session, action, &mut peer_mapper)
+                        .apply_route_action(&router, &ui_state, action, &mut peer_mapper)
                         .await
                     {
                         crate::logging::debug(&format!("acp: dropping route action: {err:#}"));
@@ -310,8 +326,17 @@ impl DaemonSession {
                 }
             }
             // Release every waiter so a dead connection fails prompts instead
-            // of leaving them blocked forever.
-            session.router.lock().await.close();
+            // of leaving them blocked forever, and close any peer turn still
+            // open so the client does not keep a running turn.
+            let closing = router.lock().await.close();
+            for action in closing {
+                if let Err(err) = acp
+                    .apply_route_action(&router, &ui_state, action, &mut peer_mapper)
+                    .await
+                {
+                    crate::logging::debug(&format!("acp: dropping closing action: {err:#}"));
+                }
+            }
         });
         if let Ok(mut slot) = self.reader_task.lock() {
             *slot = Some(handle);
@@ -345,6 +370,9 @@ struct AcpRuntime {
     /// Randomized request-id base. A peer's `done`/`error` carries the
     /// *originator's* connection-local id, and TUI ids start near zero.
     request_id_base: u64,
+    /// Per-connection suffix for `instance_id`, so two sessions in one adapter
+    /// process never mistake each other's turns for their own.
+    connection_seq: Arc<AtomicU64>,
 }
 
 impl AcpRuntime {
@@ -363,6 +391,7 @@ impl AcpRuntime {
             provider_profile,
             instance_id: format!("acp-{}", random_uuid_v4()),
             request_id_base: random_request_id_base(),
+            connection_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -672,8 +701,17 @@ impl AcpRuntime {
             }
         };
         if let Some(session) = self.sessions.lock().await.remove(&session_id) {
-            let cancel_id = session.next_id();
-            let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+            // Closing the ACP view must not interrupt a turn another client
+            // started: `Cancel` is session-wide. Only a prompt this adapter
+            // still owns needs cancelling, and that is exactly when the
+            // prompt loop is waiting or queued behind a peer.
+            if should_cancel_on_close(
+                session.prompt_running.load(Ordering::SeqCst),
+                session.active_prompt_id.lock().await.is_some(),
+            ) {
+                let cancel_id = session.next_id();
+                let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+            }
         }
         self.write_result(id, json!({})).await?;
         Ok(())
@@ -919,11 +957,12 @@ impl AcpRuntime {
         working_dir: Option<PathBuf>,
     ) -> Result<Arc<DaemonSession>> {
         let (reader, writer) = self.connect_daemon().await?;
+        let connection = self.connection_seq.fetch_add(1, Ordering::Relaxed);
         let session = Arc::new(DaemonSession::new(
             session_id,
             working_dir,
             writer,
-            &self.instance_id,
+            connection_instance_id(&self.instance_id, connection),
             self.request_id_base,
         ));
         session.spawn_reader(reader, self.clone());
@@ -946,7 +985,7 @@ impl AcpRuntime {
                 working_dir: Some(cwd.display().to_string()),
                 selfdev: None,
                 target_session_id: None,
-                client_instance_id: Some(self.instance_id.clone()),
+                client_instance_id: Some(session.instance_id().to_string()),
                 client_has_local_history: false,
                 history_base: None,
                 allow_session_takeover: false,
@@ -998,7 +1037,7 @@ impl AcpRuntime {
                 working_dir: Some(cwd.display().to_string()),
                 selfdev: None,
                 target_session_id: Some(target_session_id.clone()),
-                client_instance_id: Some(self.instance_id.clone()),
+                client_instance_id: Some(session.instance_id().to_string()),
                 client_has_local_history: false,
                 history_base: None,
                 allow_session_takeover: false,
@@ -1036,12 +1075,9 @@ impl AcpRuntime {
                 ServerEvent::Error { id, message, .. } if id == resume_id => {
                     anyhow::bail!(message);
                 }
-                other => {
-                    if self.profile.is_extended() {
-                        self.write_jcode_extension_event(&target_session_id, &other)
-                            .await?;
-                    }
-                }
+                // Every non-reply event is routed (and rendered) by the
+                // connection reader, so only replies can reach this waiter.
+                _ => {}
             }
         }
 
@@ -1481,11 +1517,12 @@ impl AcpRuntime {
     /// Render one routing action produced by the connection's reader.
     async fn apply_route_action(
         &self,
-        session: &Arc<DaemonSession>,
+        router: &Arc<Mutex<RouterState>>,
+        ui_state: &Arc<Mutex<SessionUiState>>,
         action: RouteAction,
         peer_mapper: &mut Option<EventMapper>,
     ) -> Result<()> {
-        let session_id = session.session_id().await;
+        let session_id = router.lock().await.session_id().to_string();
         match action {
             RouteAction::PeerTurnStarted {
                 turn_id,
@@ -1544,7 +1581,7 @@ impl AcpRuntime {
                 .await?;
             }
             RouteAction::SessionState(change) => {
-                self.apply_session_state(session, &session_id, change)
+                self.apply_session_state(ui_state, &session_id, change)
                     .await?;
             }
         }
@@ -1593,12 +1630,12 @@ impl AcpRuntime {
     /// through the same notifications this adapter uses for its own changes.
     async fn apply_session_state(
         &self,
-        session: &Arc<DaemonSession>,
+        ui_state: &Arc<Mutex<SessionUiState>>,
         session_id: &str,
         change: SessionStateChange,
     ) -> Result<()> {
         let config_options = {
-            let mut state = session.ui_state.lock().await;
+            let mut state = ui_state.lock().await;
             match change {
                 SessionStateChange::Model {
                     model,
@@ -1659,6 +1696,16 @@ impl AcpRuntime {
     }
 }
 
+/// Client instance id of one daemon connection.
+///
+/// The daemon reports the id in every turn origin, so it must be unique per
+/// connection, not per adapter process: a process that attaches the same
+/// session twice would otherwise recognise its other connection's turn as its
+/// own.
+fn connection_instance_id(process_instance_id: &str, connection: u64) -> String {
+    format!("{process_instance_id}/{connection}")
+}
+
 /// Wire name of a turn origin kind.
 fn turn_origin_kind(origin: &TurnOrigin) -> &'static str {
     match origin.kind {
@@ -1709,6 +1756,15 @@ fn random_uuid_v4() -> String {
         &hex[16..20],
         &hex[20..32]
     )
+}
+
+/// Whether closing an ACP session should send a session-wide `Cancel`.
+///
+/// `Cancel` interrupts whatever turn is running in the daemon session, so it is
+/// only appropriate when the turn belongs to this adapter. Closing a view of a
+/// session another client is driving must leave that turn alone.
+fn should_cancel_on_close(prompt_running: bool, has_active_prompt: bool) -> bool {
+    prompt_running || has_active_prompt
 }
 
 async fn cleanup_prompt_state(session: &DaemonSession) {
@@ -2767,6 +2823,27 @@ mod tests {
         let live = vec!["s-live".to_string()];
         let with = session_list_result(entries, None, None, Some(&live));
         assert_eq!(with["sessions"][0]["_meta"]["jcode"]["live"], true);
+    }
+
+    #[test]
+    fn closing_a_view_only_cancels_its_own_prompt() {
+        assert!(
+            !should_cancel_on_close(false, false),
+            "closing a view of a peer's turn must not cancel it"
+        );
+        assert!(should_cancel_on_close(true, true));
+        assert!(should_cancel_on_close(true, false));
+        assert!(should_cancel_on_close(false, true));
+    }
+
+    #[test]
+    fn each_connection_gets_its_own_instance_id() {
+        let first = connection_instance_id("acp-process", 0);
+        let second = connection_instance_id("acp-process", 1);
+        assert_eq!(first, "acp-process/0");
+        assert_eq!(second, "acp-process/1");
+        assert_ne!(first, second);
+        assert!(first.starts_with("acp-process/"));
     }
 
     #[test]

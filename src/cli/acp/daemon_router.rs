@@ -66,6 +66,13 @@ struct PeerTurn {
     turn_id: String,
 }
 
+/// A peer turn whose terminal `done`/`error` is still outstanding.
+#[derive(Debug, Clone)]
+struct PeerTerminal {
+    turn_id: String,
+    request_id: u64,
+}
+
 /// A session-wide state change another client caused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SessionStateChange {
@@ -111,10 +118,16 @@ pub(super) struct RouterState {
     pending: HashMap<u64, PendingRequest>,
     own_turn: Option<OwnTurn>,
     peer_turn: Option<PeerTurn>,
-    /// Request id of the peer turn that most recently ended. Its terminal
-    /// `done`/`error` carries the *originator's* connection-local id and must
-    /// not be mistaken for one of ours.
-    last_peer_request_id: Option<u64>,
+    /// Peer turns whose terminal `done`/`error` has not arrived yet, keyed by
+    /// the turn they belong to. A peer's terminal event carries the
+    /// *originator's* connection-local request id, which can collide with one
+    /// of ours, so the id alone is not enough: each entry expires when that
+    /// turn's own terminal event is consumed, or when one of our turns
+    /// completes (nothing older can still be outstanding in a useful way).
+    peer_terminals: Vec<PeerTerminal>,
+    /// Set once the connection is gone: no new waiter can be satisfied, and an
+    /// open peer turn is closed.
+    closed: bool,
 }
 
 impl RouterState {
@@ -127,7 +140,8 @@ impl RouterState {
             pending: HashMap::new(),
             own_turn: None,
             peer_turn: None,
-            last_peer_request_id: None,
+            peer_terminals: Vec::new(),
+            closed: false,
         }
     }
 
@@ -152,6 +166,11 @@ impl RouterState {
         kind: PendingKind,
     ) -> mpsc::UnboundedReceiver<ServerEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
+        if self.closed {
+            // The connection is gone; drop the sender so the caller fails
+            // immediately instead of waiting for an event that cannot arrive.
+            return rx;
+        }
         self.pending.insert(request_id, PendingRequest { kind, tx });
         rx
     }
@@ -160,10 +179,17 @@ impl RouterState {
         self.pending.remove(&request_id);
     }
 
-    /// Drop every waiter, so tasks blocked on a channel learn the connection
-    /// is gone instead of waiting forever.
-    pub(super) fn close(&mut self) {
+    /// Drop every waiter so tasks blocked on a channel learn the connection is
+    /// gone, and close any peer turn still open. Returns the actions the
+    /// adapter must still render (the peer turn's end).
+    pub(super) fn close(&mut self) -> Vec<RouteAction> {
+        self.closed = true;
         self.pending.clear();
+        self.peer_terminals.clear();
+        self.close_peer_turn(
+            TurnEndStatus::Cancelled,
+            Some("The connection closed before the turn ended.".to_string()),
+        )
     }
 
     fn prompt_request_id(&self) -> Option<u64> {
@@ -208,14 +234,34 @@ impl RouterState {
 
         if let Some(request_id) = reply_request_id(&event) {
             let terminal = matches!(event, ServerEvent::Done { .. } | ServerEvent::Error { .. });
-            // A peer turn's completion carries the *originator's*
-            // connection-local id, so it can collide with one of ours. Check
-            // the peer marker first: the peer's event is one of a pair, and
-            // consuming the marker leaves the next terminal event with this id
-            // (our own) to land on the prompt.
-            if terminal && self.last_peer_request_id == Some(request_id) {
-                self.last_peer_request_id = None;
-                return actions;
+            if terminal {
+                // A peer turn's completion carries the *originator's*
+                // connection-local id, so it can collide with one of ours.
+                // Consume the marker of the peer turn that owns this id; that
+                // also closes a peer turn which never reported its own end.
+                if let Some(index) = self
+                    .peer_terminals
+                    .iter()
+                    .position(|terminal| terminal.request_id == request_id)
+                {
+                    let marker = self.peer_terminals.remove(index);
+                    if self
+                        .peer_turn
+                        .as_ref()
+                        .is_some_and(|peer| peer.turn_id == marker.turn_id)
+                    {
+                        let status = match &event {
+                            ServerEvent::Error { .. } => TurnEndStatus::Failed,
+                            _ => TurnEndStatus::Completed,
+                        };
+                        let message = match &event {
+                            ServerEvent::Error { message, .. } => Some(message.clone()),
+                            _ => None,
+                        };
+                        actions.extend(self.close_peer_turn(status, message));
+                    }
+                    return actions;
+                }
             }
             if self.pending.contains_key(&request_id) {
                 if terminal
@@ -225,6 +271,10 @@ impl RouterState {
                         .is_some_and(|turn| turn.request_id == request_id)
                 {
                     self.own_turn = None;
+                    // Peer terminals still outstanding once one of our turns has
+                    // completed are stale: keeping them could swallow a later
+                    // terminal event that reuses the id.
+                    self.peer_terminals.clear();
                 }
                 self.deliver(request_id, event);
                 return actions;
@@ -248,16 +298,20 @@ impl RouterState {
                 origin,
                 user_content,
             } => {
+                // Turn pairs never nest, so a peer turn still open here never
+                // reported its end (an aborted or panicking peer). Close it
+                // before opening anything else, or the new turn's stream would
+                // be mirrored as that stale peer turn's output.
+                actions.extend(self.close_peer_turn(
+                    TurnEndStatus::Cancelled,
+                    Some("The turn ended without a lifecycle end event.".to_string()),
+                ));
                 if self.is_own_origin(&origin) {
-                    // Turn pairs never nest, so any peer turn marker still
-                    // pending is stale once our own turn starts.
-                    self.last_peer_request_id = None;
                     self.own_turn = Some(OwnTurn {
                         turn_id,
                         request_id: origin.request_id.unwrap_or_default(),
                     });
                 } else {
-                    self.last_peer_request_id = origin.request_id;
                     actions.extend(self.open_peer_turn(ActiveTurn {
                         turn_id,
                         origin,
@@ -306,6 +360,15 @@ impl RouterState {
     }
 
     fn open_peer_turn(&mut self, turn: ActiveTurn) -> Vec<RouteAction> {
+        // A `History` that reports our own running turn as active (a catalog
+        // reply during our prompt) must not be mirrored as a peer turn.
+        if self
+            .own_turn
+            .as_ref()
+            .is_some_and(|own| own.turn_id == turn.turn_id)
+        {
+            return Vec::new();
+        }
         if self
             .peer_turn
             .as_ref()
@@ -313,7 +376,12 @@ impl RouterState {
         {
             return Vec::new();
         }
-        self.last_peer_request_id = turn.origin.request_id;
+        if let Some(request_id) = turn.origin.request_id {
+            self.peer_terminals.push(PeerTerminal {
+                turn_id: turn.turn_id.clone(),
+                request_id,
+            });
+        }
         self.peer_turn = Some(PeerTurn {
             turn_id: turn.turn_id.clone(),
         });
@@ -321,6 +389,22 @@ impl RouterState {
             turn_id: turn.turn_id,
             origin: turn.origin,
             user_content: turn.user_content,
+        }]
+    }
+
+    /// Close the peer turn that is currently open, if any.
+    fn close_peer_turn(
+        &mut self,
+        status: TurnEndStatus,
+        message: Option<String>,
+    ) -> Vec<RouteAction> {
+        let Some(peer) = self.peer_turn.take() else {
+            return Vec::new();
+        };
+        vec![RouteAction::PeerTurnEnded {
+            turn_id: peer.turn_id,
+            status,
+            message,
         }]
     }
 
@@ -785,5 +869,161 @@ mod tests {
             drain(&mut reply).as_slice(),
             [ServerEvent::ModelChanged { id: 90, .. }]
         ));
+    }
+
+    /// A peer turn that never reported its end (an aborted or panicking peer)
+    /// must be closed before the next turn starts, or that turn's output is
+    /// mirrored as the stale peer's.
+    #[test]
+    fn peer_turn_that_never_ended_is_closed_by_the_next_turn() {
+        let mut router = lifecycle_router();
+        let actions = router.route(turn_started("t1", peer(5), Some("peer prompt")));
+        assert!(matches!(
+            actions.as_slice(),
+            [RouteAction::PeerTurnStarted { .. }]
+        ));
+        assert!(matches!(
+            router.route(delta("peer output")).as_slice(),
+            [RouteAction::PeerTurnEvent(_)]
+        ));
+
+        // The peer turn is aborted: no turn_ended ever arrives. Our own prompt
+        // is sent and its turn starts.
+        let mut prompt = router.register(78, PendingKind::Prompt);
+        let actions = router.route(turn_started("t2", ours(78), Some("mine")));
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [RouteAction::PeerTurnEnded {
+                    turn_id,
+                    status: TurnEndStatus::Cancelled,
+                    ..
+                }] if turn_id == "t1"
+            ),
+            "the stale peer turn is closed when the next turn starts: {actions:?}"
+        );
+
+        // The own turn's output goes to the prompt, not the peer mirror.
+        assert!(router.route(delta("own answer")).is_empty());
+        router.route(ServerEvent::Done { id: 78 });
+        let events = drain(&mut prompt);
+        assert_eq!(texts(&events), vec!["own answer".to_string()]);
+        assert!(saw_done(&events, 78));
+    }
+
+    /// The peer's terminal event closes a peer turn whose `turn_ended` never
+    /// arrived, and is consumed so it cannot complete our prompt.
+    #[test]
+    fn peer_terminal_closes_a_peer_turn_that_never_ended() {
+        let mut router = lifecycle_router();
+        let mut prompt = router.register(77, PendingKind::Prompt);
+        drain(&mut prompt);
+
+        router.route(turn_started("t1", peer(9), Some("peer prompt")));
+        let actions = router.route(ServerEvent::Done { id: 9 });
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [RouteAction::PeerTurnEnded {
+                    turn_id,
+                    status: TurnEndStatus::Completed,
+                    ..
+                }] if turn_id == "t1"
+            ),
+            "the peer's completion closes its turn: {actions:?}"
+        );
+        assert!(drain(&mut prompt).is_empty());
+    }
+
+    /// Our own turn can start before a peer turn's terminal event arrives (the
+    /// daemon reports the finished turn before it releases the agent lock). The
+    /// marker must survive that start so the peer's late terminal event still
+    /// cannot complete our prompt.
+    #[test]
+    fn peer_terminal_marker_survives_our_own_turn_start() {
+        let mut router = lifecycle_router();
+
+        // A peer turn runs and ends, but its terminal event is still in flight.
+        router.route(turn_started("t1", peer(77), Some("peer prompt")));
+        router.route(turn_ended("t1", TurnEndStatus::Completed));
+
+        // Our own prompt was queued behind it, so its turn starts first.
+        let mut prompt = router.register(77, PendingKind::Prompt);
+        router.route(turn_started("t2", ours(77), Some("mine")));
+        assert!(router.route(delta("own answer")).is_empty());
+
+        // The peer's terminal event for the colliding id must be consumed.
+        assert!(router.route(ServerEvent::Done { id: 77 }).is_empty());
+        assert!(
+            !saw_done(&drain(&mut prompt), 77),
+            "the peer's late done must not complete our prompt"
+        );
+
+        // Our own terminal event still lands.
+        router.route(ServerEvent::Done { id: 77 });
+        assert!(saw_done(&drain(&mut prompt), 77));
+    }
+
+    /// Closing the connection fails its waiters, refuses new ones, and ends a
+    /// peer turn that is still open.
+    #[test]
+    fn close_releases_waiters_and_ends_an_open_peer_turn() {
+        let mut router = lifecycle_router();
+        let mut waiter = router.register(70, PendingKind::Reply);
+        router.route(turn_started("t1", peer(5), Some("peer prompt")));
+
+        let actions = router.close();
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [RouteAction::PeerTurnEnded {
+                    turn_id,
+                    status: TurnEndStatus::Cancelled,
+                    ..
+                }] if turn_id == "t1"
+            ),
+            "closing ends the open peer turn: {actions:?}"
+        );
+        assert!(
+            matches!(
+                waiter.try_recv(),
+                Err(mpsc::error::TryRecvError::Disconnected)
+            ),
+            "waiters are released when the connection closes"
+        );
+
+        let mut late = router.register(71, PendingKind::Reply);
+        assert!(
+            matches!(
+                late.try_recv(),
+                Err(mpsc::error::TryRecvError::Disconnected)
+            ),
+            "a waiter registered after close fails immediately"
+        );
+    }
+
+    /// A `History` that reports our own running turn as active must not be
+    /// mirrored as a peer turn.
+    #[test]
+    fn history_active_turn_for_our_own_turn_is_not_mirrored() {
+        let mut router = lifecycle_router();
+        let _prompt = router.register(77, PendingKind::Prompt);
+        router.route(turn_started("t1", ours(77), Some("mine")));
+
+        let actions = router.route(history_event(
+            &["turn_lifecycle"],
+            Some(json!({
+                "turn_id": "t1",
+                "origin": {
+                    "kind": "client",
+                    "client_instance_id": OURS,
+                    "request_id": 77
+                },
+            })),
+        ));
+        assert!(
+            actions.is_empty(),
+            "our own active turn is not a peer turn: {actions:?}"
+        );
     }
 }

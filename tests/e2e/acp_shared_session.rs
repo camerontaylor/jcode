@@ -158,6 +158,15 @@ impl AcpClient {
         anyhow::bail!("no matching ACP notification arrived")
     }
 
+    /// Assert nothing arrives from the adapter for `window`.
+    async fn expect_silence(&mut self, window: Duration) -> Result<()> {
+        match tokio::time::timeout(window, self.read_message()).await {
+            Err(_) => Ok(()),
+            Ok(Ok(message)) => anyhow::bail!("adapter kept writing after session/close: {message}"),
+            Ok(Err(err)) => Err(err),
+        }
+    }
+
     fn take_notifications(&mut self) -> Vec<serde_json::Value> {
         std::mem::take(&mut self.pending)
     }
@@ -242,7 +251,7 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
     let socket_path = runtime_dir.join("jcode.sock");
     let debug_socket_path = runtime_dir.join("jcode-debug.sock");
 
-    let words: VecDeque<String> = ["alpha", "bravo", "charlie", "delta"]
+    let words: VecDeque<String> = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]
         .into_iter()
         .map(str::to_string)
         .collect();
@@ -460,6 +469,57 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
         assert_eq!(
             listed["_meta"]["jcode"]["live"], true,
             "a live session is reported as live: {listed}"
+        );
+
+        // --- Scenario 4: closing the ACP view must not cancel a peer's turn,
+        // and must stop reading the daemon for that session.
+        let message_id = other
+            .send_message("Reply with exactly the word: echo")
+            .await?;
+        acp.wait_for_notification(|notification| {
+            notification["method"] == "session/update"
+                && notification["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+                && notification["params"]["update"]["content"]["text"] == "echo"
+        })
+        .await?;
+        let closed = acp
+            .request(
+                "session/close",
+                serde_json::json!({ "sessionId": session_id }),
+            )
+            .await?;
+        assert!(closed.is_object(), "session/close answers: {closed}");
+
+        // The other client's turn was untouched by the close.
+        let echo_events = collect_until_done_unix(&mut other, message_id).await?;
+        assert!(
+            !echo_events.iter().any(|event| matches!(
+                event,
+                ServerEvent::TurnStopped {
+                    reason: jcode::protocol::TurnStopReason::Interrupted,
+                    ..
+                }
+            )),
+            "closing the ACP view must not interrupt the peer's turn: {echo_events:?}"
+        );
+        assert!(
+            echo_events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::TextDelta { text } if text == "echo")),
+            "the peer's turn completed normally"
+        );
+
+        // The connection is gone: a later peer turn produces no ACP output.
+        let message_id = other
+            .send_message("Reply with exactly the word: foxtrot")
+            .await?;
+        acp.expect_silence(Duration::from_millis(600)).await?;
+        let foxtrot_events = collect_until_done_unix(&mut other, message_id).await?;
+        assert!(
+            foxtrot_events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Done { .. })),
+            "the daemon still serves the session after the ACP view closed"
         );
 
         acp.shutdown().await;
