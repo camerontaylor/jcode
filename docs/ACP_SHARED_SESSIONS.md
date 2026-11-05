@@ -443,3 +443,8 @@ extend the numbered list above where they overlap.
     match. `_meta.jcode.live` remains a best-effort snapshot of
     `History.all_sessions`, taken when the adapter last saw a `History`; the
     daemon protocol has no cheaper live-set request (Open question 1).
+22. **Reply routing is id-based; the "oldest waiter by kind" rule is not
+    needed.** Every reply the adapter waits for (`Ack`, `Done`, `Error`,
+    `History`, `ModelChanged`, `ReasoningEffortChanged`, `CompactResult`)
+    carries the request id it answers, so the pending-request table alone routes
+    them. There is no id-less reply to disambiguate by kind.
