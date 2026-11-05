@@ -19,6 +19,7 @@
 
 use crate::agent::Agent;
 use crate::protocol::{ActiveTurn, ServerEvent, TurnEndStatus, TurnOrigin};
+use jcode_agent_runtime::InterruptSignal;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
@@ -41,6 +42,10 @@ pub(super) fn user_content(content: &str) -> Option<String> {
 /// drop when the turn never reported its own end.
 pub(super) struct TurnLifecycle {
     turn_id: String,
+    /// The agent's cancel signal, captured at start so the pair can be closed
+    /// without taking the agent lock again: a queued model turn must not delay
+    /// a connection-local turn's end event.
+    cancel_signal: InterruptSignal,
     cancel_epoch: u64,
     /// `Some` while the turn is published as the session's active turn.
     registry: Option<crate::turn_lifecycle_registry::ActiveTurnGuard>,
@@ -92,7 +97,8 @@ impl TurnLifecycle {
         user_content: Option<String>,
     ) -> Self {
         let turn_id = next_turn_id();
-        let cancel_epoch = agent.graceful_shutdown_signal().epoch();
+        let cancel_signal = agent.graceful_shutdown_signal();
+        let cancel_epoch = cancel_signal.epoch();
         let _ = event_tx.send(ServerEvent::TurnStarted {
             turn_id: turn_id.clone(),
             origin,
@@ -100,6 +106,7 @@ impl TurnLifecycle {
         });
         Self {
             turn_id,
+            cancel_signal,
             cancel_epoch,
             registry: None,
             event_tx: event_tx.clone(),
@@ -109,15 +116,17 @@ impl TurnLifecycle {
 
     /// Emit `turn_ended` before the turn's terminal `done`/`error` and before
     /// `turn_stopped`/`soft_interrupt_queue`.
-    pub(super) fn finish(mut self, agent: &Agent, result: &anyhow::Result<()>) {
+    ///
+    /// Takes no agent: the cancel signal captured at start answers the only
+    /// question `finish` has about the agent, so a turn that does not hold the
+    /// agent lock (a `/subagent` launch) never waits for one to report its end.
+    pub(super) fn finish(mut self, result: &anyhow::Result<()>) {
         let status = match result {
             // The turn loop breaks instead of failing when its cancel signal
             // fired, so an interrupted turn still reports `Ok`. The signal's
             // epoch is the only reliable record that a cancel landed during
             // this turn.
-            Ok(()) if agent.graceful_shutdown_signal().epoch() != self.cancel_epoch => {
-                TurnEndStatus::Cancelled
-            }
+            Ok(()) if self.cancel_signal.epoch() != self.cancel_epoch => TurnEndStatus::Cancelled,
             Ok(()) => TurnEndStatus::Completed,
             Err(_) => TurnEndStatus::Failed,
         };
@@ -150,6 +159,10 @@ impl Drop for TurnLifecycle {
         if self.closed {
             return;
         }
+        // A future dropped without `finish` is either an aborted turn or an
+        // early return that skipped the pair. Neither can be told apart here, so
+        // the message says what is true of both and the status reports the
+        // common case: an aborted turn is `cancelled`, a panic is `failed`.
         let (status, message) = if std::thread::panicking() {
             (
                 TurnEndStatus::Failed,
@@ -158,7 +171,7 @@ impl Drop for TurnLifecycle {
         } else {
             (
                 TurnEndStatus::Cancelled,
-                Some("The turn was aborted before it reported completion.".to_string()),
+                Some("The turn ended before it reported completion.".to_string()),
             )
         };
         self.close(status, message);

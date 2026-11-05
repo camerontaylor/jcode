@@ -1175,3 +1175,41 @@ async fn subagent_launch_is_bracketed_by_its_own_turn_lifecycle() {
         None
     );
 }
+
+/// An invalid `/subagent` must report its error immediately: it has nothing to
+/// do with the agent, so it must not queue behind a running turn's lock.
+#[tokio::test]
+async fn invalid_subagent_reports_without_waiting_for_the_agent_lock() {
+    let _lock = crate::storage::lock_test_env();
+    let agent = new_split_test_agent().await;
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+
+    // Hold the agent exactly like a running turn would.
+    let guard = agent.lock().await;
+
+    handle_run_subagent(
+        92,
+        "ignored".to_string(),
+        "general".to_string(),
+        None,
+        // `--continue` is rejected by the input builder before any agent work.
+        Some("some-session".to_string()),
+        Some("acp-test/0".to_string()),
+        &agent,
+        &tx,
+    );
+
+    let event = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("an invalid launch answers without the agent lock")
+        .expect("event channel stays open");
+    assert!(
+        matches!(&event, ServerEvent::Error { id: 92, message, .. } if message.contains("--continue")),
+        "the launch reports its validation error: {event:?}"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "no turn events are emitted for a rejected launch"
+    );
+    drop(guard);
+}

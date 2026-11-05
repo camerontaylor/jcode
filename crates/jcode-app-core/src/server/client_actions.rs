@@ -403,26 +403,42 @@ pub(super) fn handle_run_subagent(
     let tx = client_event_tx.clone();
 
     crate::runtime_activity::spawn(async move {
-        // The launch streams tool events on this connection only, so it carries
-        // its own lifecycle pair. Without one, a lifecycle-aware client (the
-        // ACP adapter) drops those events as belonging to no open turn.
-        let lifecycle = {
-            let guard = agent.lock().await;
-            super::turn_lifecycle::TurnLifecycle::start_connection_local(
-                &guard,
-                &tx,
-                TurnOrigin::client(client_instance_id, id),
-                super::turn_lifecycle::user_content(&prompt),
-            )
-        };
+        // Validate before touching the agent: an invalid launch must report its
+        // error immediately, not wait for a running turn to release the lock.
+        let tool_input =
+            match subagent_swarm_spawn_input(&prompt, &subagent_type, model, session_id) {
+                Ok(input) => input,
+                Err(message) => {
+                    let _ = tx.send(ServerEvent::Error {
+                        id,
+                        message,
+                        retry_after_secs: None,
+                    });
+                    return;
+                }
+            };
 
-        let result =
-            run_subagent_turn(&agent, &tx, &prompt, &subagent_type, model, session_id).await;
+        // Hold the agent for the whole launch, exactly like a model turn. The
+        // launch streams tool events directly on this connection while a model
+        // turn's stream fans out to every attachment; without the lock a queued
+        // model turn could start in the middle, and this connection would then
+        // see two interleaved streams. The `swarm` tool never re-enters this
+        // session's agent, so holding it here cannot deadlock.
+        //
+        // Peers get no live view of a launch: the pair and its tool events go
+        // only to the requesting connection. The tool call is still persisted in
+        // the shared transcript, so peers see it on their next history load.
+        let mut guard = agent.lock().await;
+        let lifecycle = super::turn_lifecycle::TurnLifecycle::start_connection_local(
+            &guard,
+            &tx,
+            TurnOrigin::client(client_instance_id, id),
+            super::turn_lifecycle::user_content(&prompt),
+        );
 
-        {
-            let guard = agent.lock().await;
-            lifecycle.finish(&guard, &result);
-        }
+        let result = run_subagent_turn(&mut guard, &tx, tool_input).await;
+
+        lifecycle.finish(&result);
         match result {
             Ok(()) => {
                 let _ = tx.send(ServerEvent::Done { id });
@@ -441,27 +457,18 @@ pub(super) fn handle_run_subagent(
 /// Run one `/subagent` launch: stream its tool call, execute it, and persist
 /// the result. `Err` means the launch must be reported as an error instead of
 /// a completion.
+///
+/// Takes the caller's agent guard: the launch is serialised with model turns of
+/// this session for its whole duration.
 async fn run_subagent_turn(
-    agent: &Arc<Mutex<Agent>>,
+    agent: &mut Agent,
     tx: &mpsc::UnboundedSender<ServerEvent>,
-    prompt: &str,
-    subagent_type: &str,
-    model: Option<String>,
-    session_id: Option<String>,
+    tool_input: serde_json::Value,
 ) -> anyhow::Result<()> {
     let tool_call_id = crate::id::new_id("call");
     let tool_name = "swarm".to_string();
-    let tool_input = subagent_swarm_spawn_input(prompt, subagent_type, model, session_id)
-        .map_err(anyhow::Error::msg)?;
-
-    let message_id = {
-        let mut agent_guard = agent.lock().await;
-        agent_guard.add_manual_tool_use(
-            tool_call_id.clone(),
-            tool_name.clone(),
-            tool_input.clone(),
-        )?
-    };
+    let message_id =
+        agent.add_manual_tool_use(tool_call_id.clone(), tool_name.clone(), tool_input.clone())?;
 
     let _ = tx.send(ServerEvent::ToolStart {
         id: tool_call_id.clone(),
@@ -476,14 +483,9 @@ async fn run_subagent_turn(
         name: tool_name.clone(),
     });
 
-    let (registry, session_id, working_dir) = {
-        let agent_guard = agent.lock().await;
-        (
-            agent_guard.registry(),
-            agent_guard.session_id().to_string(),
-            agent_guard.working_dir().map(std::path::PathBuf::from),
-        )
-    };
+    let registry = agent.registry();
+    let session_id = agent.session_id().to_string();
+    let working_dir = agent.working_dir().map(std::path::PathBuf::from);
 
     let ctx = crate::tool::ToolContext {
         session_id,
@@ -519,8 +521,7 @@ async fn run_subagent_turn(
                 output: output_text,
                 error: None,
             });
-            let mut agent_guard = agent.lock().await;
-            agent_guard.add_manual_tool_result(tool_call_id, output, duration_ms)?;
+            agent.add_manual_tool_result(tool_call_id, output, duration_ms)?;
         }
         Err(error) => {
             let error_msg = format!("Error: {}", error);
@@ -530,8 +531,7 @@ async fn run_subagent_turn(
                 output: error_msg.clone(),
                 error: Some(error_msg.clone()),
             });
-            let mut agent_guard = agent.lock().await;
-            agent_guard.add_manual_tool_error(tool_call_id, error_msg, duration_ms)?;
+            agent.add_manual_tool_error(tool_call_id, error_msg, duration_ms)?;
         }
     }
     Ok(())
