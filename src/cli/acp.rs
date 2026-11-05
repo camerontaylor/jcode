@@ -104,7 +104,45 @@ struct DaemonSession {
     /// Sticky skill selection, resent with every prompt. The daemon treats a
     /// missing `active_skill` as "clear the selection", mirroring the TUI.
     active_skill: Mutex<Option<String>>,
+    /// Peer output is held here until the attach handshake has replayed
+    /// history, so live peer events cannot interleave with the replay.
+    peer_gate: Arc<Mutex<PeerActionGate>>,
+    /// Mapper state for the mirrored peer turn, shared by the reader and the
+    /// attach flush so a tool call spanning that boundary keeps its input.
+    peer_mapper: Arc<Mutex<Option<EventMapper>>>,
     reader_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// Peer actions buffered while a session attach is replaying history.
+#[derive(Default)]
+struct PeerActionGate {
+    ready: bool,
+    buffered: Vec<RouteAction>,
+}
+
+/// Upper bound on buffered peer actions. A mid-turn attach cannot replay
+/// unbounded output; the newest events are the ones still on screen.
+const MAX_BUFFERED_PEER_ACTIONS: usize = 512;
+
+impl PeerActionGate {
+    /// Hold `action` while output is deferred. Returns `true` when it was
+    /// buffered, `false` when the caller should render it now.
+    fn hold(&mut self, action: RouteAction) -> bool {
+        if self.ready {
+            return false;
+        }
+        if self.buffered.len() >= MAX_BUFFERED_PEER_ACTIONS {
+            self.buffered.remove(0);
+        }
+        self.buffered.push(action);
+        true
+    }
+
+    /// Let live output through and return what was held, in arrival order.
+    fn release(&mut self) -> Vec<RouteAction> {
+        self.ready = true;
+        std::mem::take(&mut self.buffered)
+    }
 }
 
 /// Session-scoped provider/model state used to surface ACP `configOptions`
@@ -230,6 +268,8 @@ impl DaemonSession {
             ui_state: Arc::new(Mutex::new(SessionUiState::default())),
             working_dir,
             active_skill: Mutex::new(None),
+            peer_gate: Arc::new(Mutex::new(PeerActionGate::default())),
+            peer_mapper: Arc::new(Mutex::new(None)),
             reader_task: std::sync::Mutex::new(None),
         }
     }
@@ -298,10 +338,11 @@ impl DaemonSession {
         // session's `Drop` is what aborts this task.
         let router = Arc::clone(&self.router);
         let ui_state = Arc::clone(&self.ui_state);
+        let gate = Arc::clone(&self.peer_gate);
+        let peer_mapper = Arc::clone(&self.peer_mapper);
         let handle = tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
-            let mut peer_mapper: Option<EventMapper> = None;
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
@@ -318,7 +359,7 @@ impl DaemonSession {
                 let actions = router.lock().await.route(event);
                 for action in actions {
                     if let Err(err) = acp
-                        .apply_route_action(&router, &ui_state, action, &mut peer_mapper)
+                        .dispatch_route_action(&router, &ui_state, &gate, &peer_mapper, action)
                         .await
                     {
                         crate::logging::debug(&format!("acp: dropping route action: {err:#}"));
@@ -331,7 +372,7 @@ impl DaemonSession {
             let closing = router.lock().await.close();
             for action in closing {
                 if let Err(err) = acp
-                    .apply_route_action(&router, &ui_state, action, &mut peer_mapper)
+                    .dispatch_route_action(&router, &ui_state, &gate, &peer_mapper, action)
                     .await
                 {
                     crate::logging::debug(&format!("acp: dropping closing action: {err:#}"));
@@ -1011,6 +1052,7 @@ impl AcpRuntime {
             other => anyhow::bail!("expected history after session creation, got {other:?}"),
         };
         session.set_ui_state(ui_state).await;
+        self.release_peer_actions(&session).await?;
         Ok(session)
     }
 
@@ -1083,6 +1125,9 @@ impl AcpRuntime {
 
         session.unregister(resume_id).await;
         session.set_ui_state(ui_state).await;
+        // Flush what arrived during the handshake after the replay, and before
+        // the caller answers `session/load`.
+        self.release_peer_actions(&session).await?;
         Ok(session)
     }
 
@@ -1514,13 +1559,55 @@ impl AcpRuntime {
         .await
     }
 
-    /// Render one routing action produced by the connection's reader.
-    async fn apply_route_action(
+    /// Handle one routing action produced by the connection's reader.
+    ///
+    /// Session state is applied immediately; peer output is held back until the
+    /// attach handshake finished, so a mid-turn attach cannot interleave live
+    /// peer events with the history replay.
+    async fn dispatch_route_action(
         &self,
         router: &Arc<Mutex<RouterState>>,
         ui_state: &Arc<Mutex<SessionUiState>>,
+        gate: &Arc<Mutex<PeerActionGate>>,
+        peer_mapper: &Arc<Mutex<Option<EventMapper>>>,
         action: RouteAction,
-        peer_mapper: &mut Option<EventMapper>,
+    ) -> Result<()> {
+        if let RouteAction::SessionState(change) = action {
+            let session_id = router.lock().await.session_id().to_string();
+            return self
+                .apply_session_state(ui_state, &session_id, change)
+                .await;
+        }
+        if gate.lock().await.hold(action.clone()) {
+            return Ok(());
+        }
+        self.apply_peer_action(router, ui_state, peer_mapper, action)
+            .await
+    }
+
+    /// Flush peer output held during an attach handshake, then let live peer
+    /// events through.
+    async fn release_peer_actions(&self, session: &Arc<DaemonSession>) -> Result<()> {
+        let buffered = session.peer_gate.lock().await.release();
+        for action in buffered {
+            self.apply_peer_action(
+                &session.router,
+                &session.ui_state,
+                &session.peer_mapper,
+                action,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Render one peer-turn action for the ACP client.
+    async fn apply_peer_action(
+        &self,
+        router: &Arc<Mutex<RouterState>>,
+        ui_state: &Arc<Mutex<SessionUiState>>,
+        peer_mapper: &Arc<Mutex<Option<EventMapper>>>,
+        action: RouteAction,
     ) -> Result<()> {
         let session_id = router.lock().await.session_id().to_string();
         match action {
@@ -1532,7 +1619,8 @@ impl AcpRuntime {
                 // A fresh mapper per peer turn: tool-call ids and streamed
                 // inputs must not leak between turns or into this adapter's own
                 // prompt mapping.
-                *peer_mapper = Some(EventMapper::new(session_id.clone(), self.profile));
+                *peer_mapper.lock().await =
+                    Some(EventMapper::new(session_id.clone(), self.profile));
                 self.write_turn_notification(&session_id, &turn_id, "started", Some(&origin), None)
                     .await?;
                 if let Some(content) = user_content.filter(|content| !content.trim().is_empty()) {
@@ -1550,9 +1638,13 @@ impl AcpRuntime {
                 }
             }
             RouteAction::PeerTurnEvent(event) => {
-                let mapper = peer_mapper
-                    .get_or_insert_with(|| EventMapper::new(session_id.clone(), self.profile));
-                for update in mapper.map_event(event) {
+                let updates = {
+                    let mut mapper = peer_mapper.lock().await;
+                    mapper
+                        .get_or_insert_with(|| EventMapper::new(session_id.clone(), self.profile))
+                        .map_event(event)
+                };
+                for update in updates {
                     self.write_notification(
                         "session/update",
                         json!({ "sessionId": session_id, "update": update }),
@@ -1565,7 +1657,7 @@ impl AcpRuntime {
                 status,
                 message,
             } => {
-                *peer_mapper = None;
+                *peer_mapper.lock().await = None;
                 let state = match status {
                     TurnEndStatus::Completed => "completed",
                     TurnEndStatus::Failed => "failed",
@@ -2823,6 +2915,58 @@ mod tests {
         let live = vec!["s-live".to_string()];
         let with = session_list_result(entries, None, None, Some(&live));
         assert_eq!(with["sessions"][0]["_meta"]["jcode"]["live"], true);
+    }
+
+    #[test]
+    fn peer_output_is_held_until_the_attach_handshake_releases_it() {
+        let mut gate = PeerActionGate::default();
+        let started = RouteAction::PeerTurnStarted {
+            turn_id: "t1".to_string(),
+            origin: TurnOrigin::client(Some("peer".to_string()), 3),
+            user_content: Some("peer prompt".to_string()),
+        };
+        let event = RouteAction::PeerTurnEvent(ServerEvent::TextDelta {
+            text: "peer output".to_string(),
+        });
+        assert!(gate.hold(started));
+        assert!(gate.hold(event));
+        assert_eq!(gate.buffered.len(), 2);
+
+        let released = gate.release();
+        assert_eq!(released.len(), 2);
+        assert!(
+            matches!(released[0], RouteAction::PeerTurnStarted { .. }),
+            "held actions flush in arrival order"
+        );
+        assert!(matches!(released[1], RouteAction::PeerTurnEvent(_)));
+        assert!(gate.buffered.is_empty());
+
+        // Once released, live output is rendered immediately.
+        assert!(
+            !gate.hold(RouteAction::PeerTurnEvent(ServerEvent::TextDelta {
+                text: "live".to_string(),
+            }))
+        );
+    }
+
+    #[test]
+    fn held_peer_output_is_bounded() {
+        let mut gate = PeerActionGate::default();
+        for index in 0..MAX_BUFFERED_PEER_ACTIONS + 8 {
+            assert!(
+                gate.hold(RouteAction::PeerTurnEvent(ServerEvent::TextDelta {
+                    text: format!("chunk-{index}"),
+                }))
+            );
+        }
+        assert_eq!(gate.buffered.len(), MAX_BUFFERED_PEER_ACTIONS);
+        let released = gate.release();
+        // The newest events survive: the oldest were dropped.
+        let first = match &released[0] {
+            RouteAction::PeerTurnEvent(ServerEvent::TextDelta { text }) => text.clone(),
+            other => panic!("unexpected action {other:?}"),
+        };
+        assert_eq!(first, format!("chunk-{}", 8));
     }
 
     #[test]
