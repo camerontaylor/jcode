@@ -3952,7 +3952,7 @@ pub(super) async fn process_message_streaming_mpsc(
         event_tx.clone(),
     )
     .await;
-    lifecycle.finish(&agent, &event_tx, &result);
+    lifecycle.finish(&agent, &result);
     result
 }
 

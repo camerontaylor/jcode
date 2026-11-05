@@ -185,7 +185,7 @@ pub(super) async fn process_message_with_server_failover(
     } else {
         result
     };
-    lifecycle.finish(&guard, &event_tx, &result);
+    lifecycle.finish(&guard, &result);
     result
 }
 
@@ -216,7 +216,7 @@ pub(super) async fn process_locked_message_with_server_failover(
     )
     .await;
     let result = retry_turn_with_server_failover(agent, result, reminder, event_tx.clone()).await;
-    lifecycle.finish(agent, &event_tx, &result);
+    lifecycle.finish(agent, &result);
     result
 }
 

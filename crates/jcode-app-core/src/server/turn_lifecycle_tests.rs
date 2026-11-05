@@ -83,6 +83,67 @@ impl Provider for NumberedStreamProvider {
     }
 }
 
+/// Streams one delta and then never finishes, so a turn can be aborted
+/// mid-stream.
+struct HangingStreamProvider;
+
+#[async_trait]
+impl Provider for HangingStreamProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Ok(Box::pin(stream::unfold(0_u8, |step| async move {
+            match step {
+                0 => Some((
+                    Ok(StreamEvent::TextDelta("streaming forever".to_string())),
+                    1,
+                )),
+                _ => {
+                    std::future::pending::<()>().await;
+                    None
+                }
+            }
+        })))
+    }
+
+    fn name(&self) -> &str {
+        "hanging-stream"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+/// Panics while opening the provider stream, the way a provider bug unwinds
+/// through a turn.
+struct PanickingProvider;
+
+#[async_trait]
+impl Provider for PanickingProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        panic!("provider exploded mid-turn")
+    }
+
+    fn name(&self) -> &str {
+        "panicking"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
 struct TurnHarness {
     session_id: String,
     agent: Arc<Mutex<Agent>>,
@@ -100,7 +161,19 @@ struct TurnHarness {
 impl TurnHarness {
     async fn new(session_id: &str, connection_ids: &[&str]) -> Self {
         let calls = Arc::new(AtomicUsize::new(0));
-        let provider: Arc<dyn Provider> = Arc::new(NumberedStreamProvider { calls });
+        Self::with_provider(
+            session_id,
+            connection_ids,
+            Arc::new(NumberedStreamProvider { calls }),
+        )
+        .await
+    }
+
+    async fn with_provider(
+        session_id: &str,
+        connection_ids: &[&str],
+        provider: Arc<dyn Provider>,
+    ) -> Self {
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut session =
             crate::session::Session::create_with_id(session_id.to_string(), None, None);
@@ -202,6 +275,22 @@ impl TurnHarness {
             },
         )
         .await;
+    }
+}
+
+/// Read events until `predicate` matches, returning everything read.
+async fn read_until(
+    rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
+    predicate: impl Fn(&ServerEvent) -> bool,
+) -> Vec<ServerEvent> {
+    let mut events = Vec::new();
+    loop {
+        let event = next_event(rx).await;
+        let matched = predicate(&event);
+        events.push(event);
+        if matched {
+            return events;
+        }
     }
 }
 
@@ -478,6 +567,150 @@ async fn overlapping_prompts_do_not_nest_and_keep_their_own_origin() {
 
     for handle in [origin_task.take(), peer_task.take()].into_iter().flatten() {
         handle.await.expect("processing task join");
+    }
+    assert_eq!(
+        crate::turn_lifecycle_registry::active_turn(&harness.session_id),
+        None
+    );
+}
+
+/// A turn that is aborted mid-stream (the cancel grace period expired) must
+/// still report its end to every attachment, or a peer-turn mirror keeps a
+/// running turn forever.
+#[tokio::test]
+async fn aborted_turn_still_ends_for_every_attachment() {
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let mut harness = TurnHarness::with_provider(
+        "session_turn_lifecycle_abort",
+        &["conn-a", "conn-b"],
+        Arc::new(HangingStreamProvider),
+    )
+    .await;
+    let mut origin_rx = harness.take_receiver(0);
+    let mut peer_rx = harness.take_receiver(1);
+
+    let mut client_is_processing = false;
+    let mut message_id = None;
+    let mut processing_session_id = None;
+    let mut task = None;
+    harness
+        .start_prompt(
+            0,
+            21,
+            "stream forever",
+            Some("conn-a".to_string()),
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut message_id,
+                session_id: &mut processing_session_id,
+                task: &mut task,
+            },
+        )
+        .await;
+
+    // The turn is running and streaming on both connections before the abort.
+    for rx in [&mut origin_rx, &mut peer_rx] {
+        let events = read_until(rx, |event| matches!(event, ServerEvent::TextDelta { .. })).await;
+        assert!(
+            matches!(events.first(), Some(ServerEvent::TurnStarted { .. })),
+            "the turn announces itself before it streams"
+        );
+    }
+
+    task.take().expect("processing task handle").abort();
+
+    for rx in [&mut origin_rx, &mut peer_rx] {
+        let events = read_until(rx, |event| matches!(event, ServerEvent::TurnEnded { .. })).await;
+        let ended = events
+            .iter()
+            .find(|event| matches!(event, ServerEvent::TurnEnded { .. }))
+            .expect("turn ended");
+        assert!(
+            matches!(
+                ended,
+                ServerEvent::TurnEnded {
+                    status: crate::protocol::TurnEndStatus::Cancelled,
+                    ..
+                }
+            ),
+            "an aborted turn reports a cancelled end: {ended:?}"
+        );
+    }
+    assert_eq!(
+        crate::turn_lifecycle_registry::active_turn(&harness.session_id),
+        None,
+        "an aborted turn must not stay published as the active turn"
+    );
+}
+
+/// A panicking turn unwinds through the lifecycle pair: peers must still see a
+/// (failed) end instead of a turn that never finishes.
+#[tokio::test]
+async fn panicking_turn_reports_a_failed_end_to_every_attachment() {
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let mut harness = TurnHarness::with_provider(
+        "session_turn_lifecycle_panic",
+        &["conn-a", "conn-b"],
+        Arc::new(PanickingProvider),
+    )
+    .await;
+    let mut origin_rx = harness.take_receiver(0);
+    let mut peer_rx = harness.take_receiver(1);
+
+    let mut client_is_processing = false;
+    let mut message_id = None;
+    let mut processing_session_id = None;
+    let mut task = None;
+    harness
+        .start_prompt(
+            0,
+            22,
+            "panic please",
+            Some("conn-a".to_string()),
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut message_id,
+                session_id: &mut processing_session_id,
+                task: &mut task,
+            },
+        )
+        .await;
+
+    for rx in [&mut origin_rx, &mut peer_rx] {
+        let events = read_until(rx, |event| matches!(event, ServerEvent::Error { .. })).await;
+        assert!(
+            matches!(events.first(), Some(ServerEvent::TurnStarted { .. })),
+            "the turn announces itself before it panics"
+        );
+        let ended_at = events
+            .iter()
+            .position(|event| matches!(event, ServerEvent::TurnEnded { .. }))
+            .expect("a panicking turn still ends");
+        let error_at = events
+            .iter()
+            .position(|event| matches!(event, ServerEvent::Error { .. }))
+            .expect("the panic is reported");
+        assert!(
+            ended_at < error_at,
+            "turn_ended precedes the terminal error: {events:?}"
+        );
+        assert!(
+            matches!(
+                &events[ended_at],
+                ServerEvent::TurnEnded {
+                    status: crate::protocol::TurnEndStatus::Failed,
+                    ..
+                }
+            ),
+            "a panicking turn reports a failed end: {:?}",
+            events[ended_at]
+        );
+    }
+
+    if let Some(handle) = task.take() {
+        let _ = handle.await;
     }
     assert_eq!(
         crate::turn_lifecycle_registry::active_turn(&harness.session_id),

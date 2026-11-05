@@ -145,7 +145,7 @@ pub(super) async fn spawn_tracked_live_turn(
                         Some(display_role),
                     )
                     .await;
-                lifecycle.finish(&agent, &event_tx, &result);
+                lifecycle.finish(&agent, &result);
                 result
             } else {
                 process_locked_message_with_server_failover(
