@@ -154,7 +154,29 @@ impl PeerActionGate {
             return false;
         }
         if self.buffered.len() >= MAX_BUFFERED_PEER_ACTIONS {
-            self.buffered.remove(0);
+            // Evict the oldest *streamed* event only. Dropping a turn's
+            // `PeerTurnStarted`/`PeerTurnEnded` would leave the client with an
+            // unbalanced `_jcode/turn` bracket, so brackets are never evicted.
+            match self
+                .buffered
+                .iter()
+                .position(|held| matches!(held, RouteAction::PeerTurnEvent(_)))
+            {
+                Some(index) => {
+                    self.buffered.remove(index);
+                }
+                None => {
+                    // Only brackets are held (one start/end per turn, so this
+                    // needs thousands of turns): keep the newest event out
+                    // rather than unbalancing a bracket.
+                    if matches!(action, RouteAction::PeerTurnEvent(_)) {
+                        crate::logging::debug(
+                            "acp: dropping peer output while the attach flush is saturated",
+                        );
+                        return true;
+                    }
+                }
+            }
         }
         self.buffered.push(action);
         true
@@ -3149,6 +3171,61 @@ mod tests {
             rendered.lock().expect("render log").as_slice(),
             ["delta held-1", "delta held-2", "delta live"],
             "live output renders only after every held action"
+        );
+    }
+
+    /// Overflowing the gate during a mid-turn attach must keep the
+    /// `_jcode/turn` bracket: only streamed events are evicted.
+    #[tokio::test]
+    async fn overflow_keeps_the_peer_turn_bracket_balanced() {
+        let gate = Arc::new(Mutex::new(PeerActionGate::default()));
+        {
+            let mut gate = gate.lock().await;
+            assert!(gate.hold(RouteAction::PeerTurnStarted {
+                turn_id: "t1".to_string(),
+                origin: TurnOrigin::client(Some("peer".to_string()), 3),
+                user_content: None,
+            }));
+            for index in 0..MAX_BUFFERED_PEER_ACTIONS + 16 {
+                assert!(gate.hold(delta_action(&format!("chunk-{index}"))));
+            }
+            assert!(gate.hold(RouteAction::PeerTurnEnded {
+                turn_id: "t1".to_string(),
+                status: TurnEndStatus::Completed,
+                message: None,
+            }));
+            assert_eq!(gate.buffered.len(), MAX_BUFFERED_PEER_ACTIONS);
+        }
+
+        let rendered = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        flush_peer_actions(&gate, {
+            let rendered = Arc::clone(&rendered);
+            move |action| {
+                let rendered = Arc::clone(&rendered);
+                Box::pin(async move {
+                    rendered
+                        .lock()
+                        .expect("render log")
+                        .push(action_label(&action));
+                    Ok(())
+                })
+            }
+        })
+        .await
+        .expect("flush");
+
+        let rendered = rendered.lock().expect("render log");
+        assert_eq!(
+            rendered.first().map(String::as_str),
+            Some("started t1"),
+            "the turn's start survives overflow: {:?}",
+            rendered.first()
+        );
+        assert_eq!(
+            rendered.last().map(String::as_str),
+            Some("ended t1"),
+            "the turn's end survives overflow: {:?}",
+            rendered.last()
         );
     }
 
