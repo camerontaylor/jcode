@@ -240,6 +240,12 @@ Rules:
   Reason: in a client that mirrors peer turns, a stop button that leaves a
   visibly running turn untouched is broken UX. A TUI user sees the usual
   "interrupted" notice.
+- **`session/close` does not stop a peer's turn.** Closing the ACP view is not
+  a user cancel: send `Cancel` only when this adapter still owns a prompt
+  (running or queued behind a peer turn). Closing a view of a session another
+  client is driving must leave that turn alone, and the daemon detaches this
+  connection on its own. Dropping the session also stops its reader, so no
+  further peer output is written for a closed view.
 
 ### D5. `session/list`
 
@@ -379,3 +385,61 @@ real code allowed; none of them weakens the goals.
     touch the daemon stream. Coverage is instead the two-connection daemon test
     (ordering, non-nesting, per-origin request ids) plus the fact that the
     events are emitted from one shared helper at four entry points.
+
+### Review follow-up (2026-11-05)
+
+A review of the implementation requested changes. These deviations supersede or
+extend the numbered list above where they overlap.
+
+13. **The lifecycle pair is closed from `Drop`, not only from `finish`.** A turn
+    aborted after its cancel grace period, or one that unwinds through a panic,
+    never reached `finish`, so every attachment kept a turn that never ended and
+    a peer mirror kept its `_jcode/turn` bracket open. `TurnLifecycle` now owns
+    the ordered sender and emits `TurnEnded` from `Drop`: `cancelled` when the
+    future is dropped (abort), `failed` when it is unwinding (panic). This
+    supersedes deviation 2 for the aborted case: an aborted turn is now reported
+    as `cancelled` rather than not reported at all.
+14. **`/subagent` launches carry their own lifecycle pair.** `RunSubagent`
+    streamed `ToolStart`/`ToolInput`/`ToolExec`/`ToolDone` on the requesting
+    connection with no turn boundaries, so a lifecycle-aware client dropped them
+    as events belonging to no open turn. The launch now runs inside a
+    *connection-local* pair (`start_connection_local`): it is emitted on that
+    connection only and is deliberately not published as the session's active
+    turn, because a `/subagent` launch is not the session's logical turn.
+15. **Peer turns are closed defensively.** A new `TurnStarted` (own or peer)
+    closes any peer turn that never reported its end, and a peer's terminal
+    `done`/`error` closes it too. This supersedes the marker scheme in
+    deviation 5: peer request ids are tracked per turn
+    (`(turn_id, request_id)`) and expire when that turn's terminal event is
+    consumed, or when one of our own turns completes. A peer terminal is never
+    cleared early by our own `TurnStarted`, which is what made the old
+    single-marker scheme racy when the daemon reported a finished turn after the
+    queued turn had already started.
+16. **`session/close` no longer cancels a peer's turn.** See D4. Only a prompt
+    this adapter still owns is cancelled on close.
+17. **The reader no longer keeps its session alive.** The reader task holds the
+    shared router and UI state instead of an `Arc<DaemonSession>`; previously
+    `Drop` (which aborts the reader) could never run, so closing a session
+    leaked its socket, its daemon attachment and its peer mirroring. `close()`
+    on the router also ends an open peer turn and refuses new waiters.
+18. **Per-connection client instance ids.** The instance id is
+    `{process_instance_id}/{n}`, not per process: one adapter process attaching
+    the same session twice would otherwise recognise its other connection's turn
+    as its own. `client_instance_id` plus `request_id` remains enough to
+    identify a turn's origin; no protocol change was needed.
+19. **Peer output is held during an attach handshake.** A mid-turn attach
+    replayed history while the reader was already writing live peer events, so
+    the two interleaved. Peer actions are buffered in a bounded gate (512
+    actions, oldest dropped) and flushed after the replay and before the
+    `session/load` response; session state is still applied immediately. This
+    supersedes the ordering note in deviation 9, which only considered the
+    `_jcode/turn`-before-response question.
+20. **Peer turns report `usage_update`.** `TokenUsage` from a mirrored turn was
+    dropped because only the own-prompt loop translated it. One helper now
+    serves both paths.
+21. **`session/list` requires a working directory.** Entries without one are
+    omitted (`cwd` must be a string), and the cwd filter canonicalises at most
+    once per distinct directory, skipping the syscall entirely on an exact
+    match. `_meta.jcode.live` remains a best-effort snapshot of
+    `History.all_sessions`, taken when the adapter last saw a `History`; the
+    daemon protocol has no cheaper live-set request (Open question 1).
