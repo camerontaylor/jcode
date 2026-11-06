@@ -510,12 +510,14 @@ extend the numbered list above where they overlap.
 31. **Every replayed and streamed message carries a stable `messageId`.**
     Clients group chunks by that id and fall back to positional grouping without
     it, which merged consecutive same-role messages (two assistant messages
-    separated only by tool calls that are not replayed). Replay ids are
-    `{session}:history:{index}` (deterministic, so the same transcript replays
-    with the same ids); streamed ids are scoped per turn
-    (`{session}:own:{request id}` or `{session}:peer:{turn id}`) and advance on
-    each message boundary; the peer prompt chunk, command responses and skill
-    notices carry their own scoped ids.
+    separated only by tool calls that are not replayed). Streamed ids are scoped
+    per turn — `{session}:own:{request id}:{n}` for this adapter's own turns and
+    `{session}:peer:{turn id}:{n}` for mirrored ones — and `n` advances on each
+    message boundary, so chunks of one message share an id. The peer prompt
+    chunk is `{session}:{turn id}:user`; command responses and skill notices
+    carry `{session}:command:{rpc id}` and `{session}:skill-notice:{rpc id}`.
+    Replay ids are `{session}:msg:{stored index}`, falling back to
+    `{session}:history:{position}` for synthetic rows (Deviation 33).
 32. **A mid-turn attach does not show the running prompt twice.** The daemon's
     `GetHistory` falls back to the *persisted* session while a turn holds the
     agent lock, and a turn persists its user message before streaming, so the
