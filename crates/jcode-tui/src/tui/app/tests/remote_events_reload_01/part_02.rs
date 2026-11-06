@@ -370,6 +370,7 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
                 content: "hello".to_string(),
                 tool_calls: None,
                 tool_data: None,
+                stored_index: None,
             }],
             images: vec![],
             provider_name: Some("mock".to_string()),
@@ -406,6 +407,9 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         },
         &mut remote,
     );

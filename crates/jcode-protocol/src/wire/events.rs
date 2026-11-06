@@ -60,6 +60,91 @@ mod account_usage_tests {
     }
 }
 
+/// Feature flag advertised in `ServerEvent::History::server_features` when the
+/// daemon emits `turn_started`/`turn_ended`.
+pub const SERVER_FEATURE_TURN_LIFECYCLE: &str = "turn_lifecycle";
+
+/// Every additive daemon capability this build implements. Advertised in
+/// `ServerEvent::History::server_features` so clients can gate on presence
+/// rather than on a version comparison.
+pub const SERVER_FEATURES: &[&str] = &[SERVER_FEATURE_TURN_LIFECYCLE];
+
+/// [`SERVER_FEATURES`] as the wire field wants it. Every `History` the daemon
+/// builds advertises the same list.
+pub fn server_features() -> Vec<String> {
+    SERVER_FEATURES
+        .iter()
+        .map(|feature| (*feature).to_string())
+        .collect()
+}
+
+/// Who started a turn. Emitted with [`ServerEvent::TurnStarted`] so every
+/// attached client can tell its own turns from a peer's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnOrigin {
+    pub kind: TurnOriginKind,
+    /// Identity of the client that started the turn, when a client did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_instance_id: Option<String>,
+    /// The originating connection's request id. Connection-local, so it is only
+    /// comparable on the connection that issued it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<u64>,
+}
+
+impl TurnOrigin {
+    pub fn client(client_instance_id: Option<String>, request_id: u64) -> Self {
+        Self {
+            kind: TurnOriginKind::Client,
+            client_instance_id,
+            request_id: Some(request_id),
+        }
+    }
+
+    pub fn server(kind: TurnOriginKind) -> Self {
+        Self {
+            kind,
+            client_instance_id: None,
+            request_id: None,
+        }
+    }
+}
+
+/// What kind of actor started a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOriginKind {
+    /// A client prompt (`Message`, `AgentTask`, ...).
+    Client,
+    /// A swarm spawn, assignment or wake.
+    Swarm,
+    /// A background wake or reload-recovery continuation.
+    Background,
+    /// A message relayed from outside the daemon (jade relay).
+    Relay,
+    /// A debug/test entry point.
+    Debug,
+}
+
+/// How a turn ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnEndStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// A turn that is running right now, so a client that attaches mid-turn can
+/// open it instead of waiting for the next [`ServerEvent::TurnStarted`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveTurn {
+    pub turn_id: String,
+    pub origin: TurnOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_content: Option<String>,
+}
+
 /// Server event sent to client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -485,6 +570,29 @@ pub enum ServerEvent {
     #[serde(rename = "peer_user_message")]
     PeerUserMessage { content: String },
 
+    /// A logical turn started, on the same ordered stream as the turn's
+    /// content. Sent after the agent lock is held, so queued turns emit it
+    /// only when they actually start and lifecycle pairs never nest.
+    #[serde(rename = "turn_started")]
+    TurnStarted {
+        /// Daemon-unique and opaque. Stable for the lifetime of the turn.
+        turn_id: String,
+        origin: TurnOrigin,
+        /// The user-visible prompt that started the turn, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_content: Option<String>,
+    },
+
+    /// A logical turn ended. Sent before the turn's terminal `done`/`error` and
+    /// before `turn_stopped`/`soft_interrupt_queue` on the same ordered stream.
+    #[serde(rename = "turn_ended")]
+    TurnEnded {
+        turn_id: String,
+        status: TurnEndStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+
     /// Error occurred
     #[serde(rename = "error")]
     Error {
@@ -676,6 +784,15 @@ pub enum ServerEvent {
         /// Session-scoped agent applet instances.
         #[serde(default, skip_serializing_if = "applets_is_empty")]
         applets: jcode_applet_types::AgentApplets,
+        /// Additive daemon capabilities this server implements. Clients gate on
+        /// this flag rather than on a version comparison, because a shared
+        /// daemon can lag the client binary.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        server_features: Vec<String>,
+        /// Turn that is running right now, so a client attaching mid-turn can
+        /// open it immediately.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_turn: Option<ActiveTurn>,
     },
 
     /// Expanded compacted-history window (response to GetCompactedHistory).

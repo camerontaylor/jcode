@@ -231,6 +231,13 @@ pub struct HistoryMessage {
     pub tool_calls: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_data: Option<ToolCall>,
+    /// Index of the stored session message this row was rendered from. `None`
+    /// for synthetic UI-only rows. Remote clients use it as a stable identity
+    /// for the message: unlike the position in `messages`, it does not move
+    /// when rendering skips stored messages (tool-only rounds) or when the
+    /// client asked for a delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -352,6 +359,10 @@ pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
 pub use wire::{AccountUsageSnapshot, Request, ServerEvent};
+pub use wire::{
+    ActiveTurn, SERVER_FEATURE_TURN_LIFECYCLE, SERVER_FEATURES, TurnEndStatus, TurnOrigin,
+    TurnOriginKind, server_features,
+};
 pub use wire::{SessionToolConfig, SessionToolDefinition};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

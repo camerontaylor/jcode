@@ -265,6 +265,9 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
                 updated_at_ms: 42,
             }],
         },
+    
+        server_features: Vec::new(),
+        active_turn: None,
     };
     let json = encode_event(&event);
     let decoded = parse_event_json(json.trim())?;

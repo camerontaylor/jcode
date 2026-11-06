@@ -1306,6 +1306,7 @@ impl Agent {
                     Some(msg.tool_calls)
                 },
                 tool_data: msg.tool_data,
+                stored_index: msg.stored_index,
             })
             .collect()
     }
@@ -1332,6 +1333,7 @@ impl Agent {
                     Some(msg.tool_calls)
                 },
                 tool_data: msg.tool_data,
+                stored_index: msg.stored_index,
             })
             .collect();
         (history, images)
@@ -1362,6 +1364,7 @@ impl Agent {
                     Some(msg.tool_calls)
                 },
                 tool_data: msg.tool_data,
+                stored_index: msg.stored_index,
             })
             .collect();
         (history, images, compacted_info)

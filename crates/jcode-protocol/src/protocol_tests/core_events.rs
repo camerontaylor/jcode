@@ -716,6 +716,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
             content: "hello".to_string(),
             tool_calls: None,
             tool_data: None,
+            stored_index: None,
         }],
         images: Vec::new(),
         provider_name: Some("openai".to_string()),
@@ -773,6 +774,8 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
                 updated_at_ms: 42,
             }],
         },
+        server_features: Vec::new(),
+        active_turn: None,
     };
     let json = encode_event(&event);
     let decoded = parse_event_json(json.trim())?;
@@ -816,6 +819,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
             content: "older response".to_string(),
             tool_calls: None,
             tool_data: None,
+            stored_index: None,
         }],
         images: Vec::new(),
         compacted_total: 128,
@@ -975,6 +979,7 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
         content: content.to_string(),
         tool_calls: None,
         tool_data: None,
+        stored_index: None,
     };
     let messages = vec![message("user", "hi"), message("assistant", "hello")];
     let whole =
@@ -1011,4 +1016,169 @@ fn history_delta_fields_are_backward_compatible() {
         panic!("expected history");
     };
     assert_eq!(messages_base_count, None);
+}
+
+#[test]
+fn turn_lifecycle_events_roundtrip_with_origin_and_content() -> Result<()> {
+    let started = ServerEvent::TurnStarted {
+        turn_id: "turn-7".to_string(),
+        origin: TurnOrigin::client(Some("acp-abc".to_string()), 42),
+        user_content: Some("hello".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_string(&started)?,
+        r#"{"type":"turn_started","turn_id":"turn-7","origin":{"kind":"client","client_instance_id":"acp-abc","request_id":42},"user_content":"hello"}"#
+    );
+    let decoded = parse_event_json(&serde_json::to_string(&started)?)?;
+    let ServerEvent::TurnStarted {
+        turn_id,
+        origin,
+        user_content,
+    } = decoded
+    else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(turn_id, "turn-7");
+    assert_eq!(origin.kind, TurnOriginKind::Client);
+    assert_eq!(origin.client_instance_id.as_deref(), Some("acp-abc"));
+    assert_eq!(origin.request_id, Some(42));
+    assert_eq!(user_content.as_deref(), Some("hello"));
+
+    let ended = ServerEvent::TurnEnded {
+        turn_id: "turn-7".to_string(),
+        status: TurnEndStatus::Cancelled,
+        message: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&ended)?,
+        r#"{"type":"turn_ended","turn_id":"turn-7","status":"cancelled"}"#
+    );
+    let decoded = parse_event_json(&serde_json::to_string(&ended)?)?;
+    assert!(matches!(
+        decoded,
+        ServerEvent::TurnEnded {
+            status: TurnEndStatus::Cancelled,
+            message: None,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn turn_lifecycle_events_decode_every_origin_kind() -> Result<()> {
+    for (kind, wire) in [
+        (TurnOriginKind::Client, "client"),
+        (TurnOriginKind::Swarm, "swarm"),
+        (TurnOriginKind::Background, "background"),
+        (TurnOriginKind::Relay, "relay"),
+        (TurnOriginKind::Debug, "debug"),
+    ] {
+        let event = parse_event_json(&format!(
+            r#"{{"type":"turn_started","turn_id":"t","origin":{{"kind":"{wire}"}}}}"#
+        ))?;
+        let ServerEvent::TurnStarted { origin, user_content, .. } = event else {
+            return Err(anyhow!("wrong event type"));
+        };
+        assert_eq!(origin.kind, kind);
+        assert_eq!(origin.client_instance_id, None);
+        assert_eq!(origin.request_id, None);
+        assert_eq!(user_content, None);
+    }
+
+    for (status, wire) in [
+        (TurnEndStatus::Completed, "completed"),
+        (TurnEndStatus::Failed, "failed"),
+        (TurnEndStatus::Cancelled, "cancelled"),
+    ] {
+        let event = parse_event_json(&format!(
+            r#"{{"type":"turn_ended","turn_id":"t","status":"{wire}"}}"#
+        ))?;
+        let ServerEvent::TurnEnded { status: decoded, message, .. } = event else {
+            return Err(anyhow!("wrong event type"));
+        };
+        assert_eq!(decoded, status);
+        assert_eq!(message, None);
+    }
+    Ok(())
+}
+
+#[test]
+fn history_turn_lifecycle_fields_are_backward_compatible() -> Result<()> {
+    let legacy: ServerEvent =
+        serde_json::from_str(r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#)?;
+    let ServerEvent::History {
+        server_features,
+        active_turn,
+        ..
+    } = legacy
+    else {
+        return Err(anyhow!("expected history"));
+    };
+    assert!(server_features.is_empty());
+    assert_eq!(active_turn, None);
+
+    let event = ServerEvent::History {
+        id: 2,
+        session_id: "s".to_string(),
+        messages: Vec::new(),
+        messages_base_count: None,
+        images_unchanged: false,
+        images: Vec::new(),
+        provider_name: None,
+        provider_model: None,
+        available_models: Vec::new(),
+        available_model_routes: Vec::new(),
+        available_service_tiers: None,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        total_tokens: None,
+        token_usage_totals: None,
+        all_sessions: Vec::new(),
+        client_count: None,
+        is_canary: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: None,
+        reload_recovery: None,
+        connection_type: None,
+        status_detail: None,
+        upstream_provider: None,
+        resolved_credential: None,
+        provider_oauth_email: None,
+        provider_oauth_account_label: None,
+        reasoning_effort: None,
+        service_tier: None,
+        subagent_model: None,
+        agent_model_overrides: Default::default(),
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        compaction_mode: Default::default(),
+        activity: None,
+        side_panel: Default::default(),
+        applets: Default::default(),
+        server_features: SERVER_FEATURES.iter().map(|f| f.to_string()).collect(),
+        active_turn: Some(ActiveTurn {
+            turn_id: "turn-1".to_string(),
+            origin: TurnOrigin::server(TurnOriginKind::Swarm),
+            user_content: Some("spawn".to_string()),
+        }),
+    };
+    let decoded = parse_event_json(&serde_json::to_string(&event)?)?;
+    let ServerEvent::History {
+        server_features,
+        active_turn,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected history"));
+    };
+    assert_eq!(server_features, vec!["turn_lifecycle".to_string()]);
+    let active_turn = active_turn.expect("active turn survives the round trip");
+    assert_eq!(active_turn.turn_id, "turn-1");
+    assert_eq!(active_turn.origin.kind, TurnOriginKind::Swarm);
+    assert_eq!(active_turn.user_content.as_deref(), Some("spawn"));
+    Ok(())
 }

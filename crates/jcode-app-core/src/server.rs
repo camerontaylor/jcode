@@ -61,6 +61,7 @@ mod swarm_persistence;
 pub(crate) mod swarm_todo_link;
 mod swarm_watchdog;
 mod turn_failover;
+mod turn_lifecycle;
 mod util;
 mod worker_revive;
 
@@ -1192,6 +1193,9 @@ impl Server {
                     vec![],
                     Some(reminder),
                     event_tx,
+                    crate::protocol::TurnOrigin::server(
+                        crate::protocol::TurnOriginKind::Background,
+                    ),
                 )
                 .await;
 

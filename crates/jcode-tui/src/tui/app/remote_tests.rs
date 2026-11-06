@@ -526,6 +526,9 @@ fn startup_history(session_id: &str) -> ServerEvent {
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
         applets: Default::default(),
+
+        server_features: Vec::new(),
+        active_turn: None,
     }
 }
 
@@ -1401,6 +1404,7 @@ fn history_restore_renders_swarm_deliveries_as_one_row() {
                 content,
                 tool_calls: None,
                 tool_data: None,
+                stored_index: None,
             });
         }
     }

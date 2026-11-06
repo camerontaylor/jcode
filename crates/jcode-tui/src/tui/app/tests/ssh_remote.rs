@@ -260,6 +260,9 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         };
         app.handle_server_event(event, &mut remote);
         assert!(remote.has_loaded_history());

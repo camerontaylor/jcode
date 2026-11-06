@@ -566,8 +566,15 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
         // connection's processing-task map.
         let turn_agent = Arc::clone(&agent);
         let turn = tokio::spawn(async move {
-            process_message_streaming_mpsc(turn_agent, "stream forever", Vec::new(), None, event_tx)
-                .await
+            process_message_streaming_mpsc(
+                turn_agent,
+                "stream forever",
+                Vec::new(),
+                None,
+                event_tx,
+                crate::protocol::TurnOrigin::server(crate::protocol::TurnOriginKind::Debug),
+            )
+            .await
         });
 
         // Wait until the provider stream is actively producing output.
@@ -1004,6 +1011,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 system_reminder: None,
                 active_skill: None,
                 server_failover: false,
+                client_instance_id: None,
             },
             "session_guard",
             &mut ProcessingState {
@@ -1106,6 +1114,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             system_reminder: None,
             active_skill: None,
             server_failover: false,
+            client_instance_id: None,
         },
         session_id,
         &mut ProcessingState {
@@ -1232,6 +1241,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 system_reminder: Some(continuation.to_string()),
                 active_skill: None,
                 server_failover: false,
+                client_instance_id: None,
             },
             session_id,
             &mut ProcessingState {
@@ -1333,6 +1343,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     system_reminder: None,
                     active_skill: None,
                     server_failover: false,
+                    client_instance_id: None,
                 },
                 session_id,
                 &mut ProcessingState {

@@ -55,7 +55,7 @@ use super::{
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
 use crate::id;
-use crate::protocol::{Request, ServerEvent, decode_request, encode_event};
+use crate::protocol::{Request, ServerEvent, TurnOrigin, decode_request, encode_event};
 use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::Stream;
@@ -89,6 +89,9 @@ struct ProcessingMessage {
     active_skill: Option<String>,
     /// Retry on the next pool account after a usage limit (API clients).
     server_failover: bool,
+    /// Identity of the client that sent this prompt, reported in the turn's
+    /// `turn_started` origin so peers can tell whose turn it is.
+    client_instance_id: Option<String>,
 }
 
 struct ProcessingState<'a> {
@@ -1212,6 +1215,7 @@ pub(super) async fn handle_client(
                         system_reminder,
                         active_skill,
                         server_failover: supports_server_failover,
+                        client_instance_id: current_client_instance_id.clone(),
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1332,6 +1336,7 @@ pub(super) async fn handle_client(
                             system_reminder: None,
                             active_skill: None,
                             server_failover: supports_server_failover,
+                            client_instance_id: current_client_instance_id.clone(),
                         },
                         &client_session_id,
                         &mut ProcessingState {
@@ -2064,6 +2069,7 @@ pub(super) async fn handle_client(
                     subagent_type,
                     model,
                     session_id,
+                    current_client_instance_id.clone(),
                     &agent,
                     &client_event_tx,
                 );
@@ -3416,6 +3422,7 @@ async fn start_processing_message(
         system_reminder,
         active_skill,
         server_failover,
+        client_instance_id,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -3506,6 +3513,7 @@ async fn start_processing_message(
                 system_reminder,
                 event_tx,
                 server_failover,
+                TurnOrigin::client(client_instance_id, id),
             ),
         ))
         .catch_unwind()
@@ -3928,10 +3936,25 @@ pub(super) async fn process_message_streaming_mpsc(
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+    origin: TurnOrigin,
 ) -> Result<()> {
     let mut agent = agent.lock().await;
-    process_locked_message_streaming_mpsc(&mut agent, content, images, system_reminder, event_tx)
-        .await
+    let lifecycle = super::turn_lifecycle::TurnLifecycle::start(
+        &agent,
+        &event_tx,
+        origin,
+        super::turn_lifecycle::user_content(content),
+    );
+    let result = process_locked_message_streaming_mpsc(
+        &mut agent,
+        content,
+        images,
+        system_reminder,
+        event_tx.clone(),
+    )
+    .await;
+    lifecycle.finish(&result);
+    result
 }
 
 /// Same as [`process_message_streaming_mpsc`] for a caller that already holds
@@ -3968,6 +3991,10 @@ pub(super) async fn process_locked_message_streaming_mpsc(
 #[cfg(test)]
 #[path = "client_lifecycle_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "turn_lifecycle_tests.rs"]
+mod turn_lifecycle_tests;
 
 #[cfg(test)]
 #[path = "client_target_attach_tests.rs"]

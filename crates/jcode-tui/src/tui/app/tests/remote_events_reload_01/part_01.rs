@@ -225,6 +225,9 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         },
         &mut remote,
     );
@@ -285,6 +288,9 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         },
         &mut remote,
     );
@@ -345,6 +351,9 @@ fn test_handle_server_event_history_preserves_reasoning_effort_for_same_session_
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         },
         &mut remote,
     );
@@ -432,6 +441,9 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         },
         &mut remote,
     );
@@ -505,6 +517,7 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
                 content: "first message kept by the rewind".to_string(),
                 tool_calls: None,
                 tool_data: None,
+                stored_index: None,
             }],
             images: vec![],
             provider_name: Some("claude".to_string()),
@@ -541,6 +554,9 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         },
         &mut remote,
     );
@@ -622,6 +638,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 content: "truncated payload from another client's rewind".to_string(),
                 tool_calls: None,
                 tool_data: None,
+                stored_index: None,
             }],
             images: vec![],
             provider_name: Some("claude".to_string()),
@@ -658,6 +675,9 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         },
         &mut remote,
     );
@@ -711,6 +731,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                     content: "truncated payload from another client's rewind".to_string(),
                     tool_calls: None,
                     tool_data: None,
+                    stored_index: None,
                 }],
                 images: vec![],
                 provider_name: Some("claude".to_string()),
@@ -747,6 +768,9 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 activity: None,
                 side_panel: crate::side_panel::SidePanelSnapshot::default(),
                 applets: Default::default(),
+            
+                server_features: Vec::new(),
+                active_turn: None,
             },
             &mut remote,
         );
@@ -820,6 +844,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
                 content: "first message kept by the rewind".to_string(),
                 tool_calls: None,
                 tool_data: None,
+                stored_index: None,
             }],
             images: vec![],
             provider_name: Some("claude".to_string()),
@@ -856,6 +881,9 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         },
         &mut remote,
     );
@@ -948,6 +976,9 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         },
         &mut remote,
     );
@@ -1695,6 +1726,9 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
             applets: Default::default(),
+        
+            server_features: Vec::new(),
+            active_turn: None,
         },
         &mut remote,
     );

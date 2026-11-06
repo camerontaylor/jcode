@@ -1,4 +1,6 @@
 use super::*;
+use crate::session_catalog;
+use rusqlite::{Connection, params};
 
 #[test]
 fn runtime_commands_are_capability_gated_and_never_send_a_prompt() {
@@ -209,7 +211,7 @@ fn persisted_metadata_reads_large_transcripts_from_bounded_windows() {
     .unwrap();
     drop(file);
 
-    let metadata = BridgeState::resolve_session_metadata("session_large").expect("metadata");
+    let metadata = session_catalog::resolve_session_metadata("session_large").expect("metadata");
     assert_eq!(metadata.working_dir.as_deref(), Some("/workspace/large"));
     assert_eq!(metadata.title.as_deref(), Some("Generated title"));
     assert_eq!(metadata.custom_title.as_deref(), Some("Pinned title"));
@@ -1872,7 +1874,7 @@ fn a_session_id_cannot_escape_the_sessions_directory() {
         "semi;colon",
     ] {
         assert!(
-            BridgeState::session_record_path(hostile).is_none(),
+            session_catalog::session_record_path(hostile).is_none(),
             "`{hostile}` must not resolve to a session record path"
         );
     }
@@ -1880,7 +1882,7 @@ fn a_session_id_cannot_escape_the_sessions_directory() {
 
 #[test]
 fn a_plain_session_id_still_resolves() {
-    let path = BridgeState::session_record_path("session_otter_1785728596263_80eb5ad6012a1864")
+    let path = session_catalog::session_record_path("session_otter_1785728596263_80eb5ad6012a1864")
         .expect("a normal session id must resolve");
     assert!(path.ends_with("session_otter_1785728596263_80eb5ad6012a1864.json"));
     assert!(
@@ -1899,7 +1901,7 @@ fn a_plain_session_id_still_resolves() {
 #[test]
 fn session_records_are_read_from_the_instance_home() {
     let home = ScopedJcodeHome::new("instance-home");
-    let path = BridgeState::session_record_path("session_x_1_a");
+    let path = session_catalog::session_record_path("session_x_1_a");
     let path = path.expect("a normal session id must resolve");
     assert!(
         path.starts_with(&home.path),
@@ -1935,7 +1937,7 @@ fn unattached_list_sessions_handles_no_session_candidates() {
     }
 
     write_session_record(&home.path, "first_session", &home.path);
-    assert_eq!(BridgeState::stored_session_ids(None), ["first_session"]);
+    assert_eq!(session_catalog::stored_session_ids(None), ["first_session"]);
 }
 
 #[test]
@@ -2038,7 +2040,7 @@ fn unattached_list_sessions_discovers_all_persisted_records() {
 #[test]
 fn limited_session_list_reads_compact_index_without_transcript_records() {
     let home = ScopedJcodeHome::new("metadata-index");
-    assert!(BridgeState::recent_session_index_entries().is_empty());
+    assert!(session_catalog::recent_session_index_entries().is_empty());
     let mut connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
     let transaction = connection.transaction().unwrap();
     for index in 0..100 {
@@ -3065,6 +3067,7 @@ fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
             content: row.content,
             tool_calls: None,
             tool_data: row.tool_data,
+            stored_index: None,
             response_stats: row.response_stats,
         })
         .collect();
@@ -3960,7 +3963,7 @@ fn session_list_recovers_save_label_missing_from_older_index_rows() {
         .to_string(),
     )
     .unwrap();
-    assert!(BridgeState::recent_session_index_entries().is_empty());
+    assert!(session_catalog::recent_session_index_entries().is_empty());
     let connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
     connection
         .execute(
@@ -3990,7 +3993,7 @@ fn session_list_recovers_save_label_missing_from_older_index_rows() {
 #[test]
 fn limited_session_list_always_includes_saved_sessions() {
     let home = ScopedJcodeHome::new("saved-beyond-limit");
-    assert!(BridgeState::recent_session_index_entries().is_empty());
+    assert!(session_catalog::recent_session_index_entries().is_empty());
     let connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
     for index in 0..5 {
         connection
@@ -4085,7 +4088,7 @@ fn untitled_indexed_sessions_are_named_after_their_first_prompt_once() {
         ),
     )
     .unwrap();
-    assert!(BridgeState::recent_session_index_entries().is_empty());
+    assert!(session_catalog::recent_session_index_entries().is_empty());
     let connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
     for (id, at) in [("session_fox_1_aa", 2), ("session_owl_2_bb", 1)] {
         connection
