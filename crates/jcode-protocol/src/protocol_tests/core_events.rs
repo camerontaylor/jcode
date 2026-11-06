@@ -716,6 +716,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
             content: "hello".to_string(),
             tool_calls: None,
             tool_data: None,
+            stored_index: None,
         }],
         images: Vec::new(),
         provider_name: Some("openai".to_string()),
@@ -818,6 +819,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
             content: "older response".to_string(),
             tool_calls: None,
             tool_data: None,
+            stored_index: None,
         }],
         images: Vec::new(),
         compacted_total: 128,
@@ -977,6 +979,7 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
         content: content.to_string(),
         tool_calls: None,
         tool_data: None,
+        stored_index: None,
     };
     let messages = vec![message("user", "hi"), message("assistant", "hello")];
     let whole =

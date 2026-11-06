@@ -577,6 +577,11 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
             replay_ids.len(),
             "consecutive same-role messages keep distinct ids: {replay_ids:?}"
         );
+        assert!(
+            replay_ids.iter().all(|id| id.contains(":msg:")),
+            "the daemon reports each stored message's own index, so replay ids \
+             survive a shift in the rendered list: {replay_ids:?}"
+        );
         for notification in &attached[..started_at] {
             assert_ne!(
                 notification["params"]["update"]["content"]["text"], "echo",

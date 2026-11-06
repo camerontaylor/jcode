@@ -125,6 +125,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
                 content: "server history replay".to_string(),
                 tool_calls: None,
                 tool_data: None,
+                stored_index: None,
             }],
             images: vec![],
             provider_name: Some("claude".to_string()),
@@ -328,6 +329,7 @@ fn test_compacted_history_event_applies_expanded_window() {
                     content: "Earlier conversation compacted - 64 older historical messages hidden. Showing 64 of 128 compacted messages. Scroll to the top to load more.".to_string(),
                     tool_calls: None,
                     tool_data: None,
+                    stored_index: None,
                 },
                 crate::protocol::HistoryMessage {
                     response_stats: None,
@@ -335,6 +337,7 @@ fn test_compacted_history_event_applies_expanded_window() {
                     content: "older response".to_string(),
                     tool_calls: None,
                     tool_data: None,
+                    stored_index: None,
                 },
                 crate::protocol::HistoryMessage {
                     response_stats: None,
@@ -342,6 +345,7 @@ fn test_compacted_history_event_applies_expanded_window() {
                     content: "current prompt".to_string(),
                     tool_calls: None,
                     tool_data: None,
+                    stored_index: None,
                 },
             ],
             images: vec![],
@@ -633,6 +637,7 @@ fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
         content: "new since reload".to_string(),
         tool_calls: None,
         tool_data: None,
+        stored_index: None,
     }];
     let mut event = delta_history_event("ses_delta", tail, Some(2));
     if let crate::protocol::ServerEvent::History {

@@ -1957,10 +1957,13 @@ fn peer_user_message_chunk(session_id: &str, turn_id: &str, content: &str) -> Va
 
 /// `session/update` notifications that replay stored history.
 ///
-/// Each message carries a `messageId` derived from the session and its position
-/// in the transcript, so a client groups replayed chunks the same way it groups
-/// live ones and never merges two consecutive same-role messages. The id is
-/// deterministic, so replaying the same transcript twice yields the same ids.
+/// Each message carries a `messageId`, so a client groups replayed chunks the
+/// same way it groups live ones and never merges two consecutive same-role
+/// messages. The id is derived from the *stored* message's own index whenever
+/// the daemon reports one: unlike the position in `messages`, that index does
+/// not move when rendering skips stored messages (tool-only rounds) or when the
+/// client asked for a delta, so a reload cannot overwrite the wrong item.
+/// Synthetic rows (which have no stored message) fall back to their position.
 fn history_replay_updates(
     session_id: &str,
     messages: &[crate::protocol::HistoryMessage],
@@ -1974,11 +1977,15 @@ fn history_replay_updates(
                 "assistant" => "agent_message_chunk",
                 _ => "agent_message_chunk",
             };
+            let message_id = match message.stored_index {
+                Some(stored) => format!("{session_id}:msg:{stored}"),
+                None => format!("{session_id}:history:{index}"),
+            };
             json!({
                 "sessionId": session_id,
                 "update": {
                     "sessionUpdate": update_name,
-                    "messageId": format!("{session_id}:history:{index}"),
+                    "messageId": message_id,
                     "content": {
                         "type": "text",
                         "text": message.content,
@@ -3440,12 +3447,21 @@ mod tests {
     }
 
     fn history_message(role: &str, content: &str) -> crate::protocol::HistoryMessage {
+        history_message_at(role, content, None)
+    }
+
+    fn history_message_at(
+        role: &str,
+        content: &str,
+        stored_index: Option<usize>,
+    ) -> crate::protocol::HistoryMessage {
         crate::protocol::HistoryMessage {
             response_stats: None,
             role: role.to_string(),
             content: content.to_string(),
             tool_calls: None,
             tool_data: None,
+            stored_index,
         }
     }
 
@@ -3539,6 +3555,59 @@ mod tests {
             history_replay_updates("session1", &messages),
             updates,
             "replay ids are stable"
+        );
+    }
+
+    #[test]
+    fn replay_ids_prefer_the_stored_message_index() {
+        let messages = vec![
+            history_message_at("user", "prompt", Some(3)),
+            history_message_at("assistant", "answer", Some(7)),
+            // A synthetic row (for example the compacted-history notice) has no
+            // stored message, so it falls back to its position.
+            history_message_at("assistant", "[compacted]", None),
+        ];
+        let updates = history_replay_updates("session1", &messages);
+        let ids: Vec<String> = updates
+            .iter()
+            .map(|update| chunk_message_id(&update["update"]).expect("id"))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["session1:msg:3", "session1:msg:7", "session1:history:2",],
+            "stored indices are used when present, position otherwise"
+        );
+    }
+
+    #[test]
+    fn replay_ids_survive_a_shift_in_the_rendered_list() {
+        // The same stored messages, but a render pass that drops a tool-only
+        // round shifts their positions in `messages`. The ids must not move.
+        let before = vec![
+            history_message_at("user", "prompt", Some(3)),
+            history_message_at("assistant", "tool round", Some(4)),
+            history_message_at("assistant", "answer", Some(7)),
+        ];
+        let after = vec![
+            history_message_at("user", "prompt", Some(3)),
+            history_message_at("assistant", "answer", Some(7)),
+        ];
+        let ids = |messages: &[crate::protocol::HistoryMessage]| -> Vec<String> {
+            history_replay_updates("session1", messages)
+                .iter()
+                .map(|update| chunk_message_id(&update["update"]).expect("id"))
+                .collect()
+        };
+        let before_ids = ids(&before);
+        let after_ids = ids(&after);
+        assert_eq!(before_ids[0], after_ids[0]);
+        assert_eq!(
+            before_ids[2], after_ids[1],
+            "the answer keeps its id when the tool round stops being rendered"
+        );
+        assert_ne!(
+            before_ids[1], after_ids[1],
+            "different stored messages keep different ids"
         );
     }
 

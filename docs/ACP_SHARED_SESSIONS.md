@@ -526,3 +526,14 @@ extend the numbered list above where they overlap.
     turn's `user_content` and suppresses the live user chunk when it is already
     there. A live peer turn is always announced: this connection has replayed
     nothing for it.
+33. **Replay ids use the stored message's own index.** `{session}:history:{index}`
+    was positional: rendering skips stored messages (tool-only rounds), a delta
+    request changes the base, and compaction rewrites the transcript, so any of
+    those shifts the position of an otherwise unchanged message and a reload
+    would overwrite the wrong timeline item. `HistoryMessage` now carries the
+    additive `stored_index` the daemon already tracks for rewind targets, and
+    replay ids are `{session}:msg:{stored_index}`, falling back to the positional
+    form only for synthetic rows that have no stored message. Stored indices are
+    still renumbered by a compaction that rewrites the transcript, so ids for
+    messages older than the retained tail can still move across a compaction;
+    every other shift (render skipping, delta bases) no longer affects them.

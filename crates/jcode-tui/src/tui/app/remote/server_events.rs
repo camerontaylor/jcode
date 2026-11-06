@@ -398,6 +398,7 @@ mod history_dedup_tests {
             content: content.to_string(),
             tool_calls: None,
             tool_data: None,
+            stored_index: None,
         }
     }
 
@@ -1841,6 +1842,7 @@ pub(in crate::tui::app) fn handle_server_event(
                             content: msg.content,
                             tool_calls: (!msg.tool_calls.is_empty()).then_some(msg.tool_calls),
                             tool_data: msg.tool_data,
+                            stored_index: None,
                         }),
                 );
                 messages.extend(tail);
