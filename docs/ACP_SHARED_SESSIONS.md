@@ -516,3 +516,13 @@ extend the numbered list above where they overlap.
     (`{session}:own:{request id}` or `{session}:peer:{turn id}`) and advance on
     each message boundary; the peer prompt chunk, command responses and skill
     notices carry their own scoped ids.
+32. **A mid-turn attach does not show the running prompt twice.** The daemon's
+    `GetHistory` falls back to the *persisted* session while a turn holds the
+    agent lock, and a turn persists its user message before streaming, so the
+    snapshot a mid-turn attacher receives already ends with that turn's prompt
+    (verified end-to-end). Since Deviation 31 gives the replayed copy and the
+    live `user_message_chunk` different ids, the prompt appeared as two items.
+    The router now checks the replayed tail (last 16 messages) for the active
+    turn's `user_content` and suppresses the live user chunk when it is already
+    there. A live peer turn is always announced: this connection has replayed
+    nothing for it.

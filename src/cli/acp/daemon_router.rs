@@ -99,6 +99,9 @@ pub(super) enum RouteAction {
         turn_id: String,
         origin: TurnOrigin,
         user_content: Option<String>,
+        /// The attaching client's replayed `History` already contains this
+        /// prompt, so re-sending it as a live user chunk would show it twice.
+        prompt_already_replayed: bool,
     },
     PeerTurnEvent(ServerEvent),
     PeerTurnEnded {
@@ -229,6 +232,7 @@ impl RouterState {
             server_features,
             active_turn,
             all_sessions,
+            messages,
             ..
         } = &event
         {
@@ -236,7 +240,16 @@ impl RouterState {
             self.features = server_features.clone();
             self.live_sessions = Some(all_sessions.clone());
             if let Some(turn) = active_turn.clone() {
-                actions.extend(self.open_peer_turn(turn));
+                // A mid-turn attach gets the running turn's user message in the
+                // snapshot itself (the daemon falls back to the persisted
+                // session while the agent lock is held, and the turn persists
+                // its prompt before streaming). Announcing it again would show
+                // the prompt twice.
+                let prompt_already_replayed = turn
+                    .user_content
+                    .as_deref()
+                    .is_some_and(|content| history_has_prompt(messages, content));
+                actions.extend(self.open_peer_turn(turn, prompt_already_replayed));
             }
         }
 
@@ -321,11 +334,16 @@ impl RouterState {
                         request_id: origin.request_id.unwrap_or_default(),
                     });
                 } else {
-                    actions.extend(self.open_peer_turn(ActiveTurn {
-                        turn_id,
-                        origin,
-                        user_content,
-                    }));
+                    // A live announcement: this connection has not replayed any
+                    // history for it, so the prompt is new.
+                    actions.extend(self.open_peer_turn(
+                        ActiveTurn {
+                            turn_id,
+                            origin,
+                            user_content,
+                        },
+                        false,
+                    ));
                 }
             }
             ServerEvent::TurnEnded {
@@ -367,7 +385,11 @@ impl RouterState {
         actions
     }
 
-    fn open_peer_turn(&mut self, turn: ActiveTurn) -> Vec<RouteAction> {
+    fn open_peer_turn(
+        &mut self,
+        turn: ActiveTurn,
+        prompt_already_replayed: bool,
+    ) -> Vec<RouteAction> {
         // A `History` that reports our own running turn as active (a catalog
         // reply during our prompt) must not be mirrored as a peer turn.
         if self
@@ -397,6 +419,7 @@ impl RouterState {
             turn_id: turn.turn_id,
             origin: turn.origin,
             user_content: turn.user_content,
+            prompt_already_replayed,
         }]
     }
 
@@ -462,6 +485,21 @@ impl RouterState {
     }
 }
 
+/// How many trailing history messages are searched for the running turn's
+/// prompt. The prompt is appended once per turn, so it is near the tail; the
+/// bound keeps the check cheap on a long transcript and avoids matching a much
+/// older message that happens to share its text.
+const PROMPT_MATCH_WINDOW: usize = 16;
+
+/// Whether replayed `History` already contains `content` as a user message.
+fn history_has_prompt(messages: &[crate::protocol::HistoryMessage], content: &str) -> bool {
+    messages
+        .iter()
+        .rev()
+        .take(PROMPT_MATCH_WINDOW)
+        .any(|message| message.role == "user" && message.content == content)
+}
+
 /// Request ids that answer a request this adapter may be waiting on.
 fn reply_request_id(event: &ServerEvent) -> Option<u64> {
     match event {
@@ -519,6 +557,30 @@ mod tests {
         let mut router = router();
         router.route(history_event(&["turn_lifecycle"], None));
         router
+    }
+
+    /// `History` with a rendered transcript of `(role, content)` messages.
+    fn history_event_with(
+        features: &[&str],
+        active_turn: Option<Value>,
+        messages: &[(&str, &str)],
+    ) -> ServerEvent {
+        let messages: Vec<Value> = messages
+            .iter()
+            .map(|(role, content)| json!({ "role": role, "content": content }))
+            .collect();
+        let mut value = json!({
+            "type": "history",
+            "id": 1,
+            "session_id": "session-1",
+            "messages": messages,
+            "server_features": features,
+            "all_sessions": ["session-1"],
+        });
+        if let Some(active_turn) = active_turn {
+            value["active_turn"] = active_turn;
+        }
+        serde_json::from_value(value).expect("history decodes")
     }
 
     fn history_event(features: &[&str], active_turn: Option<Value>) -> ServerEvent {
@@ -1142,6 +1204,92 @@ mod tests {
                 Err(mpsc::error::TryRecvError::Disconnected)
             ),
             "a waiter registered after close fails immediately"
+        );
+    }
+
+    /// A mid-turn attach gets the running turn's prompt in the snapshot itself,
+    /// so the router must not announce it again as a live user chunk.
+    #[test]
+    fn a_mid_turn_attach_does_not_re_announce_the_prompt_in_history() {
+        let mut router = router();
+        let actions = router.route(history_event_with(
+            &["turn_lifecycle"],
+            Some(json!({
+                "turn_id": "t5",
+                "origin": {
+                    "kind": "client",
+                    "client_instance_id": PEER,
+                    "request_id": 3
+                },
+                "user_content": "the running prompt",
+            })),
+            &[
+                ("user", "earlier prompt"),
+                ("assistant", "earlier answer"),
+                ("user", "the running prompt"),
+            ],
+        ));
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [RouteAction::PeerTurnStarted {
+                    prompt_already_replayed: true,
+                    ..
+                }]
+            ),
+            "the in-flight prompt is already replayed: {actions:?}"
+        );
+    }
+
+    /// A live announcement is new to this connection, so its prompt must be
+    /// shown even when an older history message happens to match.
+    #[test]
+    fn a_live_peer_turn_always_announces_its_prompt() {
+        let mut router = lifecycle_router();
+        let actions = router.route(turn_started("t1", peer(5), Some("peer prompt")));
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [RouteAction::PeerTurnStarted {
+                    prompt_already_replayed: false,
+                    ..
+                }]
+            ),
+            "a live peer turn announces its prompt: {actions:?}"
+        );
+    }
+
+    /// The in-flight prompt may not be the very last replayed message (a tool
+    /// loop persists results after it), so the check looks at the tail.
+    #[test]
+    fn the_prompt_match_looks_past_trailing_tool_rounds() {
+        let mut router = router();
+        let actions = router.route(history_event_with(
+            &["turn_lifecycle"],
+            Some(json!({
+                "turn_id": "t5",
+                "origin": {
+                    "kind": "client",
+                    "client_instance_id": PEER,
+                    "request_id": 3
+                },
+                "user_content": "the running prompt",
+            })),
+            &[
+                ("user", "the running prompt"),
+                ("assistant", "working on it"),
+                ("user", "tool result"),
+            ],
+        ));
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [RouteAction::PeerTurnStarted {
+                    prompt_already_replayed: true,
+                    ..
+                }]
+            ),
+            "the prompt is found behind the trailing tool round: {actions:?}"
         );
     }
 

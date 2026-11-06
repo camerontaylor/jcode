@@ -1654,6 +1654,7 @@ impl AcpRuntime {
                 turn_id,
                 origin,
                 user_content,
+                prompt_already_replayed,
             } => {
                 // A fresh mapper per peer turn: tool-call ids and streamed
                 // inputs must not leak between turns or into this adapter's own
@@ -1665,7 +1666,14 @@ impl AcpRuntime {
                 ));
                 self.write_turn_notification(&session_id, &turn_id, "started", Some(&origin), None)
                     .await?;
-                if let Some(content) = user_content.filter(|content| !content.trim().is_empty()) {
+                // A mid-turn attach already replayed this prompt from the
+                // snapshot; announcing it again would show it twice.
+                let content = if prompt_already_replayed {
+                    None
+                } else {
+                    user_content
+                };
+                if let Some(content) = content.filter(|content| !content.trim().is_empty()) {
                     self.write_notification(
                         "session/update",
                         peer_user_message_chunk(&session_id, &turn_id, &content),
@@ -3144,6 +3152,7 @@ mod tests {
                 turn_id: "t1".to_string(),
                 origin: TurnOrigin::client(Some("peer".to_string()), 3),
                 user_content: Some("peer prompt".to_string()),
+                prompt_already_replayed: false,
             }));
             assert!(gate.hold(delta_action("peer output")));
             assert_eq!(gate.buffered.len(), 2);
@@ -3250,6 +3259,7 @@ mod tests {
                 turn_id: "t1".to_string(),
                 origin: TurnOrigin::client(Some("peer".to_string()), 3),
                 user_content: None,
+                prompt_already_replayed: false,
             }));
             for index in 0..MAX_BUFFERED_PEER_ACTIONS + 16 {
                 assert!(gate.hold(delta_action(&format!("chunk-{index}"))));

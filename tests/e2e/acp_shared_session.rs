@@ -583,6 +583,31 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
                 "live peer output must not interleave with the replay: {attached:#?}"
             );
         }
+
+        // The in-flight turn's prompt is already in the snapshot, so it must
+        // not be announced a second time as a live user chunk: the attaching
+        // client would show the same message twice.
+        let in_flight_prompt = "Reply with exactly the word: echo";
+        assert!(
+            attached[..started_at].iter().any(|notification| {
+                notification["method"] == "session/update"
+                    && notification["params"]["update"]["sessionUpdate"] == "user_message_chunk"
+                    && notification["params"]["update"]["content"]["text"] == in_flight_prompt
+            }),
+            "the snapshot already contains the in-flight prompt: {attached:#?}"
+        );
+        let duplicates: Vec<&serde_json::Value> = attached[started_at..]
+            .iter()
+            .filter(|notification| {
+                notification["method"] == "session/update"
+                    && notification["params"]["update"]["sessionUpdate"] == "user_message_chunk"
+                    && notification["params"]["update"]["content"]["text"] == in_flight_prompt
+            })
+            .collect();
+        assert!(
+            duplicates.is_empty(),
+            "the in-flight prompt must not be re-announced after the turn opens: {duplicates:#?}"
+        );
         latecomer.shutdown().await;
         let _ = collect_until_done_unix(&mut other, message_id).await?;
 
