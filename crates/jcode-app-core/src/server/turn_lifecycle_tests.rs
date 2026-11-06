@@ -872,3 +872,55 @@ async fn cancelled_turn_relays_its_end_to_every_attachment() {
         None
     );
 }
+
+/// The turn must be published as the session's active turn *before*
+/// `turn_started` goes out. A client that attaches in that window registers its
+/// event sender and then builds `History` from the registry; if the
+/// announcement won the race, its `History` would carry `active_turn: None` and
+/// it would drop every event of the turn.
+#[tokio::test]
+async fn the_active_turn_is_registered_before_turn_started_is_announced() {
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let harness = TurnHarness::new("session_turn_lifecycle_register_order", &["conn-a"]).await;
+    let agent = harness.agent.lock().await;
+    let session_id = agent.session_id().to_string();
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+
+    // Sampled from inside the announcement, i.e. at the instant `turn_started`
+    // is emitted.
+    let mut active_at_announcement: Option<Option<String>> = None;
+    let lifecycle = super::super::turn_lifecycle::TurnLifecycle::start_with(
+        &agent,
+        &tx,
+        crate::protocol::TurnOrigin::client(Some("conn-a".to_string()), 41),
+        Some("hi".to_string()),
+        |announcement| {
+            active_at_announcement = Some(
+                crate::turn_lifecycle_registry::active_turn(&session_id).map(|turn| turn.turn_id),
+            );
+            let _ = tx.send(announcement);
+        },
+    );
+
+    let announced = match rx.try_recv() {
+        Ok(ServerEvent::TurnStarted { turn_id, .. }) => turn_id,
+        other => panic!("expected turn_started, got {other:?}"),
+    };
+    assert_eq!(
+        active_at_announcement,
+        Some(Some(announced.clone())),
+        "the registry must already name this turn when turn_started is emitted"
+    );
+    assert_eq!(
+        crate::turn_lifecycle_registry::active_turn(&session_id).map(|turn| turn.turn_id),
+        Some(announced)
+    );
+
+    // Dropping the pair clears the registration and reports the end.
+    drop(lifecycle);
+    assert_eq!(
+        crate::turn_lifecycle_registry::active_turn(&session_id),
+        None
+    );
+}

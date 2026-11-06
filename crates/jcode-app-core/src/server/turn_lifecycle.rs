@@ -56,25 +56,60 @@ pub(super) struct TurnLifecycle {
 }
 
 impl TurnLifecycle {
-    /// Emit `turn_started` and publish the turn as the session's active turn.
-    /// Call while holding the agent lock, immediately before the turn's first
-    /// stream event.
+    /// Publish the turn as the session's active turn, then emit
+    /// `turn_started`. Call while holding the agent lock, immediately before
+    /// the turn's first stream event.
     pub(super) fn start(
         agent: &Agent,
         event_tx: &mpsc::UnboundedSender<ServerEvent>,
         origin: TurnOrigin,
         user_content: Option<String>,
     ) -> Self {
-        let mut lifecycle = Self::emit_start(event_tx, agent, origin.clone(), user_content.clone());
-        lifecycle.registry = Some(crate::turn_lifecycle_registry::register_active_turn(
+        Self::start_with(agent, event_tx, origin, user_content, |announcement| {
+            let _ = event_tx.send(announcement);
+        })
+    }
+
+    /// [`start`](Self::start) with the announcement handed to `emit` instead of
+    /// being sent here. The registration has already happened by the time
+    /// `emit` runs, which is what makes "registered before announced" explicit
+    /// and testable.
+    pub(super) fn start_with(
+        agent: &Agent,
+        event_tx: &mpsc::UnboundedSender<ServerEvent>,
+        origin: TurnOrigin,
+        user_content: Option<String>,
+        emit: impl FnOnce(ServerEvent),
+    ) -> Self {
+        let turn_id = next_turn_id();
+        let cancel_signal = agent.graceful_shutdown_signal();
+        let cancel_epoch = cancel_signal.epoch();
+        // Register *before* announcing. A client that attaches in this window
+        // registers its event sender and then builds `History` from this
+        // registry: if the announcement came first, that `History` would carry
+        // `active_turn: None` and the attacher would drop every event of the
+        // turn as belonging to no open turn.
+        let registry = crate::turn_lifecycle_registry::register_active_turn(
             agent.session_id(),
             ActiveTurn {
-                turn_id: lifecycle.turn_id.clone(),
-                origin,
-                user_content,
+                turn_id: turn_id.clone(),
+                origin: origin.clone(),
+                user_content: user_content.clone(),
             },
-        ));
-        lifecycle
+        );
+        emit(ServerEvent::TurnStarted {
+            turn_id: turn_id.clone(),
+            origin,
+            user_content,
+        });
+        Self {
+            turn_id,
+            cancel_signal,
+            cancel_epoch,
+            registry: Some(registry),
+            event_tx: event_tx.clone(),
+            closed: false,
+        }
     }
 
     /// Like [`start`](Self::start) but without publishing the turn in
@@ -84,15 +119,6 @@ impl TurnLifecycle {
     pub(super) fn start_connection_local(
         agent: &Agent,
         event_tx: &mpsc::UnboundedSender<ServerEvent>,
-        origin: TurnOrigin,
-        user_content: Option<String>,
-    ) -> Self {
-        Self::emit_start(event_tx, agent, origin, user_content)
-    }
-
-    fn emit_start(
-        event_tx: &mpsc::UnboundedSender<ServerEvent>,
-        agent: &Agent,
         origin: TurnOrigin,
         user_content: Option<String>,
     ) -> Self {
