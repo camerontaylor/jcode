@@ -1175,26 +1175,8 @@ impl AcpRuntime {
         session_id: &str,
         messages: Vec<crate::protocol::HistoryMessage>,
     ) -> Result<()> {
-        for message in messages {
-            let update_name = match message.role.as_str() {
-                "user" => "user_message_chunk",
-                "assistant" => "agent_message_chunk",
-                _ => "agent_message_chunk",
-            };
-            self.write_notification(
-                "session/update",
-                json!({
-                    "sessionId": session_id,
-                    "update": {
-                        "sessionUpdate": update_name,
-                        "content": {
-                            "type": "text",
-                            "text": message.content,
-                        }
-                    }
-                }),
-            )
-            .await?;
+        for update in history_replay_updates(session_id, &messages) {
+            self.write_notification("session/update", update).await?;
         }
         Ok(())
     }
@@ -1257,7 +1239,10 @@ impl AcpRuntime {
                 "session/update",
                 json!({
                     "sessionId": session_id,
-                    "update": agent_message_chunk(format!("{notice}\n\n")),
+                    "update": agent_message_chunk_with_id(
+                    format!("{notice}\n\n"),
+                    format!("{session_id}:skill-notice:{rpc_id}"),
+                ),
                 }),
             )
             .await?;
@@ -1321,7 +1306,10 @@ impl AcpRuntime {
             "session/update",
             json!({
                 "sessionId": session_id,
-                "update": agent_message_chunk(response),
+                "update": agent_message_chunk_with_id(
+                    response,
+                    format!("{session_id}:command:{rpc_id}"),
+                ),
             }),
         )
         .await?;
@@ -1345,7 +1333,11 @@ impl AcpRuntime {
         prompt_rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
     ) -> Result<()> {
         let session_id = session.session_id().await;
-        let mut mapper = EventMapper::new(session_id.clone(), self.profile);
+        let mut mapper = EventMapper::with_scope(
+            session_id.clone(),
+            self.profile,
+            format!("{session_id}:own:{prompt_id}"),
+        );
         let mut stop_reason = "end_turn".to_string();
         let mut turn_usage = TurnUsage::default();
         loop {
@@ -1666,20 +1658,17 @@ impl AcpRuntime {
                 // A fresh mapper per peer turn: tool-call ids and streamed
                 // inputs must not leak between turns or into this adapter's own
                 // prompt mapping.
-                *peer_mapper.lock().await =
-                    Some(EventMapper::new(session_id.clone(), self.profile));
+                *peer_mapper.lock().await = Some(EventMapper::with_scope(
+                    session_id.clone(),
+                    self.profile,
+                    format!("{session_id}:peer:{turn_id}"),
+                ));
                 self.write_turn_notification(&session_id, &turn_id, "started", Some(&origin), None)
                     .await?;
                 if let Some(content) = user_content.filter(|content| !content.trim().is_empty()) {
                     self.write_notification(
                         "session/update",
-                        json!({
-                            "sessionId": session_id,
-                            "update": {
-                                "sessionUpdate": "user_message_chunk",
-                                "content": { "type": "text", "text": content },
-                            }
-                        }),
+                        peer_user_message_chunk(&session_id, &turn_id, &content),
                     )
                     .await?;
                 }
@@ -1703,7 +1692,16 @@ impl AcpRuntime {
                 let updates = {
                     let mut mapper = peer_mapper.lock().await;
                     mapper
-                        .get_or_insert_with(|| EventMapper::new(session_id.clone(), self.profile))
+                        .get_or_insert_with(|| {
+                            // Only reachable if a peer turn's start was missed;
+                            // a per-connection counter still gives the turn's
+                            // chunks one stable namespace.
+                            let scope = format!(
+                                "{session_id}:peer-stream:{}",
+                                self.connection_seq.fetch_add(1, Ordering::Relaxed)
+                            );
+                            EventMapper::with_scope(session_id.clone(), self.profile, scope)
+                        })
                         .map_event(event)
                 };
                 for update in updates {
@@ -1937,6 +1935,52 @@ fn random_uuid_v4() -> String {
     )
 }
 
+/// `session/update` for the prompt that started a mirrored peer turn.
+fn peer_user_message_chunk(session_id: &str, turn_id: &str, content: &str) -> Value {
+    json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "user_message_chunk",
+            "messageId": format!("{session_id}:{turn_id}:user"),
+            "content": { "type": "text", "text": content },
+        }
+    })
+}
+
+/// `session/update` notifications that replay stored history.
+///
+/// Each message carries a `messageId` derived from the session and its position
+/// in the transcript, so a client groups replayed chunks the same way it groups
+/// live ones and never merges two consecutive same-role messages. The id is
+/// deterministic, so replaying the same transcript twice yields the same ids.
+fn history_replay_updates(
+    session_id: &str,
+    messages: &[crate::protocol::HistoryMessage],
+) -> Vec<Value> {
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let update_name = match message.role.as_str() {
+                "user" => "user_message_chunk",
+                "assistant" => "agent_message_chunk",
+                _ => "agent_message_chunk",
+            };
+            json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": update_name,
+                    "messageId": format!("{session_id}:history:{index}"),
+                    "content": {
+                        "type": "text",
+                        "text": message.content,
+                    }
+                }
+            })
+        })
+        .collect()
+}
+
 /// Whether closing an ACP session should send a session-wide `Cancel`.
 ///
 /// `Cancel` interrupts whatever turn is running in the daemon session, so it is
@@ -2115,26 +2159,48 @@ struct EventMapper {
     profile: AcpProfile,
     current_tool_id: Option<String>,
     tool_inputs: HashMap<String, String>,
+    /// Namespace for the `messageId` of streamed assistant messages, e.g.
+    /// `{session}:own:{request id}`. Chunks of one message share an id so
+    /// clients group them, and the next message in the same turn gets the next
+    /// index.
+    message_scope: String,
+    message_index: u64,
 }
 
 impl EventMapper {
-    fn new(session_id: String, profile: AcpProfile) -> Self {
+    fn with_scope(session_id: String, profile: AcpProfile, message_scope: String) -> Self {
         Self {
             session_id,
             profile,
             current_tool_id: None,
             tool_inputs: HashMap::new(),
+            message_scope,
+            message_index: 0,
         }
+    }
+
+    /// Stable id for the assistant message currently being streamed.
+    fn message_id(&self) -> String {
+        format!("{}:{}", self.message_scope, self.message_index)
+    }
+
+    fn agent_chunk(&self, text: String) -> Value {
+        agent_message_chunk_with_id(text, self.message_id())
     }
 
     fn map_event(&mut self, event: ServerEvent) -> Vec<Value> {
         match event {
-            ServerEvent::TextDelta { text } => vec![agent_message_chunk(text)],
-            ServerEvent::TextReplace { text } => vec![agent_message_chunk(text)],
+            // One assistant message ended; the next chunk starts a new one.
+            ServerEvent::MessageEnd { .. } => {
+                self.message_index = self.message_index.saturating_add(1);
+                Vec::new()
+            }
+            ServerEvent::TextDelta { text } => vec![self.agent_chunk(text)],
+            ServerEvent::TextReplace { text } => vec![self.agent_chunk(text)],
             // ACP chunks cannot retract prior output. Surface the corrected
             // source links rather than silently discarding provider metadata.
             ServerEvent::TextSuffixReplace { new_text, .. } => {
-                vec![agent_message_chunk(format!("\n{new_text}"))]
+                vec![self.agent_chunk(format!("\n{new_text}"))]
             }
             ServerEvent::ToolStart { id, name } => {
                 self.current_tool_id = Some(id.clone());
@@ -2226,24 +2292,16 @@ impl EventMapper {
             })],
             // Shown in every profile: a context summary replacing history is
             // something the user needs to see, manual or automatic.
-            ServerEvent::Compaction { trigger, .. } => vec![json!({
-                "sessionUpdate": "agent_message_chunk",
-                "content": {
-                    "type": "text",
-                    "text": format!("\n[Jcode compacted context: {trigger}]\n"),
-                }
-            })],
+            ServerEvent::Compaction { trigger, .. } => {
+                vec![self.agent_chunk(format!("\n[Jcode compacted context: {trigger}]\n"))]
+            }
             ServerEvent::SessionRenamed { display_title, .. } => vec![json!({
                 "sessionUpdate": "session_info_update",
                 "title": display_title,
             })],
-            ServerEvent::McpStatus { servers } if self.profile.is_extended() => vec![json!({
-                "sessionUpdate": "agent_message_chunk",
-                "content": {
-                    "type": "text",
-                    "text": format!("\n[Jcode MCP status: {}]\n", servers.join(", ")),
-                }
-            })],
+            ServerEvent::McpStatus { servers } if self.profile.is_extended() => {
+                vec![self.agent_chunk(format!("\n[Jcode MCP status: {}]\n", servers.join(", ")))]
+            }
             _ => {
                 let _ = &self.session_id;
                 Vec::new()
@@ -2786,9 +2844,16 @@ fn format_resource_block(resource: &Value) -> String {
     }
 }
 
-fn agent_message_chunk(text: String) -> Value {
+/// `agent_message_chunk` with a stable `messageId`.
+///
+/// Clients group streamed chunks into one message per id and fall back to
+/// positional grouping when the id is missing, which merges consecutive
+/// same-role messages (two assistant messages separated only by tool calls, for
+/// example). Every streamed message therefore carries one.
+fn agent_message_chunk_with_id(text: String, message_id: String) -> Value {
     json!({
         "sessionUpdate": "agent_message_chunk",
+        "messageId": message_id,
         "content": {
             "type": "text",
             "text": text,
@@ -3364,9 +3429,127 @@ mod tests {
         );
     }
 
+    fn history_message(role: &str, content: &str) -> crate::protocol::HistoryMessage {
+        crate::protocol::HistoryMessage {
+            response_stats: None,
+            role: role.to_string(),
+            content: content.to_string(),
+            tool_calls: None,
+            tool_data: None,
+        }
+    }
+
+    fn chunk_message_id(update: &Value) -> Option<String> {
+        update["messageId"].as_str().map(str::to_string)
+    }
+
+    #[test]
+    fn streamed_messages_carry_one_stable_message_id_each() {
+        let mut mapper = EventMapper::with_scope(
+            "session1".to_string(),
+            AcpProfile::Standard,
+            "session1:own:7".to_string(),
+        );
+
+        let first = mapper.map_event(ServerEvent::TextDelta {
+            text: "hello".to_string(),
+        });
+        let same_message = mapper.map_event(ServerEvent::TextDelta {
+            text: " world".to_string(),
+        });
+        assert_eq!(
+            chunk_message_id(&first[0]),
+            Some("session1:own:7:0".to_string())
+        );
+        assert_eq!(
+            chunk_message_id(&same_message[0]),
+            chunk_message_id(&first[0]),
+            "chunks of one message share its id"
+        );
+
+        // A message boundary starts the next message, so consecutive
+        // same-role messages are never merged by the client.
+        assert!(
+            mapper
+                .map_event(ServerEvent::MessageEnd {
+                    stop_reason: Some("tool_use".to_string()),
+                })
+                .is_empty()
+        );
+        let second = mapper.map_event(ServerEvent::TextDelta {
+            text: "second message".to_string(),
+        });
+        assert_eq!(
+            chunk_message_id(&second[0]),
+            Some("session1:own:7:1".to_string())
+        );
+    }
+
+    #[test]
+    fn history_replay_gives_every_message_a_distinct_stable_id() {
+        let messages = vec![
+            history_message("user", "first prompt"),
+            history_message("assistant", "first answer"),
+            history_message("assistant", "second answer"),
+            history_message("user", "second prompt"),
+        ];
+        let updates = history_replay_updates("session1", &messages);
+
+        let ids: Vec<String> = updates
+            .iter()
+            .map(|update| {
+                chunk_message_id(&update["update"]).expect("every replayed message has an id")
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "session1:history:0",
+                "session1:history:1",
+                "session1:history:2",
+                "session1:history:3",
+            ],
+            "ids are derived from the session and the transcript position"
+        );
+        assert_eq!(
+            updates[0]["update"]["sessionUpdate"], "user_message_chunk",
+            "user messages replay as user chunks"
+        );
+        assert_eq!(
+            updates[1]["update"]["sessionUpdate"], "agent_message_chunk",
+            "assistant messages replay as agent chunks"
+        );
+        assert_eq!(
+            updates[2]["update"]["content"]["text"], "second answer",
+            "each message keeps its own content"
+        );
+
+        // Deterministic: replaying the same transcript yields the same ids.
+        assert_eq!(
+            history_replay_updates("session1", &messages),
+            updates,
+            "replay ids are stable"
+        );
+    }
+
+    #[test]
+    fn a_peer_prompt_chunk_carries_its_turn_scoped_message_id() {
+        let update = peer_user_message_chunk("session1", "turn-abc-3", "peer prompt");
+        assert_eq!(update["update"]["sessionUpdate"], "user_message_chunk");
+        assert_eq!(
+            update["update"]["messageId"], "session1:turn-abc-3:user",
+            "the peer prompt is one identifiable message"
+        );
+        assert_eq!(update["update"]["content"]["text"], "peer prompt");
+    }
+
     #[test]
     fn event_mapper_maps_tool_lifecycle() {
-        let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+        let mut mapper = EventMapper::with_scope(
+            "session1".to_string(),
+            AcpProfile::Standard,
+            "session1:own:1".to_string(),
+        );
         let start = mapper.map_event(ServerEvent::ToolStart {
             id: "tool1".to_string(),
             name: "bash".to_string(),

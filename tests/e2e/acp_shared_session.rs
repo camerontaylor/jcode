@@ -229,6 +229,19 @@ fn agent_texts(notifications: &[serde_json::Value]) -> Vec<String> {
         .collect()
 }
 
+/// `messageId` of every `session/update` that carries one, in order.
+fn chunk_message_ids(notifications: &[serde_json::Value]) -> Vec<String> {
+    notifications
+        .iter()
+        .filter(|notification| notification["method"] == "session/update")
+        .filter_map(|notification| {
+            notification["params"]["update"]["messageId"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 fn turn_notifications(notifications: &[serde_json::Value]) -> Vec<(String, String)> {
     notifications
         .iter()
@@ -356,6 +369,31 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
         assert!(
             texts.iter().any(|text| text == "alpha"),
             "the ACP client must receive the peer turn's content: {texts:?}"
+        );
+
+        // Every chunk of the mirrored turn carries a stable message id, so the
+        // client groups them into one message, and the peer's prompt is its own
+        // message.
+        let ids = chunk_message_ids(&mirrored);
+        assert!(
+            !ids.is_empty(),
+            "mirrored chunks carry message ids: {mirrored:#?}"
+        );
+        let prompt_ids: Vec<&String> = ids.iter().filter(|id| id.ends_with(":user")).collect();
+        assert_eq!(prompt_ids.len(), 1, "one id for the peer prompt: {ids:?}");
+        let stream_ids: Vec<&String> =
+            ids.iter().filter(|id| !id.ends_with(":user")).collect();
+        assert!(
+            !stream_ids.is_empty(),
+            "the peer turn's output carries an id: {ids:?}"
+        );
+        assert!(
+            stream_ids.iter().all(|id| *id == stream_ids[0]),
+            "all chunks of one assistant message share its id: {ids:?}"
+        );
+        assert_ne!(
+            stream_ids[0], prompt_ids[0],
+            "the prompt and the answer are separate messages"
         );
         // Wire order: the bracket opens, then the prompt and the stream, then it
         // closes.
@@ -524,6 +562,20 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
         assert!(
             !replayed.is_empty(),
             "history is replayed before live peer output: {attached:#?}"
+        );
+        let replay_ids = chunk_message_ids(&attached[..started_at]);
+        assert_eq!(
+            replay_ids.len(),
+            replayed.len(),
+            "every replayed message carries a message id: {attached:#?}"
+        );
+        let mut unique = replay_ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            replay_ids.len(),
+            "consecutive same-role messages keep distinct ids: {replay_ids:?}"
         );
         for notification in &attached[..started_at] {
             assert_ne!(
