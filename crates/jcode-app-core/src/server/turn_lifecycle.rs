@@ -25,9 +25,37 @@ use tokio::sync::mpsc;
 
 static NEXT_TURN_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Opaque, daemon-unique turn id.
+/// Per-boot nonce for turn ids, drawn once per daemon process.
+static BOOT_NONCE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| format!("{:016x}", boot_nonce()));
+
+/// Randomness without a dependency: `RandomState` is seeded from OS entropy per
+/// instance, so two daemon processes (a restart, a reload) get unrelated values.
+fn boot_nonce() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    if let Ok(elapsed) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        hasher.write_u128(elapsed.as_nanos());
+    }
+    hasher.finish()
+}
+
+/// Opaque turn id, unique within this daemon process *and* across restarts.
+///
+/// The counter alone restarts at 1 with the daemon, so a long-lived client that
+/// keys its turn state by id would see `turn-3` again after a reload. The
+/// per-boot nonce keeps ids distinct over time.
 fn next_turn_id() -> String {
-    format!("turn-{}", NEXT_TURN_ID.fetch_add(1, Ordering::Relaxed))
+    turn_id_with_nonce(
+        BOOT_NONCE.as_str(),
+        NEXT_TURN_ID.fetch_add(1, Ordering::Relaxed),
+    )
+}
+
+/// Turn id shape: `turn-{boot nonce}-{counter}`.
+fn turn_id_with_nonce(nonce: &str, counter: u64) -> String {
+    format!("turn-{nonce}-{counter}")
 }
 
 /// The user-visible prompt of a turn, or `None` when there is nothing to show
@@ -201,5 +229,51 @@ impl Drop for TurnLifecycle {
             )
         };
         self.close(status, message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_ids_are_namespaced_by_a_per_boot_nonce() {
+        let first = turn_id_with_nonce("0a1b2c3d4e5f6071", 1);
+        let second = turn_id_with_nonce("0a1b2c3d4e5f6071", 2);
+        let after_restart = turn_id_with_nonce("ffffffffffffffff", 1);
+
+        assert_eq!(first, "turn-0a1b2c3d4e5f6071-1");
+        assert_ne!(first, second, "the counter still separates turns");
+        assert_ne!(
+            first, after_restart,
+            "a restarted daemon must not reuse a turn id"
+        );
+        assert!(
+            !after_restart.contains("-1-1"),
+            "the nonce is part of the id, not just the counter"
+        );
+    }
+
+    #[test]
+    fn live_turn_ids_use_the_boot_nonce_and_stay_distinct() {
+        let nonce = BOOT_NONCE.as_str();
+        assert_eq!(nonce.len(), 16, "the nonce is 16 hex digits: {nonce}");
+        assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let first = next_turn_id();
+        let second = next_turn_id();
+        assert!(
+            first.starts_with(&format!("turn-{nonce}-")),
+            "live ids carry this boot's nonce: {first}"
+        );
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn a_fresh_boot_nonce_differs_from_an_earlier_draw() {
+        // Two independent draws must not collide; the probability of a false
+        // failure is 2^-64, and a collision here would break id uniqueness
+        // across restarts.
+        assert_ne!(boot_nonce(), boot_nonce());
     }
 }
