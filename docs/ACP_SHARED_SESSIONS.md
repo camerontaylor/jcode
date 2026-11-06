@@ -494,3 +494,25 @@ extend the numbered list above where they overlap.
     the relayed `turn_ended` travels through a separate forwarder task. A
     daemon test drives the real path with a peer attached and a router test
     replays both sequences, asserting consistent state and no misrouting.
+29. **The active turn is registered before `turn_started` is announced.** The
+    end side already cleared the registry before `turn_ended`; the start side
+    did not. A client that registered its event sender and then built `History`
+    in that window saw `active_turn: None` and dropped every event of the turn
+    as belonging to no open turn. `TurnLifecycle::start_with` registers first
+    and hands the announcement to the caller, and a test samples the registry
+    from inside the announcement.
+30. **Turn ids carry a per-boot nonce.** `turn-N` alone restarted at 1 with the
+    daemon, so a long-lived client keying turn state by id saw `turn-3` again
+    after a reload (Paseo namespaces it as `acp-vendor:turn-N`). Ids are now
+    `turn-{16 hex digit per-boot nonce}-{counter}`, with the nonce drawn once
+    per process from `RandomState` (the same OS-seeded source as the ACP
+    instance ids).
+31. **Every replayed and streamed message carries a stable `messageId`.**
+    Clients group chunks by that id and fall back to positional grouping without
+    it, which merged consecutive same-role messages (two assistant messages
+    separated only by tool calls that are not replayed). Replay ids are
+    `{session}:history:{index}` (deterministic, so the same transcript replays
+    with the same ids); streamed ids are scoped per turn
+    (`{session}:own:{request id}` or `{session}:peer:{turn id}`) and advance on
+    each message boundary; the peer prompt chunk, command responses and skill
+    notices carry their own scoped ids.
