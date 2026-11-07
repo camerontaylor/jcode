@@ -216,6 +216,24 @@ impl ProviderChoice {
     }
 }
 
+/// Retain explicit provider routing when selecting a model through the daemon.
+pub(crate) fn startup_model_spec(provider: &ProviderChoice, model: Option<&str>) -> Option<String> {
+    model.map(|model| {
+        let explicit_route = model.split_once(':').is_some_and(|(prefix, _)| {
+            provider::explicit_model_provider_prefix(model).is_some()
+                || provider::oauth_account_label(prefix).is_some()
+                || crate::provider_catalog::openai_compatible_profile_by_id(prefix).is_some()
+                || matches!(prefix, "jcode" | "jcode-subscription" | "grok-build")
+                || crate::config::config().providers.contains_key(prefix)
+        });
+        if matches!(provider, ProviderChoice::Auto | ProviderChoice::Google) || explicit_route {
+            model.to_string()
+        } else {
+            format!("{}:{model}", provider.as_arg_value())
+        }
+    })
+}
+
 #[allow(deprecated)]
 const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescriptor)] = &[
     (
@@ -1539,6 +1557,7 @@ async fn init_provider_with_model_policy(
     // OpenRouter/OpenAI-compatible factory) and their model-picker routes.
     super::startup::register_external_provider_runtimes();
 
+    let explicit_model_requested = model.is_some();
     let model = model.or_else(|| env_model_for_choice(choice));
 
     if let Ok(profile_name) = std::env::var("JCODE_PROVIDER_PROFILE_NAME")
@@ -1851,7 +1870,10 @@ async fn init_provider_with_model_policy(
             }
 
             if availability.has_any_provider() {
-                let multi = provider::MultiProvider::from_auth_status(availability.auth_status);
+                let mut multi = provider::MultiProvider::from_auth_status(availability.auth_status);
+                if model.is_some() {
+                    multi.preserve_initial_selection();
+                }
                 init_notice(&format!(
                     "Using {} (use /model to switch models)",
                     multi.name()
@@ -1870,7 +1892,11 @@ async fn init_provider_with_model_policy(
                     crate::logging::info(
                         "No credentials configured; booting deferred-auth MultiProvider for client onboarding",
                     );
-                    let multi = provider::MultiProvider::from_auth_status(availability.auth_status);
+                    let mut multi =
+                        provider::MultiProvider::from_auth_status(availability.auth_status);
+                    if model.is_some() {
+                        multi.preserve_initial_selection();
+                    }
                     crate::env::set_var("JCODE_ACTIVE_PROVIDER", multi.name().to_lowercase());
                     Arc::new(multi)
                 } else if non_interactive {
@@ -1916,8 +1942,9 @@ async fn init_provider_with_model_policy(
     }
 
     if let Some(model_name) = model {
-        if let Err(e) = provider.set_model(model_name) {
-            if strict_model {
+        let model_spec = startup_model_spec(choice, Some(model_name)).expect("model provided");
+        if let Err(e) = provider.set_model(&model_spec) {
+            if strict_model || explicit_model_requested {
                 anyhow::bail!("Failed to select model '{model_name}': {e}");
             }
             init_notice(&format!(

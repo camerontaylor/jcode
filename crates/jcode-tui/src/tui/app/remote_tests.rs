@@ -1327,3 +1327,95 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
 include!("remote_tests/swarm_delivery.rs");
 
 include!("remote_tests/recall_cancellation.rs");
+
+fn startup_model_ack(id: u64, failed: bool) -> ServerEvent {
+    serde_json::from_value(serde_json::json!({
+        "type": "model_changed", "id": id, "model": "gpt-5.4",
+        "provider_name": "OpenAI", "error": if failed { Some("not authenticated") } else { None },
+        "provider_oauth_account_label": null
+    }))
+    .expect("model changed event")
+}
+
+#[test]
+fn startup_model_waits_for_history_and_matching_ack_before_prompt() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.set_startup_model(Some("openai-api:gpt-5.4".into()));
+    app.input = "startup prompt".into();
+    app.submit_input_on_startup = true;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let first_id = remote.next_request_id_for_test();
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert_eq!(remote.next_request_id_for_test(), first_id);
+    remote.mark_history_loaded();
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert_eq!(app.startup_model_request_id, Some(first_id));
+    assert!(!app.is_processing);
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert!(app.submit_input_on_startup);
+    handle_server_event(
+        &mut app,
+        startup_model_ack(first_id + 10, false),
+        &mut remote,
+    );
+    assert_eq!(app.startup_model_request_id, Some(first_id));
+    handle_server_event(&mut app, startup_model_ack(first_id, false), &mut remote);
+    assert!(app.startup_model.is_none());
+    assert!(app.startup_model_request_id.is_none());
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert!(app.is_processing);
+    assert!(!app.submit_input_on_startup);
+}
+
+#[test]
+fn startup_model_failure_restores_manual_prompt_and_cancels_auto_submit() {
+    let mut app = create_test_app();
+    app.set_startup_model(Some("openai-api:gpt-5.4".into()));
+    app.submit_input_on_startup = true;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let prepared = crate::tui::app::input::PreparedInput {
+        raw_input: "manual prompt".into(),
+        expanded: "manual prompt".into(),
+        images: vec![],
+    };
+    rt.block_on(crate::tui::app::remote::submit_prepared_remote_input(
+        &mut app,
+        &mut remote,
+        prepared,
+    ))
+    .unwrap();
+    assert!(!app.is_processing);
+    assert!(app.pending_prompt_after_model_switch.is_some());
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    let id = app.startup_model_request_id.unwrap();
+    handle_server_event(&mut app, startup_model_ack(id, true), &mut remote);
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert!(!app.is_processing);
+    assert!(!app.submit_input_on_startup);
+    assert_eq!(app.input, "manual prompt");
+    assert!(app.pending_prompt_after_model_switch.is_none());
+}
+
+#[test]
+fn startup_model_is_retried_after_disconnect_before_ack() {
+    let mut app = create_test_app();
+    app.set_startup_model(Some("openai-api:gpt-5.4".into()));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert!(app.startup_model_request_id.is_some());
+    super::handle_disconnect(&mut app, &mut RemoteRunState::default(), None);
+    assert!(app.startup_model_request_id.is_none());
+    assert!(app.startup_model.is_some());
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert!(app.startup_model_request_id.is_some());
+}

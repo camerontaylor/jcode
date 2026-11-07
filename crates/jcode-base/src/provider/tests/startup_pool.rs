@@ -593,3 +593,23 @@ fn startup_pool_compatible_aliases_rotate_only_enrolled_saved_logins() {
         }
     }
 }
+
+#[test]
+fn startup_pool_explicit_model_with_auto_provider_survives_new_session_fork() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _guard = runtime.enter();
+        startup_pool_fixture();
+        let mut router = MultiProvider::new_fast();
+        assert!(router.initial_provider.is_none());
+        router.preserve_initial_selection();
+        router.set_model("openai-api:gpt-5.4").unwrap();
+        for fresh in [
+            router.fork_for_new_session(),
+            router.fork().fork_for_new_session(),
+        ] {
+            assert_eq!(fresh.model(), "gpt-5.4");
+            assert_eq!(fresh.credential_mode(), CredentialMode::ApiKey);
+        }
+    });
+}

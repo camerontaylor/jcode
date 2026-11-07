@@ -191,9 +191,11 @@ async fn run_unix(args: Args) -> Result<()> {
     let mut term = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut quit = signal(SignalKind::quit())?;
+    let startup_model =
+        super::provider_init::startup_model_spec(&args.provider, args.model.as_deref());
     let result = tokio::select! {
         result = super::tui_launch::run_tui_client(
-            args.resume.clone(), None, false, true, Some(working_dir.clone()), false, false,
+            args.resume.clone(), None, false, true, Some(working_dir.clone()), false, false, startup_model,
         ) => result,
         _ = hup.recv() => Ok(()),
         _ = term.recv() => Ok(()),
