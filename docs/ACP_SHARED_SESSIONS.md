@@ -615,7 +615,8 @@ wherever they overlap.
     the router drops the duplicates of a closed turn. Unscoped `done`/`error`
     still route by pending request id (Deviation 10): a rejected prompt and
     slash-command replies have no turn.
-39. **No queueing: a prompt during another turn is rejected.** Upstream turn
+39. **No queueing: a prompt during another turn is rejected** (superseded by
+    Deviation 48). Upstream turn
     ownership is a non-blocking lease, so the daemon answers a `Message` sent
     while any turn of the session runs with an unscoped `error` ("Already
     processing a message") instead of queueing it on the agent mutex. The
@@ -661,7 +662,8 @@ wherever they overlap.
     `turn_ended(cancelled)` and a scoped `done` for every attachment, so a
     mirrored peer turn ends as `canceled` instead of running forever
     (Deviation 13's guarantee, now in `TurnEventChannel`).
-45. **Cancel then prompt.** A stop aimed at another connection's turn arms the
+45. **Cancel then prompt** (superseded by Deviation 49). A stop aimed at
+    another connection's turn arms the
     session's cancel signal and clears it 500 ms later (upstream behaviour). A
     prompt sent inside that window can start already cancelled. The e2e test
     waits that window out; clients that send a prompt immediately after a stop
@@ -675,3 +677,70 @@ wherever they overlap.
     `camerontaylor/jcode` (part of the original `/subagent` commit) was not
     carried into this port; `jcode update` still follows upstream releases.
 
+
+### Steering instead of rejecting (2026-11-08)
+
+48. **A prompt during a running turn is steered into it.** Supersedes
+    Deviation 39. When `Pong` advertises both `turn_origin` and
+    `soft_interrupt_ids`, `session/prompt` sends `SoftInterrupt { id, content,
+    images, urgent: false, client_id: "{client_instance_id}/p{id}" }` instead
+    of `Message`, as the TUI and SDK clients do. Without both capabilities the
+    adapter still sends `Message` (and a prompt during a turn is rejected as
+    before).
+    - *Idle session*: the daemon starts the prompt as a turn whose origin is
+      this connection with `request_id` = the soft interrupt's id, so it is
+      our own turn exactly as with `Message`. Its unscoped `turn_start`
+      pickup is consumed, never shown.
+    - *Our own turn running* (a second prompt from the same view): the steer
+      is injected at the turn's next safe point and both prompts resolve when
+      the turn ends, each answered with its own request id; the stream and
+      usage belong to the prompt that started the turn.
+    - *A peer's turn running*: until the injection, the turn is mirrored as
+      before. When `soft_interrupt_injected` naming our client id arrives in
+      that turn's scope, the prompt **adopts** the turn: its remaining output
+      streams as the prompt's own (`{session}:own:{request id}:{n}`), and the
+      prompt resolves with the turn's status (completed → `end_turn`,
+      cancelled → `cancelled`, failed → error). The `_jcode/turn` "started"
+      already sent for it gets exactly one matching terminal, written by the
+      prompt after the turn's output and before its answer; no second
+      "started" is sent. Our own text is never echoed as a peer message.
+    - *Other clients' steers* in a mirrored turn (no client id, or not ours)
+      are shown as a user message with id `{session}:{turnId}:steer:{n}`; in a
+      turn answering our prompt, as `{session}:own:{request id}:steer:{n}`. A
+      daemon-combined group containing our id is treated as ours.
+    - *Stranded steers*: the daemon does not drain a steer still queued when
+      its turn ends. When a turn ends with our steer not injected (or, with no
+      turn visible, 300 ms after sending, because the daemon queues a steer
+      while the previous turn is still finalizing), the adapter sends
+      `CancelSoftInterrupts { client_ids: [ours] }`. The daemon decides under
+      its queue lock: `cancelled` means it was still queued, so it is sent
+      again (it starts a turn or joins one that just began); `not_queued`
+      means a turn took it, so nothing is resent. If that turn's events do
+      not arrive within 5 s, the queue was cleared by another client and the
+      prompt answers `cancelled`. A prompt is never sent twice and never left
+      waiting.
+    - *"Already processing a message"* for a steer (a mutation lease, or the
+      previous turn still releasing the session) is retried after 100 ms or
+      at the next turn end, whichever comes first, up to 300 attempts.
+    - *Stop* (`session/cancel`) withdraws steers still waiting (by id; they
+      answer `cancelled`) and cancels the turn this view shows running,
+      scoped to it, as before (an adopted turn included).
+    - *Close* withdraws waiting steers and cancels only a turn this view
+      started. An adopted turn was started by another client, so close does
+      **not** cancel it: the prompt answers `cancelled`, the turn's bracket
+      is closed for this view as `canceled`, and the turn keeps running for
+      its owner. A steer injected after the close does not adopt anything.
+    - *Skill selection*: a soft interrupt cannot carry `active_skill`, so a
+      prompt with a sticky skill selection is sent as `Message`; if the
+      daemon answers "Already processing" it is steered (without the skill)
+      into the running turn.
+    - *Concurrency*: a steering view accepts overlapping `session/prompt`s;
+      slash commands and `/subagent` still need the session to themselves.
+    - *Daemon*: a turn started by an idle soft interrupt now announces its
+      prompt to other attachments with `peer_user_message`, as a `Message`
+      turn does, so legacy readers see an ACP prompt too.
+49. **Cancel then prompt.** Supersedes Deviation 45. A turn that claims the
+    session clears a cancel armed before its claim (it targeted an earlier
+    turn), so a prompt sent immediately after a stop of a peer's turn runs
+    normally (`pr/stale-cancel-flag`). The e2e test no longer waits out the
+    500 ms window.
