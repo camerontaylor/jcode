@@ -67,7 +67,15 @@ pub enum Request {
 
     /// Cancel current generation
     #[serde(rename = "cancel")]
-    Cancel { id: u64 },
+    Cancel {
+        id: u64,
+        /// Cancel only this turn. When it is not the session's active turn
+        /// (it already ended, or a newer turn started), the daemon acks the
+        /// request and cancels nothing. Unset cancels whatever is running in
+        /// the session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<TurnIdentity>,
+    },
 
     /// Move the currently executing tool to background
     #[serde(rename = "background_tool")]

@@ -62,3 +62,37 @@ fn bootstrap_roundtrip_carries_active_identity_and_idle_watermark() {
         );
     }
 }
+
+#[test]
+fn cancel_turn_scope_is_optional_and_roundtrips() {
+    let legacy: Request = serde_json::from_str(r#"{"type":"cancel","id":3}"#).unwrap();
+    assert!(matches!(legacy, Request::Cancel { id: 3, turn: None }));
+    assert_eq!(
+        serde_json::to_value(&legacy).unwrap(),
+        serde_json::json!({"type":"cancel","id":3}),
+        "an unscoped cancel keeps the legacy wire shape"
+    );
+
+    let scoped = Request::Cancel {
+        id: 4,
+        turn: Some(crate::TurnIdentity {
+            runtime_generation: "runtime".into(),
+            turn_id: 9,
+        }),
+    };
+    let value = serde_json::to_value(&scoped).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "type": "cancel",
+            "id": 4,
+            "turn": {"runtime_generation": "runtime", "turn_id": 9}
+        })
+    );
+    let decoded: Request = serde_json::from_value(value).unwrap();
+    assert!(matches!(
+        decoded,
+        Request::Cancel { id: 4, turn: Some(identity) }
+            if identity.runtime_generation == "runtime" && identity.turn_id == 9
+    ));
+}
