@@ -97,6 +97,7 @@ struct DaemonSession {
     router: Arc<Mutex<RouterState>>,
     active_prompt_id: Mutex<Option<u64>>,
     prompt_running: AtomicBool,
+    catalog_refresh: Mutex<()>,
     ui_state: Arc<Mutex<SessionUiState>>,
     /// Workspace root reported by the ACP client, used to compose the
     /// project-local skill overlay for slash-skill resolution.
@@ -355,6 +356,7 @@ impl DaemonSession {
             router: Arc::new(Mutex::new(RouterState::new(instance_id, session_id))),
             active_prompt_id: Mutex::new(None),
             prompt_running: AtomicBool::new(false),
+            catalog_refresh: Mutex::new(()),
             ui_state: Arc::new(Mutex::new(SessionUiState::default())),
             working_dir,
             active_skill: Mutex::new(None),
@@ -431,6 +433,25 @@ impl DaemonSession {
         let gate = Arc::clone(&self.peer_gate);
         let peer_mapper = Arc::clone(&self.peer_mapper);
         let session = Arc::downgrade(self);
+        let (catalog_tx, mut catalog_rx) = tokio::sync::watch::channel(());
+        let catalog_acp = acp.clone();
+        tokio::spawn(async move {
+            while catalog_rx.changed().await.is_ok() {
+                let Some(session) = session.upgrade() else {
+                    break;
+                };
+                match request_model_catalog(&session).await {
+                    Ok(_) => {
+                        if let Err(err) = catalog_acp.write_config_option_update(&session).await {
+                            crate::logging::debug(&format!("acp: config update failed: {err}"));
+                        }
+                    }
+                    Err(err) => {
+                        crate::logging::debug(&format!("acp: catalog refresh failed: {err}"))
+                    }
+                }
+            }
+        });
         let handle = tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
@@ -448,24 +469,7 @@ impl DaemonSession {
                     continue;
                 };
                 if matches!(&event, ServerEvent::AvailableModelsUpdated { .. }) {
-                    if let Some(session) = session.upgrade() {
-                        let acp = acp.clone();
-                        tokio::spawn(async move {
-                            match request_model_catalog(&session).await {
-                                Ok(_) => {
-                                    if let Err(err) = acp.write_config_option_update(&session).await
-                                    {
-                                        crate::logging::debug(&format!(
-                                            "acp: config update failed: {err}"
-                                        ));
-                                    }
-                                }
-                                Err(err) => crate::logging::debug(&format!(
-                                    "acp: catalog refresh failed: {err}"
-                                )),
-                            }
-                        });
-                    }
+                    catalog_tx.send_replace(());
                 }
                 let actions = router.lock().await.route(event);
                 for action in actions {
@@ -2259,8 +2263,9 @@ async fn request_history(session: &Arc<DaemonSession>) -> Result<ServerEvent> {
 }
 
 async fn request_model_catalog(session: &Arc<DaemonSession>) -> Result<ServerEvent> {
+    let _refresh = session.catalog_refresh.lock().await;
     let id = session.next_id();
-    let mut rx = session.register(id, PendingKind::Reply).await;
+    let mut rx = session.register(id, PendingKind::Catalog).await;
     session
         .send(&Request::GetModelCatalog {
             id,
@@ -2277,25 +2282,8 @@ async fn request_model_catalog(session: &Arc<DaemonSession>) -> Result<ServerEve
         }
     };
     session.unregister(id).await;
-    if let Ok(ServerEvent::History {
-        provider_name,
-        provider_model,
-        available_models,
-        reasoning_effort,
-        available_reasoning_efforts,
-        ..
-    }) = &result
-    {
-        let mut state = session.ui_state.lock().await;
-        if provider_name.is_some() {
-            state.provider_name = provider_name.clone();
-        }
-        if provider_model.is_some() {
-            state.model = provider_model.clone();
-        }
-        state.available_models = available_models.clone();
-        state.reasoning_effort = reasoning_effort.clone();
-        state.available_reasoning_efforts = available_reasoning_efforts.clone();
+    if let Ok(event) = &result {
+        apply_catalog_state(&mut *session.ui_state.lock().await, event);
     }
     result
 }
