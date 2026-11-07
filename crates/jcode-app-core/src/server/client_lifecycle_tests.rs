@@ -344,6 +344,144 @@ fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()>
     Ok(())
 }
 
+/// A stop aimed at a turn this connection does not own arms the session's
+/// cancel signal and clears it only 500 ms later. A message that starts a new
+/// turn inside that window used to begin with the flag already set and end at
+/// the turn-loop head with no reply and no error. The cancel targeted the
+/// earlier turn, so the new turn must run to completion.
+#[test]
+fn message_after_peer_turn_cancel_is_not_killed_by_the_stale_signal() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_peer_cancel_then_message";
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let provider: Arc<dyn Provider> = Arc::new(FanoutStreamProvider);
+        let registry = Registry::new(Arc::clone(&provider)).await;
+        let mut session =
+            crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        session.model = Some("fanout-stream".to_string());
+        let agent = Arc::new(Mutex::new(Agent::new_with_session(
+            provider, registry, session, None,
+        )));
+        let (agent_stop_signal, soft_interrupt_queue) = {
+            let guard = agent.lock().await;
+            (
+                guard.graceful_shutdown_signal(),
+                guard.soft_interrupt_queue(),
+            )
+        };
+        // This connection's control handle holds the agent's own signal.
+        let control = SessionControlHandle::cancel_only(
+            session_id,
+            soft_interrupt_queue,
+            agent_stop_signal.clone(),
+        );
+
+        // A turn another connection (or a server-initiated path) runs.
+        let peer_turn =
+            crate::turn_cancel_registry::register_active_turn(session_id, InterruptSignal::new());
+
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+        let swarm = SwarmStatusRefs {
+            members: &swarm_members,
+            swarms_by_id: &swarms_by_id,
+            event_history: &event_history,
+            event_counter: &event_counter,
+            event_tx: &swarm_event_tx,
+        };
+        let mut client_is_processing = false;
+        let mut message_id = None;
+        let mut processing_session_id = None;
+        let mut task = None;
+
+        cancel_processing_message(
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut message_id,
+                session_id: &mut processing_session_id,
+                task: &mut task,
+            },
+            &control,
+            &client_event_tx,
+            &swarm,
+            Some(1),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            agent_stop_signal.is_set(),
+            "test precondition: the stop of a peer turn arms the session signal"
+        );
+
+        // The peer turn ends; a new message follows at once, well inside the
+        // 500 ms window before the deferred reset.
+        drop(peer_turn);
+        while client_event_rx.try_recv().is_ok() {}
+        let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+        start_processing_message(
+            ProcessingMessage {
+                id: 2,
+                content: "after the stop".to_string(),
+                images: Vec::new(),
+                system_reminder: None,
+                active_skill: None,
+                server_failover: false,
+                client_instance_id: None,
+            },
+            session_id,
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut message_id,
+                session_id: &mut processing_session_id,
+                task: &mut task,
+            },
+            &agent,
+            &client_event_tx,
+            &processing_done_tx,
+            Vec::new(),
+            &swarm,
+        )
+        .await;
+
+        let mut saw_reply = false;
+        loop {
+            let event = tokio::time::timeout(
+                Duration::from_secs(2),
+                recv_turn_payload(&mut client_event_rx),
+            )
+            .await
+            .expect("the new turn should produce events promptly")
+            .expect("event channel should remain open");
+            match event {
+                ServerEvent::TextDelta { ref text } if text == "after attach" => saw_reply = true,
+                ServerEvent::Interrupted => panic!("the new turn was killed by the stale cancel"),
+                ServerEvent::Done { id: 2 } => break,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_reply,
+            "the new turn must stream its whole reply, not stop at the loop head"
+        );
+        let (done_id, result, _, _, _) =
+            tokio::time::timeout(Duration::from_secs(2), processing_done_rx.recv())
+                .await
+                .expect("processing should complete promptly")
+                .expect("processing completion channel should remain open");
+        assert_eq!(done_id, 2);
+        assert!(result.is_ok(), "the new turn must succeed: {result:?}");
+    });
+    Ok(())
+}
+
 struct PanicOnForkProvider {
     forked: Arc<AtomicBool>,
 }

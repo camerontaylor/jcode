@@ -680,6 +680,10 @@ fn action_label(action: &RouteAction) -> String {
         RouteAction::PeerTurnEnded { turn_id, .. } => format!("ended {turn_id}"),
         RouteAction::PeerPromptReplayed { turn_id } => format!("replayed {turn_id}"),
         RouteAction::SessionState(change) => format!("state {change:?}"),
+        RouteAction::PeerSteer { turn_id, index, .. } => format!("steer {turn_id} {index}"),
+        RouteAction::PeerTurnAdopted { turn_id } => format!("adopted {turn_id}"),
+        RouteAction::Send(request) => format!("send {request:?}"),
+        RouteAction::Wake { token, .. } => format!("wake {token:?}"),
     }
 }
 
@@ -1298,4 +1302,79 @@ fn optional_cwd_must_be_absolute_when_present() {
         Some(PathBuf::from("/tmp"))
     );
     assert!(optional_cwd_from_params(&json!({"cwd": "relative"})).is_err());
+}
+
+#[test]
+fn prompts_steer_only_on_a_daemon_that_advertises_it() {
+    let full = DaemonCapabilities::from_pong(&crate::protocol::server_capabilities());
+    assert!(full.turn_origin && full.soft_interrupt_ids, "{full:?}");
+    let old = DaemonCapabilities::from_pong(&["soft_interrupt_ids".to_string()]);
+    assert!(!old.turn_origin && old.soft_interrupt_ids);
+
+    let router_with = |capabilities: DaemonCapabilities| {
+        let mut router = RouterState::new("acp-test/0", "session-1");
+        router.set_turn_origin(capabilities.turn_origin);
+        router.set_soft_interrupt_ids(capabilities.soft_interrupt_ids);
+        router
+    };
+
+    // A steering daemon gets a soft interrupt with this connection's id.
+    let mut router = router_with(full);
+    let _prompt = router.register(41, PendingKind::Prompt);
+    match prompt_request(&mut router, 41, "hello".into(), Vec::new(), None) {
+        Request::SoftInterrupt {
+            id,
+            content,
+            urgent,
+            client_id,
+            ..
+        } => {
+            assert_eq!((id, content.as_str(), urgent), (41, "hello", false));
+            assert_eq!(client_id.as_deref(), Some("acp-test/0/p41"));
+        }
+        other => panic!("expected a steer, got {other:?}"),
+    }
+
+    // A sticky skill cannot ride a soft interrupt: `Message` first.
+    let _skill = router.register(42, PendingKind::Prompt);
+    assert!(matches!(
+        prompt_request(
+            &mut router,
+            42,
+            "x".into(),
+            Vec::new(),
+            Some("review".into())
+        ),
+        Request::Message {
+            id: 42,
+            active_skill: Some(_),
+            ..
+        }
+    ));
+
+    // Legacy daemons, or one without client ids on soft interrupts, get the
+    // original `Message`.
+    for capabilities in [
+        DaemonCapabilities::default(),
+        old,
+        DaemonCapabilities {
+            turn_origin: true,
+            soft_interrupt_ids: false,
+        },
+    ] {
+        let mut router = router_with(capabilities);
+        assert!(matches!(
+            prompt_request(&mut router, 43, "x".into(), Vec::new(), None),
+            Request::Message { id: 43, .. }
+        ));
+    }
+}
+
+#[test]
+fn steer_messages_carry_turn_scoped_ids() {
+    let chunk = user_message_chunk("s1", "s1:gen:4:steer:0".to_string(), "also this");
+    assert_eq!(chunk["update"]["sessionUpdate"], "user_message_chunk");
+    assert_eq!(chunk["update"]["messageId"], "s1:gen:4:steer:0");
+    assert_eq!(chunk["update"]["content"]["text"], "also this");
+    assert_eq!(turn_end_state(TurnEndStatus::Cancelled), "canceled");
 }
