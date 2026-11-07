@@ -501,7 +501,10 @@ pub(super) async fn cancel_processing_message(
             provider_stop_reason: None,
         };
         // Publish before signalling: the worker can finish cooperatively and
-        // emit Done immediately after request_cancel.
+        // emit Done immediately after request_cancel. Scope it to the active
+        // turn so identity-aware attachments accept it; legacy transports
+        // unwrap the envelope.
+        let stopped = scoped(stopped);
         if super::super::state::fanout_session_event(swarm.members, &session_label, stopped.clone())
             .await
             == 0
@@ -612,7 +615,10 @@ pub(super) async fn cancel_processing_message(
             provider_stop_reason: None,
         };
         // Publish before signalling: the worker can finish cooperatively and
-        // emit Done immediately after request_cancel.
+        // emit Done immediately after request_cancel. Scope it to the active
+        // turn so identity-aware attachments accept it; legacy transports
+        // unwrap the envelope.
+        let stopped = scoped(stopped);
         if super::super::state::fanout_session_event(swarm.members, &session_label, stopped.clone())
             .await
             == 0
