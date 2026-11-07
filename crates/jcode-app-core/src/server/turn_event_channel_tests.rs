@@ -111,6 +111,7 @@ struct TurnHarness {
     receivers: Vec<Option<mpsc::UnboundedReceiver<ServerEvent>>>,
     done_tx: mpsc::UnboundedSender<ProcessingCompletion>,
     _done_rx: mpsc::UnboundedReceiver<ProcessingCompletion>,
+    sessions: SessionAgents,
 }
 
 impl TurnHarness {
@@ -136,6 +137,9 @@ impl TurnHarness {
             member(session_id, event_txs),
         )])));
         let (done_tx, done_rx) = mpsc::unbounded_channel();
+        let sessions = Arc::new(super::super::session_manager::SessionManager::from_agents(
+            HashMap::from([(session_id.to_string(), Arc::clone(&agent))]),
+        ));
         Self {
             session_id: session_id.to_string(),
             agent,
@@ -148,6 +152,7 @@ impl TurnHarness {
             receivers,
             done_tx,
             _done_rx: done_rx,
+            sessions,
         }
     }
 
@@ -372,4 +377,92 @@ async fn dropped_channel_publishes_its_terminal_after_queued_output() {
     .await
     .expect("drain releases the runtime");
     assert!(a_rx.try_recv().is_err() && b_rx.try_recv().is_err());
+}
+
+/// Cancel announces `turn_stopped` to every attachment before it signals the
+/// turn. Identity-aware readers drop unscoped turn events, so it must carry the
+/// active turn's envelope (legacy transports unwrap it).
+#[tokio::test]
+async fn cancel_turn_stopped_is_scoped_to_the_active_turn_for_every_attachment() {
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let mut harness = TurnHarness::new(
+        "session_turn_channel_cancel_scope",
+        2,
+        Arc::new(HangingStreamProvider),
+    )
+    .await;
+    let mut receivers = [harness.take_receiver(0), harness.take_receiver(1)];
+
+    let mut client_is_processing = false;
+    let mut message_id = None;
+    let mut processing_session_id = None;
+    let mut task = None;
+    harness
+        .start_prompt(
+            0,
+            31,
+            "cancel me",
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut message_id,
+                session_id: &mut processing_session_id,
+                task: &mut task,
+            },
+        )
+        .await;
+    let mut identities = Vec::new();
+    for rx in &mut receivers {
+        let events = read_until(rx, |event| {
+            scoped_payload(event)
+                .is_some_and(|(_, event)| matches!(event, ServerEvent::TextDelta { .. }))
+        })
+        .await;
+        let Some(ServerEvent::TurnStarted { identity, .. }) = events.first() else {
+            panic!("the turn announces itself first: {events:?}");
+        };
+        identities.push(identity.clone());
+    }
+
+    let control = SessionControlHandle::cancel_only(
+        harness.session_id.clone(),
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+        InterruptSignal::new(),
+    );
+    let requester = harness.senders[0].clone();
+    cancel_processing_message(
+        &mut ProcessingState {
+            client_is_processing: &mut client_is_processing,
+            message_id: &mut message_id,
+            session_id: &mut processing_session_id,
+            task: &mut task,
+        },
+        &control,
+        &requester,
+        &harness.swarm(),
+        Some(32),
+        None,
+        Some(&harness.sessions),
+    )
+    .await;
+
+    for (rx, identity) in receivers.iter_mut().zip(&identities) {
+        let events = read_until(rx, |event| is_scoped_done(event, 31)).await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::TurnStopped { .. })),
+            "turn_stopped must not be published unscoped: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                scoped_payload(event),
+                Some((scope, ServerEvent::TurnStopped {
+                    reason: crate::protocol::TurnStopReason::Interrupted,
+                    ..
+                })) if scope == identity
+            )),
+            "every attachment sees the interrupt inside the turn's scope: {events:?}"
+        );
+    }
 }
