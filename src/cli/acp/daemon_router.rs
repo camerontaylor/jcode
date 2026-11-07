@@ -79,6 +79,8 @@ pub(super) enum SessionStateChange {
     Model {
         model: String,
         provider_name: Option<String>,
+        reasoning_effort: Option<String>,
+        available_reasoning_efforts: Option<Vec<String>>,
     },
     Effort {
         effort: Option<String>,
@@ -520,11 +522,15 @@ fn session_state_change(event: &ServerEvent) -> Option<SessionStateChange> {
         ServerEvent::ModelChanged {
             model,
             provider_name,
+            reasoning_effort,
+            available_reasoning_efforts,
             error: None,
             ..
         } => Some(SessionStateChange::Model {
             model: model.clone(),
             provider_name: provider_name.clone(),
+            reasoning_effort: reasoning_effort.clone(),
+            available_reasoning_efforts: available_reasoning_efforts.clone(),
         }),
         ServerEvent::ReasoningEffortChanged {
             effort,
@@ -912,12 +918,14 @@ mod tests {
             resolved_credential: None,
             provider_oauth_email: None,
             provider_oauth_account_label: None,
-            reasoning_effort: None,
+            available_reasoning_efforts: Some(vec!["low".into(), "high".into()]),
+            reasoning_effort: Some("low".into()),
         });
         assert!(matches!(
             actions.as_slice(),
-            [RouteAction::SessionState(SessionStateChange::Model { model, .. })]
-                if model == "peer-model"
+            [RouteAction::SessionState(SessionStateChange::Model { model, reasoning_effort, available_reasoning_efforts, .. })]
+                if model == "peer-model" && reasoning_effort.as_deref() == Some("low")
+                    && available_reasoning_efforts.as_ref().unwrap() == &["low", "high"]
         ));
 
         let actions = router.route(ServerEvent::SessionRenamed {
@@ -943,6 +951,7 @@ mod tests {
                     resolved_credential: None,
                     provider_oauth_email: None,
                     provider_oauth_account_label: None,
+                    available_reasoning_efforts: None,
                     reasoning_effort: None,
                 })
                 .is_empty()

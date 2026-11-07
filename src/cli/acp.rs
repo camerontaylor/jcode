@@ -191,6 +191,7 @@ struct SessionUiState {
     model: Option<String>,
     available_models: Vec<String>,
     reasoning_effort: Option<String>,
+    available_reasoning_efforts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -265,6 +266,7 @@ impl SessionUiState {
         provider_name: Option<String>,
         provider_model: Option<String>,
         available_models: Vec<String>,
+        available_reasoning_efforts: Option<Vec<String>>,
         reasoning_effort: Option<String>,
     ) -> Self {
         Self {
@@ -272,6 +274,7 @@ impl SessionUiState {
             model: provider_model,
             available_models,
             reasoning_effort,
+            available_reasoning_efforts,
         }
     }
 
@@ -912,14 +915,21 @@ impl AcpRuntime {
                 wait_for_model_changed(&session, &mut rx, request_id).await
             }
             CONFIG_ID_EFFORT => {
-                session
-                    .send(&Request::SetReasoningEffort {
-                        id: request_id,
-                        effort: value.clone(),
-                        target_session_id: None,
-                    })
-                    .await?;
-                wait_for_effort_changed(&session, &mut rx, request_id).await
+                let normalized = normalize_effort(&*session.ui_state.lock().await, &value);
+                match normalized {
+                    Ok(Some(effort)) => {
+                        session
+                            .send(&Request::SetReasoningEffort {
+                                id: request_id,
+                                effort,
+                                target_session_id: None,
+                            })
+                            .await?;
+                        wait_for_effort_changed(&session, &mut rx, request_id).await
+                    }
+                    Ok(None) => Ok(()),
+                    Err(error) => Err(error),
+                }
             }
             other => Err(anyhow::anyhow!("Unknown config option id: {other}")),
         };
@@ -1080,12 +1090,14 @@ impl AcpRuntime {
                 provider_name,
                 provider_model,
                 available_models,
+                available_reasoning_efforts,
                 reasoning_effort,
                 ..
             } => SessionUiState::from_history_fields(
                 provider_name,
                 provider_model,
                 available_models,
+                available_reasoning_efforts,
                 reasoning_effort,
             ),
             other => anyhow::bail!("expected history after session creation, got {other:?}"),
@@ -1139,6 +1151,7 @@ impl AcpRuntime {
                     provider_name,
                     provider_model,
                     available_models,
+                    available_reasoning_efforts,
                     reasoning_effort,
                     ..
                 } => {
@@ -1146,6 +1159,7 @@ impl AcpRuntime {
                         provider_name,
                         provider_model,
                         available_models,
+                        available_reasoning_efforts,
                         reasoning_effort,
                     );
                     if replay_history {
@@ -1476,6 +1490,13 @@ impl AcpRuntime {
                 }
             }
             AcpSlashCommand::Effort(Some(effort)) => {
+                let Some(effort) = normalize_effort(&*session.ui_state.lock().await, &effort)?
+                else {
+                    return Ok(
+                        "Reasoning effort ignored: the current model does not support it."
+                            .to_string(),
+                    );
+                };
                 let id = session.next_id();
                 let mut rx = session.register(id, PendingKind::Reply).await;
                 session
@@ -1800,7 +1821,11 @@ impl AcpRuntime {
                 SessionStateChange::Model {
                     model,
                     provider_name,
+                    reasoning_effort,
+                    available_reasoning_efforts,
                 } => {
+                    state.reasoning_effort = reasoning_effort;
+                    state.available_reasoning_efforts = available_reasoning_efforts;
                     state.model = Some(model);
                     if provider_name.is_some() {
                         state.provider_name = provider_name;
@@ -2098,6 +2123,8 @@ async fn wait_for_model_changed(
                 id,
                 model,
                 provider_name,
+                reasoning_effort,
+                available_reasoning_efforts,
                 error,
                 ..
             } if id == request_id => {
@@ -2105,6 +2132,8 @@ async fn wait_for_model_changed(
                     anyhow::bail!(error);
                 }
                 let mut state = session.ui_state.lock().await;
+                state.reasoning_effort = reasoning_effort;
+                state.available_reasoning_efforts = available_reasoning_efforts;
                 state.model = Some(model);
                 if provider_name.is_some() {
                     state.provider_name = provider_name;
@@ -3350,6 +3379,7 @@ mod tests {
             model: Some("claude-opus-4-6".to_string()),
             available_models: Vec::new(),
             reasoning_effort: None,
+            available_reasoning_efforts: None,
         };
         let payload = usage_update_payload("session-1", &state, 1_000, Some(4_000), None);
         assert_eq!(payload["sessionId"], "session-1");
@@ -3872,6 +3902,7 @@ mod tests {
             model: Some("gpt-5.2".to_string()),
             available_models: vec!["gpt-5.2".to_string(), "gpt-5.2-codex".to_string()],
             reasoning_effort: Some("high".to_string()),
+            available_reasoning_efforts: None,
         };
         let options = session_config_options(&state);
         assert_eq!(options.len(), 2);
@@ -3907,6 +3938,7 @@ mod tests {
             model: Some("claude-opus-4-6".to_string()),
             available_models: vec!["claude-sonnet-4-5".to_string()],
             reasoning_effort: None,
+            available_reasoning_efforts: None,
         };
         let options = session_config_options(&state);
         let model_values: Vec<&str> = options[0]["options"]
@@ -3926,6 +3958,7 @@ mod tests {
             model: Some("deepseek-v4-flash".to_string()),
             available_models: vec!["deepseek-v4-pro".to_string()],
             reasoning_effort: Some("high".to_string()),
+            available_reasoning_efforts: None,
         };
         let mut result = json!({"sessionId": "s1"});
         insert_session_configuration(&mut result, &state);
@@ -3954,6 +3987,7 @@ mod tests {
             model: Some("mystery-model-9000".to_string()),
             available_models: Vec::new(),
             reasoning_effort: None,
+            available_reasoning_efforts: None,
         };
         assert_eq!(
             state.context_limit(),

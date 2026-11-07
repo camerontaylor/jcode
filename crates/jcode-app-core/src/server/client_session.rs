@@ -1969,6 +1969,7 @@ pub(super) async fn handle_resume_session(
                 resumed_context_window,
                 resumed_credential,
                 resumed_reasoning_effort,
+                resumed_available_efforts,
                 resumed_oauth_account_label,
             ) = {
                 let guard = agent.lock().await;
@@ -1978,6 +1979,12 @@ pub(super) async fn handle_resume_session(
                     guard.provider_context_window(),
                     guard.active_resolved_credential(),
                     guard.provider_reasoning_effort(),
+                    guard
+                        .provider_handle()
+                        .available_efforts()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
                     guard.provider_handle().serving_oauth_account_label(),
                 )
             };
@@ -2047,6 +2054,7 @@ pub(super) async fn handle_resume_session(
                 provider_oauth_email: super::provider_oauth_email(
                     agent.lock().await.provider_handle().as_ref(),
                 ),
+                available_reasoning_efforts: Some(resumed_available_efforts),
                 reasoning_effort: resumed_reasoning_effort,
                 provider_oauth_account_label: resumed_oauth_account_label,
             });

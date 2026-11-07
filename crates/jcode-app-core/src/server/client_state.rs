@@ -267,6 +267,7 @@ pub(super) async fn handle_get_model_catalog(
         service_tier,
         available_service_tiers,
         reasoning_effort,
+        available_reasoning_efforts,
         source,
         provider_oauth_email,
         provider_oauth_account_label,
@@ -290,6 +291,14 @@ pub(super) async fn handle_get_model_catalog(
                             .collect(),
                     ),
                     agent_guard.provider_handle().reasoning_effort(),
+                    Some(
+                        agent_guard
+                            .provider_handle()
+                            .available_efforts()
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    ),
                     "live",
                     provider_oauth_email(agent_guard.provider_handle().as_ref()),
                     agent_guard.provider_handle().serving_oauth_account_label(),
@@ -326,6 +335,17 @@ pub(super) async fn handle_get_model_catalog(
                             .collect(),
                     ),
                     provider.reasoning_effort(),
+                    persisted
+                        .as_ref()
+                        .and_then(|session| session.model.as_deref())
+                        .is_none_or(|model| model == provider.model())
+                        .then(|| {
+                            provider
+                                .available_efforts()
+                                .into_iter()
+                                .map(str::to_string)
+                                .collect()
+                        }),
                     "fallback",
                     provider_oauth_email(provider.as_ref()),
                     provider.serving_oauth_account_label(),
@@ -367,6 +387,7 @@ pub(super) async fn handle_get_model_catalog(
         resolved_credential,
         provider_oauth_email,
         provider_oauth_account_label,
+        available_reasoning_efforts,
         reasoning_effort,
         // Catalog replies still use History, so the TUI applies this field as
         // authoritative. Omitting it falsely turns off /fast status and its badge.
@@ -712,6 +733,14 @@ async fn send_history_from_persisted_session(
     // serialized wire bytes simultaneously.
     let provider_name = history_provider_name(&session, provider.as_ref());
     let provider_model = session.model.clone().or_else(|| Some(provider.model()));
+    let available_reasoning_efforts =
+        (provider_model.as_deref() == Some(provider.model().as_str())).then(|| {
+            provider
+                .available_efforts()
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        });
     let subagent_model = session.subagent_model.clone();
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
@@ -791,6 +820,7 @@ async fn send_history_from_persisted_session(
         resolved_credential: provider.active_resolved_credential(),
         provider_oauth_email: provider_oauth_email(provider.as_ref()),
         provider_oauth_account_label: provider.serving_oauth_account_label(),
+        available_reasoning_efforts,
         reasoning_effort,
         // The transcript is persisted, but the tier is live provider state and
         // can be read without waiting for the busy agent's mutex.
@@ -957,6 +987,14 @@ async fn send_history_with_guard(
             .map(str::to_string)
             .collect(),
     );
+    let available_reasoning_efforts = Some(
+        agent_guard
+            .provider_handle()
+            .available_efforts()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
     let provider_oauth_email = provider_oauth_email(agent_guard.provider_handle().as_ref());
     let provider_oauth_account_label = agent_guard.provider_handle().serving_oauth_account_label();
     let inferred_interrupted = was_interrupted
@@ -1096,6 +1134,7 @@ async fn send_history_with_guard(
         resolved_credential,
         provider_oauth_email,
         provider_oauth_account_label,
+        available_reasoning_efforts,
         reasoning_effort,
         service_tier,
         compaction_mode,

@@ -306,6 +306,7 @@ fn test_remote_auth_model_change_does_not_add_a_third_visible_line() {
             provider_oauth_email: None,
             provider_oauth_account_label: None,
             resolved_credential: None,
+            available_reasoning_efforts: None,
             reasoning_effort: None,
         },
         &mut remote,
