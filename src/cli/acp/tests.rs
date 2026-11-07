@@ -1127,3 +1127,170 @@ fn a_peer_prompt_chunk_carries_its_turn_scoped_message_id() {
     );
     assert_eq!(update["update"]["content"]["text"], "peer prompt");
 }
+
+// session/list
+
+fn catalog_entry(
+    session_id: &str,
+    working_dir: Option<&str>,
+    updated_at_ms: Option<i64>,
+) -> jcode_harness_api_server::session_catalog::SessionCatalogEntry {
+    jcode_harness_api_server::session_catalog::SessionCatalogEntry {
+        session_id: session_id.to_string(),
+        working_dir: working_dir.map(str::to_string),
+        title: Some(format!("title {session_id}")),
+        updated_at_ms,
+    }
+}
+
+#[test]
+fn session_list_filters_by_canonical_cwd_and_sorts_newest_first() {
+    let dir = tempfile::tempdir().expect("cwd");
+    let other = tempfile::tempdir().expect("other cwd");
+    let entries = vec![
+        catalog_entry("s-old", Some(&dir.path().display().to_string()), Some(10)),
+        catalog_entry("s-new", Some(&dir.path().display().to_string()), Some(30)),
+        catalog_entry(
+            "s-other",
+            Some(&other.path().display().to_string()),
+            Some(20),
+        ),
+        catalog_entry("s-nowhere", None, Some(40)),
+    ];
+
+    let result = session_list_result(entries.clone(), Some(dir.path()), None, None);
+    let ids: Vec<&str> = result["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .map(|session| session["sessionId"].as_str().expect("id"))
+        .collect();
+    assert_eq!(ids, ["s-new", "s-old"]);
+    assert_eq!(
+        result["sessions"][0]["cwd"],
+        dir.path().display().to_string()
+    );
+    assert_eq!(result["sessions"][0]["title"], "title s-new");
+    assert!(result["sessions"][0]["updatedAt"].is_string());
+    assert!(
+        result.get("nextCursor").is_none(),
+        "a short page has no cursor"
+    );
+
+    // Without `cwd` every session with a working directory is listed,
+    // newest first (ACP requires a string cwd, so `s-nowhere` is omitted).
+    let result = session_list_result(entries, None, None, None);
+    let ids: Vec<&str> = result["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .map(|session| session["sessionId"].as_str().expect("id"))
+        .collect();
+    assert_eq!(ids, ["s-new", "s-other", "s-old"]);
+}
+
+#[test]
+fn session_list_omits_sessions_without_a_working_directory() {
+    let entries = vec![
+        catalog_entry("s-with-dir", Some("/tmp"), Some(10)),
+        catalog_entry("s-no-dir", None, Some(20)),
+    ];
+    let result = session_list_result(entries, None, None, None);
+    let ids: Vec<&str> = result["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .map(|session| session["sessionId"].as_str().expect("id"))
+        .collect();
+    assert_eq!(ids, ["s-with-dir"]);
+    assert_eq!(
+        result["sessions"][0]["cwd"], "/tmp",
+        "cwd is always a string"
+    );
+}
+
+#[test]
+fn session_list_matches_equivalent_cwd_spellings() {
+    let dir = tempfile::tempdir().expect("cwd");
+    let dot_spelling = format!("{}/.", dir.path().display());
+    let entries = vec![
+        catalog_entry("s-plain", Some(&dir.path().display().to_string()), Some(10)),
+        catalog_entry("s-dotted", Some(&dot_spelling), Some(20)),
+        catalog_entry("s-elsewhere", Some("/"), Some(30)),
+    ];
+    let result = session_list_result(entries, Some(dir.path()), None, None);
+    let ids: Vec<&str> = result["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .map(|session| session["sessionId"].as_str().expect("id"))
+        .collect();
+    assert_eq!(
+        ids,
+        ["s-dotted", "s-plain"],
+        "both spellings canonicalise to the requested cwd"
+    );
+}
+
+#[test]
+fn session_list_pages_with_an_opaque_cursor() {
+    let entries: Vec<_> = (0..55)
+        .map(|index| catalog_entry(&format!("s-{index:02}"), Some("/tmp"), Some(1000 - index)))
+        .collect();
+
+    let first = session_list_result(entries.clone(), None, None, None);
+    let first_page = first["sessions"].as_array().expect("sessions");
+    assert_eq!(first_page.len(), SESSION_LIST_PAGE);
+    let cursor = first["nextCursor"]
+        .as_str()
+        .expect("next cursor")
+        .to_string();
+    assert_eq!(first_page[0]["sessionId"], "s-00");
+
+    let cursor = SessionListCursor::decode(&cursor).expect("cursor decodes");
+    let second = session_list_result(entries, None, Some(&cursor), None);
+    let second_page = second["sessions"].as_array().expect("sessions");
+    assert_eq!(second_page.len(), 5);
+    assert_eq!(second_page[0]["sessionId"], "s-50");
+    assert_eq!(second_page[4]["sessionId"], "s-54");
+    assert!(
+        second.get("nextCursor").is_none(),
+        "last page has no cursor"
+    );
+
+    assert!(SessionListCursor::decode("not a cursor").is_err());
+    assert!(SessionListCursor::decode(r#"{"sessionId":""}"#).is_err());
+}
+
+#[test]
+fn session_list_reports_liveness_only_when_the_daemon_told_us() {
+    let entries = vec![catalog_entry("s-live", Some("/tmp"), Some(5))];
+    let without = session_list_result(entries.clone(), None, None, None);
+    assert!(
+        without["sessions"][0].get("_meta").is_none(),
+        "unknown liveness is omitted, never guessed"
+    );
+
+    let live = vec!["s-live".to_string()];
+    let with = session_list_result(entries, None, None, Some(&live));
+    assert_eq!(with["sessions"][0]["_meta"]["jcode"]["live"], true);
+}
+
+#[test]
+fn initialize_advertises_session_list() {
+    let result = initialize_result(&json!({"protocolVersion": 1}), AcpProfile::Standard);
+    assert!(
+        result["agentCapabilities"]["sessionCapabilities"]["list"].is_object(),
+        "clients discover session/list from the capabilities"
+    );
+}
+
+#[test]
+fn optional_cwd_must_be_absolute_when_present() {
+    assert_eq!(optional_cwd_from_params(&json!({})).unwrap(), None);
+    assert_eq!(
+        optional_cwd_from_params(&json!({"cwd": "/tmp"})).unwrap(),
+        Some(PathBuf::from("/tmp"))
+    );
+    assert!(optional_cwd_from_params(&json!({"cwd": "relative"})).is_err());
+}
