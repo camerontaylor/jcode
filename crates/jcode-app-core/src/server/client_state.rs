@@ -343,7 +343,10 @@ pub(super) async fn handle_get_model_catalog(
                             .map(str::to_string)
                             .collect(),
                     ),
-                    provider.reasoning_effort(),
+                    // Effort is session-specific even when provider/model match.
+                    persisted
+                        .as_ref()
+                        .and_then(|session| session.reasoning_effort.clone()),
                     persisted
                         .as_ref()
                         .is_some_and(|session| {
@@ -760,10 +763,7 @@ async fn send_history_from_persisted_session(
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
     let is_canary = session.is_canary;
-    let reasoning_effort = session
-        .reasoning_effort
-        .clone()
-        .or_else(|| provider.reasoning_effort());
+    let reasoning_effort = session.reasoning_effort.clone();
     let agent_model_overrides = session.agent_model_overrides.clone();
     let inferred_interrupted = was_interrupted
         .is_none()
@@ -956,7 +956,7 @@ async fn send_history_with_guard(
         let skills_ms = skills_start.elapsed().as_millis();
 
         let provider_meta_start = Instant::now();
-        let reasoning_effort = provider.reasoning_effort();
+        let reasoning_effort = agent_guard.provider_reasoning_effort();
         let service_tier = provider.service_tier();
         let provider_meta_ms = provider_meta_start.elapsed().as_millis();
 
