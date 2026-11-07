@@ -174,6 +174,7 @@ pub(super) async fn start_processing_message(
         system_reminder,
         active_skill,
         server_failover,
+        client_instance_id,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -289,6 +290,8 @@ pub(super) async fn start_processing_message(
         client_event_tx.clone(),
         &turn_lease,
         id,
+        crate::protocol::TurnOrigin::client(client_instance_id, id),
+        super::super::state::turn_user_content(&content),
     );
     let tx = events.sender();
     let done_tx = processing_done_tx.clone();

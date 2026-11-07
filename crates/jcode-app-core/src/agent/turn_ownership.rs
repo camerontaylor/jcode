@@ -1,5 +1,6 @@
 //! Runtime-local ownership protects acceptance, execution and publication.
-use crate::protocol::TurnIdentity;
+use crate::protocol::{TurnIdentity, TurnOrigin};
+use jcode_agent_runtime::InterruptSignal;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -7,6 +8,23 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 struct TurnState {
     latest: u64,
     active: Option<TurnIdentity>,
+    /// Who started `active` and its prompt. Only ever describes `active`.
+    attribution: Option<TurnAttribution>,
+}
+
+/// Who started a turn and the prompt it was started with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TurnAttribution {
+    pub(crate) origin: TurnOrigin,
+    pub(crate) user_content: Option<String>,
+}
+
+/// The runtime's active turn as an attaching client should see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveTurnSnapshot {
+    pub(crate) latest_turn_id: u64,
+    pub(crate) active: Option<TurnIdentity>,
+    pub(crate) attribution: Option<TurnAttribution>,
 }
 
 /// Read-only runtime identity snapshot, available while the Agent is locked.
@@ -27,6 +45,20 @@ impl TurnObserver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (state.latest, state.active.clone())
+    }
+
+    /// [`snapshot`](Self::snapshot) plus the active turn's attribution, read
+    /// under one lock so the two always describe the same turn.
+    pub(crate) fn active_turn(&self) -> ActiveTurnSnapshot {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ActiveTurnSnapshot {
+            latest_turn_id: state.latest,
+            active: state.active.clone(),
+            attribution: state.attribution.clone(),
+        }
     }
 
     #[cfg(test)]
@@ -79,6 +111,20 @@ impl Drop for Reservation {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.active.as_ref() == Some(&self.identity) {
             state.active = None;
+            state.attribution = None;
+        }
+    }
+}
+
+impl Reservation {
+    fn with_state(&self, update: impl FnOnce(&mut TurnState)) {
+        let mut state = self
+            .observer
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active.as_ref() == Some(&self.identity) {
+            update(&mut state);
         }
     }
 }
@@ -91,6 +137,10 @@ pub(crate) struct RuntimeMutationLease {
 /// Non-cloneable execution capability for exactly one runtime and turn.
 pub(crate) struct TurnLease {
     reservation: Arc<Reservation>,
+    /// The runtime's cancel signal and its fire epoch when the turn was
+    /// claimed. A cancelled turn loop returns `Ok`, so a changed epoch is the
+    /// record that a cancel landed during this turn.
+    cancel: Option<(InterruptSignal, u64)>,
 }
 
 /// A queue may outlive an aborted producer, but must drain before handoff.
@@ -115,6 +165,51 @@ impl TurnLease {
         TurnPublicationPin {
             _reservation: Arc::clone(&self.reservation),
         }
+    }
+
+    pub(super) fn with_cancel_signal(mut self, signal: InterruptSignal) -> Self {
+        let epoch = signal.epoch();
+        self.cancel = Some((signal, epoch));
+        self
+    }
+
+    /// A probe that reports whether the runtime's cancel signal fired since
+    /// this turn was claimed. Usable after the lease itself is gone.
+    pub(crate) fn cancel_probe(&self) -> CancelProbe {
+        CancelProbe(self.cancel.clone())
+    }
+
+    /// Publish who started this turn while it is the runtime's active turn.
+    /// Call before the turn is announced, so an attaching client never sees the
+    /// announcement without the attribution.
+    pub(crate) fn attribute(&self, attribution: TurnAttribution) {
+        self.reservation
+            .with_state(|state| state.attribution = Some(attribution));
+    }
+}
+
+/// See [`TurnLease::cancel_probe`].
+#[derive(Clone)]
+pub(crate) struct CancelProbe(Option<(InterruptSignal, u64)>);
+
+impl CancelProbe {
+    pub(crate) fn cancelled(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|(signal, epoch)| signal.epoch() != *epoch)
+    }
+}
+
+impl TurnPublicationPin {
+    /// Stop reporting this turn as the runtime's active turn, ahead of the
+    /// publication reservation itself. Call before announcing the turn's end,
+    /// so a client attaching afterwards does not open a turn that has ended.
+    /// The runtime stays reserved until every pin is dropped.
+    pub(crate) fn retire(&self) {
+        self._reservation.with_state(|state| {
+            state.active = None;
+            state.attribution = None;
+        });
     }
 }
 
@@ -155,6 +250,7 @@ impl TurnOwnership {
                 observer: self.observer.clone(),
                 identity,
             }),
+            cancel: None,
         })
     }
 

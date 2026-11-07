@@ -25,11 +25,27 @@ fn identity_transport_negotiation_preserves_legacy_payload_shape() {
         event_for_transport(wrapped, true),
         Some(ServerEvent::TurnEvent { .. })
     ));
-    let started = ServerEvent::TurnStarted { identity };
+    let started = ServerEvent::TurnStarted {
+        identity: identity.clone(),
+        origin: Some(crate::protocol::TurnOrigin::client(Some("tui".into()), 99)),
+        user_content: Some("hello".into()),
+    };
     assert!(event_for_transport(started.clone(), false).is_none());
     assert!(matches!(
         event_for_transport(started, true),
         Some(ServerEvent::TurnStarted { .. })
+    ));
+    // Legacy readers get the terminal that follows `turn_ended`, never the
+    // identity bookkeeping itself.
+    let ended = ServerEvent::TurnEnded {
+        identity,
+        status: crate::protocol::TurnEndStatus::Completed,
+        message: None,
+    };
+    assert!(event_for_transport(ended.clone(), false).is_none());
+    assert!(matches!(
+        event_for_transport(ended, true),
+        Some(ServerEvent::TurnEnded { .. })
     ));
     assert!(
         event_for_transport(
@@ -37,7 +53,9 @@ fn identity_transport_negotiation_preserves_legacy_payload_shape() {
                 session_id: "session".into(),
                 runtime_generation: "runtime".into(),
                 turn_id: None,
-                latest_turn_id: 7
+                latest_turn_id: 7,
+                active_origin: None,
+                active_user_content: None,
             },
             false
         )
@@ -610,6 +628,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 system_reminder: None,
                 active_skill: None,
                 server_failover: false,
+                client_instance_id: None,
             },
             "session_guard",
             &mut ProcessingState {
@@ -712,6 +731,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             system_reminder: None,
             active_skill: None,
             server_failover: false,
+            client_instance_id: None,
         },
         session_id,
         &mut ProcessingState {
@@ -822,6 +842,8 @@ async fn turn_publication_reserves_runtime_until_aborted_or_finished_queue_drain
             tx,
             &lease,
             7,
+            crate::protocol::TurnOrigin::client(None, 7),
+            None,
         );
         let retained_sender = events.sender();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -863,6 +885,13 @@ async fn turn_publication_reserves_runtime_until_aborted_or_finished_queue_drain
             matches!(rx.recv().await, Some(ServerEvent::TurnEvent { event, .. })
             if matches!(&*event, ServerEvent::TextDelta { text } if text == "old output"))
         );
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerEvent::TurnEnded {
+                status: crate::protocol::TurnEndStatus::Completed,
+                ..
+            })
+        ));
         assert!(
             matches!(rx.recv().await, Some(ServerEvent::TurnEvent { event, .. })
             if matches!(*event, ServerEvent::Done { id: 7 }))
@@ -938,6 +967,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
             system_reminder: None,
             active_skill: None,
             server_failover: false,
+            client_instance_id: None,
         },
         session_id,
         &mut state,
@@ -965,6 +995,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
                 system_reminder: None,
                 active_skill: None,
                 server_failover: false,
+                client_instance_id: None,
             })
             .unwrap();
         // Force the real actor's worst-case ordering: after Done, both input
@@ -1242,6 +1273,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 system_reminder: Some(continuation.to_string()),
                 active_skill: None,
                 server_failover: false,
+                client_instance_id: None,
             },
             session_id,
             &mut ProcessingState {
@@ -1300,6 +1332,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 system_reminder: Some(continuation.to_string()),
                 active_skill: Some("nonexistent-replay-skill".to_string()),
                 server_failover: false,
+                client_instance_id: None,
             },
             session_id,
             &mut ProcessingState {
@@ -1364,6 +1397,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                     system_reminder: reminder.map(str::to_string),
                     active_skill: None,
                     server_failover: false,
+                    client_instance_id: None,
                 },
                 session_id,
                 &mut ProcessingState {
@@ -1458,6 +1492,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     system_reminder: None,
                     active_skill: None,
                     server_failover: false,
+                    client_instance_id: None,
                 },
                 session_id,
                 &mut ProcessingState {

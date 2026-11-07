@@ -1151,6 +1151,7 @@ pub(super) async fn handle_resume_all_sessions(
             Some(reminder),
             None,
             Some("resuming interrupted session".to_string()),
+            crate::protocol::TurnOriginKind::Background,
             super::live_turn::LiveTurnSwarmContext::new(
                 swarm_members,
                 swarms_by_id,
@@ -1272,6 +1273,11 @@ pub(super) async fn handle_agent_task(
         ctx.client_event_tx.clone(),
         &lease,
         id,
+        crate::protocol::TurnOrigin {
+            request_id: Some(id),
+            ..crate::protocol::TurnOrigin::server(crate::protocol::TurnOriginKind::Debug)
+        },
+        super::state::turn_user_content(&task),
     );
     update_member_status(
         client_session_id,

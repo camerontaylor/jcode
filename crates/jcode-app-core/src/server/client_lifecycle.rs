@@ -92,7 +92,11 @@ fn event_for_transport(
     loop {
         event = match event {
             ServerEvent::TurnEvent { event, .. } => *event,
-            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
+            // Identity-only bookkeeping. `turn_ended` is always followed by the
+            // turn's own terminal, which legacy readers already receive.
+            ServerEvent::TurnStarted { .. }
+            | ServerEvent::TurnEnded { .. }
+            | ServerEvent::TurnState { .. } => return None,
             event => return Some(event),
         };
     }
@@ -106,6 +110,8 @@ struct ProcessingMessage {
     active_skill: Option<String>,
     /// Retry on the next pool account after a usage limit (API clients).
     server_failover: bool,
+    /// The sending connection's declared instance, reported as the turn's origin.
+    client_instance_id: Option<String>,
 }
 
 // A client request ID is not a turn identity: clients can reuse it after cancel.
@@ -1140,6 +1146,7 @@ pub(super) async fn handle_client(
                         system_reminder,
                         active_skill,
                         server_failover: supports_server_failover,
+                        client_instance_id: current_client_instance_id.clone(),
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1255,6 +1262,7 @@ pub(super) async fn handle_client(
                             system_reminder: None,
                             active_skill: None,
                             server_failover: supports_server_failover,
+                            client_instance_id: current_client_instance_id.clone(),
                         },
                         &client_session_id,
                         &mut ProcessingState {
@@ -2433,6 +2441,7 @@ pub(super) async fn handle_client(
                                 ProcessingMessage {
                                     id, content, images: Vec::new(), system_reminder: None,
                                     active_skill: None, server_failover: true,
+                                    client_instance_id: current_client_instance_id.clone(),
                                 },
                                 &client_session_id,
                                 &mut ProcessingState {

@@ -100,7 +100,9 @@ pub(super) async fn idle_live_agent(
 /// `running` before the turn starts and `ready` (with a completion report) or
 /// `failed` when it finishes. A synthetic terminal `Done { id: 0 }` (or
 /// `Error { id: 0, .. }`) is fanned out to attached clients so their UI can
-/// finish rendering the externally started turn.
+/// finish rendering the externally started turn. `origin` names the kind of
+/// actor that started it.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
     mut agent: OwnedMutexGuard<Agent>,
@@ -108,6 +110,7 @@ pub(super) async fn spawn_tracked_live_turn(
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
+    origin: crate::protocol::TurnOriginKind,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
     let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
@@ -144,6 +147,8 @@ pub(super) async fn spawn_tracked_live_turn(
         fallback,
         &turn_lease,
         0,
+        crate::protocol::TurnOrigin::server(origin),
+        super::state::turn_user_content(&message),
     );
     let event_tx = events.sender();
     let session_id = session_id.to_string();
@@ -251,6 +256,7 @@ pub(super) async fn run_live_turn_if_idle(
     session_id: &str,
     message: &str,
     system_reminder: Option<String>,
+    origin: crate::protocol::TurnOriginKind,
     sessions: &SessionAgents,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
@@ -265,6 +271,7 @@ pub(super) async fn run_live_turn_if_idle(
         system_reminder,
         None,
         detail,
+        origin,
         swarm,
     )
     .await
@@ -287,6 +294,7 @@ pub(super) async fn run_live_system_turn_if_idle(
         None,
         Some(crate::session::StoredDisplayRole::System),
         detail,
+        crate::protocol::TurnOriginKind::Background,
         swarm,
     )
     .await
@@ -444,6 +452,7 @@ mod durable_error_tests {
                 None,
                 Some(crate::session::StoredDisplayRole::System),
                 None,
+                crate::protocol::TurnOriginKind::Swarm,
                 swarm.clone(),
             )
             .await,
@@ -459,6 +468,7 @@ mod durable_error_tests {
                 None,
                 None,
                 None,
+                crate::protocol::TurnOriginKind::Swarm,
                 swarm,
             )
             .await

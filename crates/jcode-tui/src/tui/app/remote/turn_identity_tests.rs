@@ -13,6 +13,8 @@ fn start(app: &mut App, remote: &mut RemoteConnection, generation: &str, turn_id
         app,
         ServerEvent::TurnStarted {
             identity: identity(generation, turn_id),
+            origin: None,
+            user_content: None,
         },
         remote,
     );
@@ -179,6 +181,8 @@ fn idle_bootstrap_settles_observer_after_disconnected_completion() {
             runtime_generation: "runtime".into(),
             latest_turn_id: 1,
             turn_id: None,
+            active_origin: None,
+            active_user_content: None,
         },
         &mut remote,
     );
@@ -258,6 +262,8 @@ fn local_preacceptance_error_and_control_done_settle_without_active_turn() {
                 runtime_generation: "runtime".into(),
                 latest_turn_id: 0,
                 turn_id: None,
+                active_origin: None,
+                active_user_content: None,
             },
             &mut remote,
         );
@@ -301,6 +307,8 @@ fn paced_done_keeps_its_identity_across_reconnect_and_cannot_finish_new_turn() {
             runtime_generation: "runtime".into(),
             latest_turn_id: 1,
             turn_id: None,
+            active_origin: None,
+            active_user_content: None,
         },
         &mut remote,
     );
@@ -334,6 +342,8 @@ fn explicit_session_switch_can_revisit_previous_runtime() {
                 runtime_generation: generation.into(),
                 latest_turn_id: 1,
                 turn_id: Some(1),
+                active_origin: None,
+                active_user_content: None,
             },
             &mut remote,
         );
@@ -390,6 +400,8 @@ fn old_runtime_start_output_and_terminal_rejected_after_bootstrap() {
             runtime_generation: "new".into(),
             latest_turn_id: 1,
             turn_id: Some(1),
+            active_origin: None,
+            active_user_content: None,
         },
         &mut remote,
     );
@@ -434,6 +446,8 @@ fn reconnect_same_turn_accepts_current_terminal_but_idle_snapshot_blocks_replay(
                 runtime_generation: "runtime".into(),
                 latest_turn_id: 7,
                 turn_id: Some(7),
+                active_origin: None,
+                active_user_content: None,
             },
             &mut remote,
         );
@@ -451,6 +465,8 @@ fn reconnect_same_turn_accepts_current_terminal_but_idle_snapshot_blocks_replay(
             runtime_generation: "runtime".into(),
             latest_turn_id: 7,
             turn_id: Some(7),
+            active_origin: None,
+            active_user_content: None,
         },
         &mut remote,
     );

@@ -170,6 +170,7 @@ pub(in crate::tui::app) fn handle_server_event(
             runtime_generation,
             turn_id,
             latest_turn_id,
+            ..
         } => {
             if app.remote_turn_fence.bootstrap(
                 session_id,
@@ -199,7 +200,7 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             return false;
         }
-        ServerEvent::TurnStarted { identity } => {
+        ServerEvent::TurnStarted { identity, .. } => {
             let same_turn = app.remote_turn_fence.accepts(&identity);
             if !app.remote_turn_fence.start(&identity) {
                 return false;
@@ -230,6 +231,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 &*event,
                 ServerEvent::TurnState { .. }
                     | ServerEvent::TurnStarted { .. }
+                    | ServerEvent::TurnEnded { .. }
                     | ServerEvent::TurnEvent { .. }
             ) {
                 return false;
@@ -1116,8 +1118,11 @@ fn handle_server_event_inner(
             app.offer_guardrail_reroute();
             true
         }
+        // `turn_ended` is always followed by the turn's scoped terminal, which
+        // is what closes the turn here.
         ServerEvent::TurnState { .. }
         | ServerEvent::TurnStarted { .. }
+        | ServerEvent::TurnEnded { .. }
         | ServerEvent::TurnEvent { .. } => false,
         ServerEvent::Done { id } => {
             let mut auto_poked = false;

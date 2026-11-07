@@ -79,6 +79,86 @@ pub struct TurnIdentity {
     pub turn_id: u64,
 }
 
+/// Capability advertised when `turn_started`/`turn_state` carry the turn's
+/// origin and prompt and every turn is closed by `turn_ended`.
+pub const SERVER_CAPABILITY_TURN_ORIGIN: &str = "turn_origin";
+
+/// Additive daemon capabilities this build implements, as advertised in
+/// `Pong::capabilities`. Clients gate on presence, not on a version.
+pub const SERVER_CAPABILITIES: &[&str] = &[
+    "session_tools",
+    "soft_interrupt_ids",
+    "runtime_commands",
+    "session_connections",
+    SERVER_CAPABILITY_TURN_ORIGIN,
+];
+
+/// [`SERVER_CAPABILITIES`] in the shape the wire field wants.
+pub fn server_capabilities() -> Vec<String> {
+    SERVER_CAPABILITIES
+        .iter()
+        .map(|capability| (*capability).to_string())
+        .collect()
+}
+
+/// Who started a turn, so every attachment can tell its own turns from a
+/// peer's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnOrigin {
+    pub kind: TurnOriginKind,
+    /// The `client_instance_id` of the connection that started the turn, when a
+    /// client did and declared one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_instance_id: Option<String>,
+    /// The originating connection's request id. Connection-local: only
+    /// meaningful to the connection that issued it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<u64>,
+}
+
+impl TurnOrigin {
+    pub fn client(client_instance_id: Option<String>, request_id: u64) -> Self {
+        Self {
+            kind: TurnOriginKind::Client,
+            client_instance_id,
+            request_id: Some(request_id),
+        }
+    }
+
+    pub fn server(kind: TurnOriginKind) -> Self {
+        Self {
+            kind,
+            client_instance_id: None,
+            request_id: None,
+        }
+    }
+}
+
+/// What kind of actor started a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOriginKind {
+    /// A client prompt (`message`, or a soft interrupt that started an idle turn).
+    Client,
+    /// A swarm spawn, assignment, message, report or wake.
+    Swarm,
+    /// A background-task notification or a reload-recovery continuation.
+    Background,
+    /// A message relayed from outside the daemon (jade relay).
+    Relay,
+    /// A debug/test entry point (`agent_task`).
+    Debug,
+}
+
+/// How a turn ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnEndStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
 /// Server event sent to client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -94,10 +174,33 @@ pub enum ServerEvent {
         runtime_generation: String,
         turn_id: Option<u64>,
         latest_turn_id: u64,
+        /// Origin of the active turn (`turn_id`), when one is running.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_origin: Option<TurnOrigin>,
+        /// User-visible prompt of the active turn, if it has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_user_content: Option<String>,
     },
     /// Published before any output from an accepted server turn.
     #[serde(rename = "turn_started")]
-    TurnStarted { identity: TurnIdentity },
+    TurnStarted {
+        identity: TurnIdentity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<TurnOrigin>,
+        /// The user-visible prompt that started the turn, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_content: Option<String>,
+    },
+    /// Published exactly once per turn, after all of its output and
+    /// immediately before its scoped terminal `done`/`error`. Only sent to
+    /// identity-aware transports.
+    #[serde(rename = "turn_ended")]
+    TurnEnded {
+        identity: TurnIdentity,
+        status: TurnEndStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     /// All events owned by a turn, including its terminal, share this scope.
     #[serde(rename = "turn_event")]
     TurnEvent {
