@@ -33,6 +33,48 @@ fn derive_subagent_description(prompt: &str) -> String {
     }
 }
 
+/// Tool input for a manual `/subagent` launch.
+///
+/// The direct `subagent` tool was removed in favor of `swarm`, but
+/// `Request::RunSubagent` still dispatched to it and failed with
+/// "Unknown tool: subagent". Launch through `swarm` `action=spawn` instead,
+/// which joins the caller's swarm, creates the worker's todo lane, and returns
+/// the new session id. The worker runs in the background and reports back
+/// through the swarm like any model-initiated spawn.
+fn subagent_swarm_spawn_input(
+    prompt: &str,
+    subagent_type: &str,
+    model: Option<String>,
+    session_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if session_id.is_some() {
+        return Err(
+            "/subagent --continue is no longer supported; message or resume the worker through the swarm instead."
+                .to_string(),
+        );
+    }
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Err("Missing prompt. Add text after /subagent.".to_string());
+    }
+    let mut input = serde_json::json!({
+        "action": "spawn",
+        "label": derive_subagent_description(prompt),
+        "prompt": prompt,
+    });
+    if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+        input["model"] = serde_json::Value::String(model);
+    }
+    // swarm workers have no type selector; keep the requested type visible in
+    // the worker's prompt rather than silently dropping it.
+    let subagent_type = subagent_type.trim();
+    if !subagent_type.is_empty() && subagent_type != "general" {
+        input["prompt"] =
+            serde_json::Value::String(format!("[subagent type: {subagent_type}]\n\n{prompt}"));
+    }
+    Ok(input)
+}
+
 #[path = "input_shell_output.rs"]
 mod input_shell_output;
 use input_shell_output::{build_input_shell_command, combine_input_shell_output};
@@ -300,12 +342,17 @@ pub(super) async fn handle_set_subagent_model(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a launch carries the client's request id, prompt, worker options, and origin identity"
+)]
 pub(super) fn handle_run_subagent(
     id: u64,
     prompt: String,
     subagent_type: String,
     model: Option<String>,
     session_id: Option<String>,
+    client_instance_id: Option<String>,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -313,131 +360,169 @@ pub(super) fn handle_run_subagent(
     let tx = client_event_tx.clone();
 
     crate::runtime_activity::spawn(async move {
-        let description = derive_subagent_description(&prompt);
-        let tool_call_id = crate::id::new_id("call");
-        let tool_name = "subagent".to_string();
-        let tool_input = serde_json::json!({
-            "description": description,
-            "prompt": prompt,
-            "subagent_type": subagent_type,
-            "model": model,
-            "session_id": session_id,
-            "command": "/subagent",
-        });
+        // Validate before touching the agent: an invalid launch must report its
+        // error immediately, not wait for a running turn to release the lock.
+        let tool_input =
+            match subagent_swarm_spawn_input(&prompt, &subagent_type, model, session_id) {
+                Ok(input) => input,
+                Err(message) => {
+                    let _ = tx.send(ServerEvent::Error {
+                        id,
+                        message,
+                        retry_after_secs: None,
+                    });
+                    return;
+                }
+            };
 
-        let message_id = {
-            let mut agent_guard = agent.lock().await;
-            match agent_guard.add_manual_tool_use(
-                tool_call_id.clone(),
-                tool_name.clone(),
-                tool_input.clone(),
-            ) {
-                Ok(message_id) => message_id,
+        // Claim a regular turn lease, exactly like a model turn: the runtime's
+        // turn ownership then serialises the launch with every other turn of
+        // this session (a concurrent prompt is rejected instead of interleaving
+        // its fanned-out stream with the launch's tool events), and the launch
+        // gets a turn identity. The lease is a non-blocking reservation, not
+        // the agent mutex, so the swarm spawn below (which claims its lease on
+        // the *worker's* runtime) cannot deadlock on it, and the agent mutex is
+        // only held around transcript updates.
+        let (lease, session_id) = {
+            let agent_guard = agent.lock().await;
+            match agent_guard.claim_server_turn() {
+                Ok(lease) => (lease, agent_guard.session_id().to_string()),
                 Err(error) => {
                     let _ = tx.send(ServerEvent::Error {
                         id,
-                        message: crate::util::format_error_chain(&error),
+                        message: error.to_string(),
                         retry_after_secs: None,
                     });
                     return;
                 }
             }
         };
-
-        let _ = tx.send(ServerEvent::ToolStart {
-            id: tool_call_id.clone(),
-            name: tool_name.clone(),
-        });
-        let _ = tx.send(ServerEvent::ToolInput {
-            id: Some(tool_call_id.clone()),
-            delta: tool_input.to_string(),
-        });
-        let _ = tx.send(ServerEvent::ToolExec {
-            id: tool_call_id.clone(),
-            name: tool_name.clone(),
-        });
-
-        let (registry, session_id, working_dir) = {
-            let agent_guard = agent.lock().await;
-            (
-                agent_guard.registry(),
-                agent_guard.session_id().to_string(),
-                agent_guard.working_dir().map(std::path::PathBuf::from),
-            )
-        };
-
-        let ctx = crate::tool::ToolContext {
+        // Publish on the requesting connection only: a manual launch is not a
+        // model turn, and peers see the persisted tool call on their next
+        // history load. An empty member map makes every publish fall back to
+        // this connection's sender.
+        let events = super::state::TurnEventChannel::new(
             session_id,
-            message_id,
-            tool_call_id: tool_call_id.clone(),
-            working_dir,
-            stdin_request_tx: None,
-            graceful_shutdown_signal: None,
-            execution_mode: crate::tool::ToolExecutionMode::Direct,
-        };
-
-        let started = Instant::now();
-        let tool_name_for_exec = tool_name.clone();
-        let result = match crate::runtime_activity::spawn(async move {
-            registry.execute(&tool_name_for_exec, tool_input, ctx).await
-        }) {
-            Some(handle) => match handle.await {
-                Ok(result) => result,
-                Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+            Arc::new(RwLock::new(HashMap::new())),
+            tx.clone(),
+            &lease,
+            id,
+            crate::protocol::TurnOrigin::client(client_instance_id, id),
+            super::state::turn_user_content(&prompt),
+        );
+        // Not the session's active turn for an attaching client either: peers
+        // are never sent this turn's events, so a snapshot that reported it as
+        // running would open a turn that never ends for them. The lease (and
+        // the publication reservation) still serialises it.
+        lease.publication_pin().retire();
+        let events_tx = events.sender();
+        let terminal = match run_subagent_turn(&agent, &events_tx, tool_input).await {
+            Ok(()) => ServerEvent::Done { id },
+            Err(error) => ServerEvent::Error {
+                id,
+                message: crate::util::format_error_chain(&error),
+                retry_after_secs: None,
             },
-            None => Err(anyhow::anyhow!(
-                "Tool task was not admitted because the runtime is shutting down"
-            )),
         };
-        let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-
-        match result {
-            Ok(output) => {
-                let output_text = output.output.clone();
-                let _ = tx.send(ServerEvent::ToolDone {
-                    id: tool_call_id.clone(),
-                    name: tool_name,
-                    output: output_text,
-                    error: None,
-                });
-                let persist = {
-                    let mut agent_guard = agent.lock().await;
-                    agent_guard.add_manual_tool_result(tool_call_id, output, duration_ms)
-                };
-                if let Err(error) = persist {
-                    let _ = tx.send(ServerEvent::Error {
-                        id,
-                        message: crate::util::format_error_chain(&error),
-                        retry_after_secs: None,
-                    });
-                    return;
-                }
-                let _ = tx.send(ServerEvent::Done { id });
-            }
-            Err(error) => {
-                let error_msg = format!("Error: {}", error);
-                let _ = tx.send(ServerEvent::ToolDone {
-                    id: tool_call_id.clone(),
-                    name: tool_name,
-                    output: error_msg.clone(),
-                    error: Some(error_msg.clone()),
-                });
-                let persist = {
-                    let mut agent_guard = agent.lock().await;
-                    agent_guard.add_manual_tool_error(tool_call_id, error_msg, duration_ms)
-                };
-                if let Err(persist_error) = persist {
-                    let _ = tx.send(ServerEvent::Error {
-                        id,
-                        message: crate::util::format_error_chain(&persist_error),
-                        retry_after_secs: None,
-                    });
-                    return;
-                }
-                let _ = tx.send(ServerEvent::Done { id });
-            }
-        }
+        let _ = events_tx.send(terminal);
+        drop(events_tx);
+        events.finish().await;
+        drop(lease);
     });
+}
+
+/// Run one `/subagent` launch: stream its tool call, execute it, and persist
+/// the result. `Err` means the launch must be reported as an error instead of
+/// a completion. The agent is locked only around transcript updates, never
+/// across the tool execution.
+async fn run_subagent_turn(
+    agent: &Arc<Mutex<Agent>>,
+    tx: &mpsc::UnboundedSender<ServerEvent>,
+    tool_input: serde_json::Value,
+) -> anyhow::Result<()> {
+    let tool_call_id = crate::id::new_id("call");
+    let tool_name = "swarm".to_string();
+    let (message_id, registry, session_id, working_dir) = {
+        let mut agent_guard = agent.lock().await;
+        let message_id = agent_guard.add_manual_tool_use(
+            tool_call_id.clone(),
+            tool_name.clone(),
+            tool_input.clone(),
+        )?;
+        (
+            message_id,
+            agent_guard.registry(),
+            agent_guard.session_id().to_string(),
+            agent_guard.working_dir().map(std::path::PathBuf::from),
+        )
+    };
+
+    let _ = tx.send(ServerEvent::ToolStart {
+        id: tool_call_id.clone(),
+        name: tool_name.clone(),
+    });
+    let _ = tx.send(ServerEvent::ToolInput {
+        id: Some(tool_call_id.clone()),
+        delta: tool_input.to_string(),
+    });
+    let _ = tx.send(ServerEvent::ToolExec {
+        id: tool_call_id.clone(),
+        name: tool_name.clone(),
+    });
+
+    let ctx = crate::tool::ToolContext {
+        session_id,
+        message_id,
+        tool_call_id: tool_call_id.clone(),
+        working_dir,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+    };
+
+    let started = Instant::now();
+    let tool_name_for_exec = tool_name.clone();
+    let result = match crate::runtime_activity::spawn(async move {
+        registry.execute(&tool_name_for_exec, tool_input, ctx).await
+    }) {
+        Some(handle) => match handle.await {
+            Ok(result) => result,
+            Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+        },
+        None => Err(anyhow::anyhow!(
+            "Tool task was not admitted because the runtime is shutting down"
+        )),
+    };
+    let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+
+    match result {
+        Ok(output) => {
+            let _ = tx.send(ServerEvent::ToolDone {
+                id: tool_call_id.clone(),
+                name: tool_name,
+                output: output.output.clone(),
+                error: None,
+            });
+            agent
+                .lock()
+                .await
+                .add_manual_tool_result(tool_call_id, output, duration_ms)?;
+        }
+        Err(error) => {
+            let error_msg = format!("Error: {}", error);
+            let _ = tx.send(ServerEvent::ToolDone {
+                id: tool_call_id.clone(),
+                name: tool_name,
+                output: error_msg.clone(),
+                error: Some(error_msg.clone()),
+            });
+            agent
+                .lock()
+                .await
+                .add_manual_tool_error(tool_call_id, error_msg, duration_ms)?;
+        }
+    }
+    Ok(())
 }
 
 #[expect(

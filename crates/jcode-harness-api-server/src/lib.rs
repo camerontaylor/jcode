@@ -18,6 +18,7 @@
 
 pub mod allocator;
 pub mod background_progress;
+pub mod session_catalog;
 pub mod translate;
 
 #[cfg(all(test, unix))]
