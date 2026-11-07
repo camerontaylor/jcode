@@ -78,6 +78,12 @@ pub(super) fn available_efforts(state: &SessionUiState) -> Vec<&str> {
 /// An unsupported effort is a harmless no-op; valid levels are clamped to the
 /// nearest advertised level before contacting the daemon.
 pub(super) fn normalize_effort(state: &SessionUiState, requested: &str) -> Result<Option<String>> {
+    if matches!(
+        requested.trim().to_ascii_lowercase().as_str(),
+        "default" | "auto"
+    ) {
+        return Ok(Some(requested.trim().to_ascii_lowercase()));
+    }
     let efforts = available_efforts(state);
     if efforts.is_empty() {
         let warning = format!(
@@ -149,6 +155,20 @@ pub(super) fn session_config_options(state: &SessionUiState) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_default_resets_bypass_ranked_normalization() {
+        let state = SessionUiState {
+            available_reasoning_efforts: Some(vec![]),
+            ..Default::default()
+        };
+        for reset in ["default", "auto"] {
+            assert_eq!(
+                normalize_effort(&state, reset).unwrap().as_deref(),
+                Some(reset)
+            );
+        }
+    }
 
     #[test]
     fn authoritative_capabilities_override_name_inference() {
