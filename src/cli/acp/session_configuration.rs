@@ -127,6 +127,7 @@ pub(super) fn session_config_options(state: &SessionUiState) -> Vec<Value> {
             state.reasoning_effort.as_deref().unwrap_or("medium"),
             &efforts,
         )
+        .or_else(|| jcode_provider_core::closest_reasoning_effort("medium", &efforts))
         .unwrap_or(efforts[0]);
         let select_options: Vec<Value> = efforts
             .iter()
@@ -161,6 +162,17 @@ mod tests {
         assert_eq!(options.len(), 1);
         assert_eq!(options[0]["id"], CONFIG_ID_MODEL);
         assert_eq!(normalize_effort(&state, "high").unwrap(), None);
+    }
+
+    #[test]
+    fn tui_sentinel_uses_a_supported_default_in_config() {
+        let state = SessionUiState {
+            model: Some("reasoning-model".into()),
+            reasoning_effort: Some("swarm".into()),
+            available_reasoning_efforts: Some(vec!["low".into(), "medium".into(), "high".into()]),
+            ..Default::default()
+        };
+        assert_eq!(session_config_options(&state)[1]["currentValue"], "medium");
     }
 
     #[test]
