@@ -430,6 +430,7 @@ impl DaemonSession {
         let ui_state = Arc::clone(&self.ui_state);
         let gate = Arc::clone(&self.peer_gate);
         let peer_mapper = Arc::clone(&self.peer_mapper);
+        let session = Arc::downgrade(self);
         let handle = tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
@@ -446,6 +447,26 @@ impl DaemonSession {
                 let Some(event) = decode_daemon_line(&line) else {
                     continue;
                 };
+                if matches!(&event, ServerEvent::AvailableModelsUpdated { .. }) {
+                    if let Some(session) = session.upgrade() {
+                        let acp = acp.clone();
+                        tokio::spawn(async move {
+                            match request_model_catalog(&session).await {
+                                Ok(_) => {
+                                    if let Err(err) = acp.write_config_option_update(&session).await
+                                    {
+                                        crate::logging::debug(&format!(
+                                            "acp: config update failed: {err}"
+                                        ));
+                                    }
+                                }
+                                Err(err) => crate::logging::debug(&format!(
+                                    "acp: catalog refresh failed: {err}"
+                                )),
+                            }
+                        });
+                    }
+                }
                 let actions = router.lock().await.route(event);
                 for action in actions {
                     if let Err(err) = acp
@@ -2256,6 +2277,26 @@ async fn request_model_catalog(session: &Arc<DaemonSession>) -> Result<ServerEve
         }
     };
     session.unregister(id).await;
+    if let Ok(ServerEvent::History {
+        provider_name,
+        provider_model,
+        available_models,
+        reasoning_effort,
+        available_reasoning_efforts,
+        ..
+    }) = &result
+    {
+        let mut state = session.ui_state.lock().await;
+        if provider_name.is_some() {
+            state.provider_name = provider_name.clone();
+        }
+        if provider_model.is_some() {
+            state.model = provider_model.clone();
+        }
+        state.available_models = available_models.clone();
+        state.reasoning_effort = reasoning_effort.clone();
+        state.available_reasoning_efforts = available_reasoning_efforts.clone();
+    }
     result
 }
 
