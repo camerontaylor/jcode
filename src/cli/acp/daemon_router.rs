@@ -611,7 +611,7 @@ impl RouterState {
 
     /// A model-catalog reply reuses `History` but omits the live-session list
     /// and transcript, so it must not overwrite session metadata.
-    fn is_catalog_reply(&self, event: &ServerEvent) -> bool {
+    pub(super) fn is_catalog_reply(&self, event: &ServerEvent) -> bool {
         reply_request_id(event)
             .and_then(|id| self.pending.get(&id))
             .is_some_and(|pending| pending.kind == PendingKind::Catalog)
