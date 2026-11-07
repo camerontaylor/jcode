@@ -239,6 +239,23 @@ pub(crate) fn startup_model_spec(provider: &ProviderChoice, model: Option<&str>)
     })
 }
 
+/// Preserve named compatible endpoint identity when attaching to an existing daemon.
+pub(crate) fn startup_model_spec_with_profile(
+    provider: &ProviderChoice,
+    model: Option<&str>,
+    profile: Option<&str>,
+) -> Option<String> {
+    let spec = startup_model_spec(provider, model)?;
+    if matches!(provider, ProviderChoice::OpenaiCompatible)
+        && let Some(profile) = profile.map(str::trim).filter(|p| !p.is_empty())
+        && let Some(bare) = spec.strip_prefix("openai-compatible:")
+        && model == Some(bare)
+    {
+        return Some(format!("{profile}:{bare}"));
+    }
+    Some(spec)
+}
+
 #[allow(deprecated)]
 const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescriptor)] = &[
     (

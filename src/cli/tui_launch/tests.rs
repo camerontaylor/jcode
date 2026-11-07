@@ -266,3 +266,32 @@ fn startup_model_flags_preserve_provider_and_explicit_route() {
         Some("ollama:llama3.1:8b".into())
     );
 }
+
+#[test]
+fn startup_model_named_profile_and_colon_route_precedence() {
+    use crate::cli::provider_init::{
+        ProviderChoice, startup_model_spec, startup_model_spec_with_profile,
+    };
+    assert_eq!(
+        startup_model_spec_with_profile(
+            &ProviderChoice::OpenaiCompatible,
+            Some("mymodel"),
+            Some("myprofile")
+        )
+        .as_deref(),
+        Some("myprofile:mymodel")
+    );
+    assert_eq!(
+        startup_model_spec_with_profile(
+            &ProviderChoice::OpenaiCompatible,
+            Some("openai:gpt-5.4"),
+            Some("myprofile")
+        )
+        .as_deref(),
+        Some("openai:gpt-5.4")
+    );
+    assert_eq!(
+        startup_model_spec(&ProviderChoice::Ollama, Some("cerebras:opaque")).as_deref(),
+        Some("cerebras:opaque")
+    );
+}
