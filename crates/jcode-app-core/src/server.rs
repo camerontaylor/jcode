@@ -1019,6 +1019,7 @@ impl Server {
                     Arc::clone(&recover_swarm_members),
                     fallback,
                     &lease,
+                    0,
                 );
                 let result = self::turn_failover::process_reserved_message_with_server_failover(
                     Arc::clone(&agent),

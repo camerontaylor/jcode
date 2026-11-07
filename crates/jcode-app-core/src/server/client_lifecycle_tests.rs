@@ -821,6 +821,7 @@ async fn turn_publication_reserves_runtime_until_aborted_or_finished_queue_drain
             Arc::clone(&members),
             tx,
             &lease,
+            7,
         );
         let retained_sender = events.sender();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

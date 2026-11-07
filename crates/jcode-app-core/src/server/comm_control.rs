@@ -434,6 +434,7 @@ fn spawn_assigned_task_run(
             Arc::clone(&swarm_members),
             fallback,
             &turn_lease,
+            0,
         ));
         {
             let now_ms = now_unix_ms();
