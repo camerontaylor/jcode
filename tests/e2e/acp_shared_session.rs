@@ -4,9 +4,9 @@
 //! the ACP adapter must mirror turns another client starts, and its own
 //! `session/prompt` result must cover exactly its own turn.
 //!
-//! The daemon does not queue a prompt behind a running turn: it rejects it
-//! ("Already processing a message"), so a prompt sent while a peer's turn runs
-//! fails instead of running after it.
+//! A prompt sent while a peer's turn runs is steered into that turn, like a
+//! TUI or SDK follow-up: the daemon injects it at the turn's next safe point,
+//! and the prompt adopts the turn, resolving with it.
 
 use crate::test_support::*;
 use std::collections::VecDeque;
@@ -158,6 +158,13 @@ impl AcpClient {
     /// Wait for the response to a request sent with [`Self::send_request`],
     /// buffering notifications that arrive first.
     async fn wait_for_response(&mut self, id: u64) -> Result<serde_json::Value> {
+        let is_response = |message: &serde_json::Value| {
+            message.get("method").is_none()
+                && message.get("id").and_then(|id| id.as_u64()) == Some(id)
+        };
+        if let Some(index) = self.pending.iter().position(is_response) {
+            return Ok(self.pending.remove(index));
+        }
         loop {
             let message = self.read_message().await?;
             if message.get("method").is_none()
@@ -334,8 +341,11 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
     let socket_path = runtime_dir.join("jcode.sock");
     let debug_socket_path = runtime_dir.join("jcode-debug.sock");
 
+    // One word per provider call. A steer injected when a turn's answer ends
+    // continues that turn with one more call: "kilo" and "lima".
     let words: VecDeque<String> = [
-        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+        "alpha", "bravo", "charlie", "kilo", "delta", "echo", "foxtrot", "lima", "golf", "hotel",
+        "india",
     ]
     .into_iter()
     .map(str::to_string)
@@ -530,8 +540,8 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
         );
 
         // --- Scenario 3: the other client prompts, ACP prompts mid-turn. The
-        // daemon rejects the second prompt rather than queueing it; the peer
-        // turn keeps mirroring and nothing of it leaks into the rejection.
+        // prompt is steered into the peer's turn: once injected, the turn is
+        // the prompt's, and the prompt resolves when it ends.
         let message_id = other
             .send_message("Count from 1 to 15, one number per line.")
             .await?;
@@ -554,32 +564,68 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
             "turn ids increase: {first_turn_id} then {peer_turn_id}"
         );
 
-        let rejected_id = acp
+        let steer_text = "Reply with exactly the word: kilo";
+        let steer_id = acp
             .send_request(
                 "session/prompt",
                 serde_json::json!({
                     "sessionId": session_id,
-                    "prompt": [{ "type": "text", "text": "Reply with exactly the word: never" }],
+                    "prompt": [{ "type": "text", "text": steer_text }],
                 }),
             )
             .await?;
-        let rejected = acp.wait_for_response(rejected_id).await?;
-        let rejection = rejected["error"]["message"].as_str().unwrap_or_default();
-        assert!(
-            rejection.contains("Already processing"),
-            "a prompt during a peer turn is rejected, not queued: {rejected}"
-        );
-
-        let ended = acp.wait_for_notification(is_turn_end).await?;
+        let steered = acp.wait_for_response(steer_id).await?;
         assert_eq!(
-            ended["params"]["turnId"], peer_turn_id,
-            "the running peer turn still ends with its own bracket"
+            steered["result"]["stopReason"], "end_turn",
+            "a prompt during a peer turn joins it and ends with it: {steered}"
         );
-        assert_eq!(ended["params"]["state"], "completed");
+        // Everything up to the answer, in wire order.
+        let adopted = acp.take_notifications();
+        let brackets = turn_notifications(&adopted);
+        assert_eq!(
+            brackets,
+            vec![("completed".to_string(), peer_turn_id.clone())],
+            "the adopted turn's bracket is closed once, and never reopened: {adopted:#?}"
+        );
+        let kilo = adopted
+            .iter()
+            .find(|notification| is_agent_text(notification, "kilo"))
+            .with_context(|| format!("the turn's continuation answers the prompt: {adopted:#?}"))?;
+        let kilo_id = kilo["params"]["update"]["messageId"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            kilo_id.starts_with(&format!("{session_id}:own:")),
+            "after the injection the turn streams as the prompt's own output: {kilo_id}"
+        );
+        assert!(
+            notification_position(&adopted, kilo) < adopted.iter().position(is_turn_end).unwrap(),
+            "the bracket closes after the turn's output: {adopted:#?}"
+        );
+        assert!(
+            !adopted.iter().any(|notification| {
+                notification["params"]["update"]["sessionUpdate"] == "user_message_chunk"
+                    && notification["params"]["update"]["content"]["text"] == steer_text
+            }),
+            "our own steer is not echoed as a peer message: {adopted:#?}"
+        );
         let other_events = collect_until_done_unix(&mut other, message_id).await?;
         assert!(
             !saw_interrupt(&other_events),
-            "the rejected prompt did not disturb the peer's turn: {other_events:?}"
+            "the steer did not disturb the peer's turn: {other_events:?}"
+        );
+        assert!(
+            other_events.iter().any(|event| matches!(
+                event,
+                ServerEvent::SoftInterruptInjected { content, .. } if content == steer_text
+            )),
+            "the peer sees the steer injected into its turn: {other_events:?}"
+        );
+        assert!(
+            other_events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::TextDelta { text } if text == "kilo")),
+            "the peer sees the turn's continuation: {other_events:?}"
         );
 
         // Once the peer turn ended, the ACP prompt runs as its own turn.
@@ -709,11 +755,36 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
         let _ = collect_until_done_unix(&mut other, message_id).await?;
 
         // --- Scenario 4: closing the ACP view must not cancel a peer's turn,
-        // and must stop reading the daemon for that session.
+        // even one our prompt adopted, and must stop reading the daemon for
+        // that session.
         let message_id = other
             .send_message("Reply with exactly the word: foxtrot")
             .await?;
         acp.wait_for_notification(|notification| is_agent_text(notification, "foxtrot"))
+            .await?;
+        // The newest bracket: earlier mirrored turns may still be buffered.
+        let adopted_turn_id = acp
+            .take_notifications()
+            .iter()
+            .rev()
+            .find(|notification| {
+                notification["method"] == "_jcode/turn"
+                    && notification["params"]["state"] == "started"
+            })
+            .and_then(|notification| notification["params"]["turnId"].as_str())
+            .map(str::to_string)
+            .context("the running peer turn was announced")?;
+        let steer_id = acp
+            .send_request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "prompt": [{ "type": "text", "text": "Reply with exactly the word: lima" }],
+                }),
+            )
+            .await?;
+        // The steer was injected and the turn is ours now.
+        acp.wait_for_notification(|notification| is_agent_text(notification, "lima"))
             .await?;
         let closed = acp
             .request(
@@ -722,6 +793,20 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
             )
             .await?;
         assert!(closed.is_object(), "session/close answers: {closed}");
+        let released = acp.wait_for_response(steer_id).await?;
+        assert_eq!(
+            released["result"]["stopReason"], "cancelled",
+            "closing the view releases the prompt that adopted the turn: {released}"
+        );
+        let ends: Vec<(String, String)> = turn_notifications(&acp.take_notifications())
+            .into_iter()
+            .filter(|(state, _)| state != "started")
+            .collect();
+        assert_eq!(
+            ends,
+            vec![("canceled".to_string(), adopted_turn_id)],
+            "the adopted turn's bracket is closed for this view"
+        );
 
         // The other client's turn was untouched by the close.
         let peer_events = collect_until_done_unix(&mut other, message_id).await?;
@@ -732,8 +817,8 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
         assert!(
             peer_events
                 .iter()
-                .any(|event| matches!(event, ServerEvent::TextDelta { text } if text == "foxtrot")),
-            "the peer's turn completed normally"
+                .any(|event| matches!(event, ServerEvent::TextDelta { text } if text == "lima")),
+            "the peer's turn ran to the end, steer included: {peer_events:?}"
         );
 
         // The connection is gone: a later peer turn produces no ACP output.
@@ -798,10 +883,10 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
             "the peer's turn was interrupted by the ACP stop: {peer_events:?}"
         );
 
-        // The same stop on our own running prompt answers it as cancelled. The
-        // daemon clears a stop aimed at another connection's turn only after
-        // 500 ms; a prompt inside that window would start already cancelled.
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        // The same stop on our own running prompt answers it as cancelled. It
+        // is sent at once: the daemon's stale stop of the peer turn must not
+        // cancel it, and a steer the daemon queued while that turn was still
+        // finishing is recovered.
         let prompt_id = stopper
             .send_request(
                 "session/prompt",
