@@ -1743,6 +1743,8 @@ pub struct InlineInteractiveState {
     pub filter: String,
     /// Preview mode: picker is visible but input stays in main text box
     pub preview: bool,
+    /// The user explicitly navigated the preview results.
+    pub navigated: bool,
 }
 
 impl InlineInteractiveState {

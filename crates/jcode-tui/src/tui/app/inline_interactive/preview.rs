@@ -189,6 +189,9 @@ impl App {
                     self.session.subagent_model.as_deref(),
                 );
             }
+            if picker.filter != request.filter() {
+                picker.navigated = false;
+            }
             picker.filter = request.filter().to_string();
             Self::apply_inline_interactive_filter(picker);
         }
@@ -206,6 +209,9 @@ impl App {
         else {
             return false;
         };
+        if picker.navigated && !picker.filtered.is_empty() {
+            return false;
+        }
         if !argument.is_empty()
             && (argument.contains([':', '/', '@', '-', '.'])
                 || picker.filtered.is_empty()

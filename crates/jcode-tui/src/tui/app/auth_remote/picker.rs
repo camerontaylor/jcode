@@ -118,6 +118,7 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            navigated: false,
         });
         let host = host.to_string();
         self.set_status_notice(format!(
