@@ -716,6 +716,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
             content: "hello".to_string(),
             tool_calls: None,
             tool_data: None,
+            stored_index: None,
         }],
         images: Vec::new(),
         provider_name: Some("openai".to_string()),
@@ -816,6 +817,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
             content: "older response".to_string(),
             tool_calls: None,
             tool_data: None,
+            stored_index: None,
         }],
         images: Vec::new(),
         compacted_total: 128,
@@ -975,6 +977,7 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
         content: content.to_string(),
         tool_calls: None,
         tool_data: None,
+        stored_index: None,
     };
     let messages = vec![message("user", "hi"), message("assistant", "hello")];
     let whole =
@@ -1011,4 +1014,26 @@ fn history_delta_fields_are_backward_compatible() {
         panic!("expected history");
     };
     assert_eq!(messages_base_count, None);
+}
+
+#[test]
+fn history_message_stored_index_is_optional_and_roundtrips() {
+    let legacy: HistoryMessage =
+        serde_json::from_str(r#"{"role":"user","content":"hi"}"#).expect("legacy row decodes");
+    assert_eq!(legacy.stored_index, None);
+    assert!(
+        serde_json::to_value(&legacy)
+            .unwrap()
+            .get("stored_index")
+            .is_none(),
+        "a synthetic row keeps the legacy wire shape"
+    );
+    let stored = HistoryMessage {
+        stored_index: Some(12),
+        ..legacy
+    };
+    let value = serde_json::to_value(&stored).unwrap();
+    assert_eq!(value["stored_index"], 12);
+    let decoded: HistoryMessage = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.stored_index, Some(12));
 }

@@ -8,6 +8,7 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
             content: content.to_string(),
             tool_calls: None,
             tool_data: None,
+            stored_index: None,
         })
         .collect()
 }
