@@ -639,6 +639,7 @@ pub(super) async fn spawn_swarm_agent(
                     Arc::clone(&swarm_members2),
                     fallback,
                     &lease,
+                    0,
                 );
                 let start_message_index = agent.message_count();
                 let result = process_reserved_locked_message_with_server_failover(

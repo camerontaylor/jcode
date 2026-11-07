@@ -496,58 +496,99 @@ pub(super) async fn fanout_peer_client_event(
     delivered
 }
 
+/// How a turn's producer released its [`TurnEventChannel`].
+enum TurnEventExit {
+    /// [`TurnEventChannel::finish`] ran.
+    Finished,
+    /// The channel was dropped without `finish`: the producer task was aborted
+    /// (a cancel's grace period expired), returned early, or is unwinding.
+    Dropped { panicking: bool },
+}
+
+fn is_turn_terminal(event: &ServerEvent) -> bool {
+    matches!(event, ServerEvent::Done { .. } | ServerEvent::Error { .. })
+}
+
 /// Owns one turn's event queue. Closing or aborting the producer drains all
 /// accepted events before releasing the runtime's publication reservation.
+///
+/// Every turn published through the channel ends with exactly one scoped
+/// terminal (`done`/`error`). If the producer never queued one, typically
+/// because its task was aborted, the drain task publishes `done` with the
+/// channel's `terminal_id` after all queued output, so every attachment sees
+/// the turn end instead of only the cancelling connection.
 pub(super) struct TurnEventChannel {
     tx: mpsc::UnboundedSender<ServerEvent>,
-    close: Option<tokio::sync::oneshot::Sender<()>>,
+    close: Option<tokio::sync::oneshot::Sender<TurnEventExit>>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TurnEventChannel {
+    /// `terminal_id` is the request id of the fallback terminal published when
+    /// the producer releases the channel without queueing its own.
     pub(super) fn new(
         session_id: String,
         members: Arc<RwLock<HashMap<String, SwarmMember>>>,
         fallback: mpsc::UnboundedSender<ServerEvent>,
         lease: &crate::agent::TurnLease,
+        terminal_id: u64,
     ) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
-        let (close, mut closed) = tokio::sync::oneshot::channel();
+        let (close, mut closed) = tokio::sync::oneshot::channel::<TurnEventExit>();
         let publication = lease.publication_pin();
         let identity = lease.identity().clone();
         let task = tokio::spawn(async move {
             let _publication = publication;
-            let started = ServerEvent::TurnStarted {
-                identity: identity.clone(),
+            let publish = |event: ServerEvent| {
+                let members = &members;
+                let session_id = &session_id;
+                let fallback = &fallback;
+                async move {
+                    if fanout_session_event(members, session_id, event.clone()).await == 0 {
+                        let _ = fallback.send(event);
+                    }
+                }
             };
-            if fanout_session_event(&members, &session_id, started.clone()).await == 0 {
-                let _ = fallback.send(started);
-            }
-            loop {
+            let scoped = |event: ServerEvent| ServerEvent::TurnEvent {
+                identity: identity.clone(),
+                event: Box::new(event),
+            };
+            publish(ServerEvent::TurnStarted {
+                identity: identity.clone(),
+            })
+            .await;
+            let mut terminal_seen = false;
+            let exit = loop {
                 let event = tokio::select! {
                     biased;
-                    _ = &mut closed => { rx.close(); break; }
+                    exit = &mut closed => {
+                        rx.close();
+                        break exit.unwrap_or(TurnEventExit::Dropped { panicking: false });
+                    }
                     event = rx.recv() => event,
                 };
                 let Some(event) = event else {
-                    return;
+                    break TurnEventExit::Dropped { panicking: false };
                 };
-                let event = ServerEvent::TurnEvent {
-                    identity: identity.clone(),
-                    event: Box::new(event),
-                };
-                if fanout_session_event(&members, &session_id, event.clone()).await == 0 {
-                    let _ = fallback.send(event);
-                }
-            }
+                terminal_seen |= is_turn_terminal(&event);
+                publish(scoped(event)).await;
+            };
             while let Some(event) = rx.recv().await {
-                let event = ServerEvent::TurnEvent {
-                    identity: identity.clone(),
-                    event: Box::new(event),
+                terminal_seen |= is_turn_terminal(&event);
+                publish(scoped(event)).await;
+            }
+            if !terminal_seen {
+                let terminal = match exit {
+                    TurnEventExit::Dropped { panicking: true } => ServerEvent::Error {
+                        id: terminal_id,
+                        message: "The turn panicked before it reported completion.".into(),
+                        retry_after_secs: None,
+                    },
+                    TurnEventExit::Dropped { panicking: false } | TurnEventExit::Finished => {
+                        ServerEvent::Done { id: terminal_id }
+                    }
                 };
-                if fanout_session_event(&members, &session_id, event.clone()).await == 0 {
-                    let _ = fallback.send(event);
-                }
+                publish(scoped(terminal)).await;
             }
         });
         Self {
@@ -562,7 +603,9 @@ impl TurnEventChannel {
     }
 
     pub(super) async fn finish(mut self) {
-        self.close.take();
+        if let Some(close) = self.close.take() {
+            let _ = close.send(TurnEventExit::Finished);
+        }
         if let Some(task) = self.task.take()
             && let Err(error) = task.await
         {
@@ -574,8 +617,13 @@ impl TurnEventChannel {
 impl Drop for TurnEventChannel {
     fn drop(&mut self) {
         // Dropping JoinHandle detaches the drain task. It must not be aborted:
-        // already queued events still own the runtime publication reservation.
-        self.close.take();
+        // already queued events still own the runtime publication reservation,
+        // and the drain task still owes attachments a terminal.
+        if let Some(close) = self.close.take() {
+            let _ = close.send(TurnEventExit::Dropped {
+                panicking: std::thread::panicking(),
+            });
+        }
     }
 }
 

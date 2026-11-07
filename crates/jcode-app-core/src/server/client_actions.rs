@@ -1271,6 +1271,7 @@ pub(super) async fn handle_agent_task(
         Arc::clone(ctx.swarm_members),
         ctx.client_event_tx.clone(),
         &lease,
+        id,
     );
     update_member_status(
         client_session_id,
