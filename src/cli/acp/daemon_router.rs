@@ -60,6 +60,8 @@ pub(super) enum PendingKind {
     Prompt,
     /// A helper request/response pair (history, model catalog, config change).
     Reply,
+    /// A catalog History omits live-session and turn snapshots.
+    Catalog,
 }
 
 pub(super) struct PendingRequest {
@@ -557,7 +559,9 @@ impl RouterState {
     /// daemon does not scope.
     fn on_flat(&mut self, event: ServerEvent) -> Vec<RouteAction> {
         let mut actions = Vec::new();
-        if let ServerEvent::History { .. } = &event {
+        if let ServerEvent::History { .. } = &event
+            && !self.is_catalog_reply(&event)
+        {
             actions.extend(self.on_history(&event));
         }
 
@@ -605,6 +609,14 @@ impl RouterState {
         actions
     }
 
+    /// A model-catalog reply reuses `History` but omits the live-session list
+    /// and transcript, so it must not overwrite session metadata.
+    fn is_catalog_reply(&self, event: &ServerEvent) -> bool {
+        reply_request_id(event)
+            .and_then(|id| self.pending.get(&id))
+            .is_some_and(|pending| pending.kind == PendingKind::Catalog)
+    }
+
     /// Session metadata from a `History`. The first one is the attach
     /// snapshot: a peer turn announced before it whose prompt it already
     /// contains must not show that prompt again.
@@ -647,6 +659,7 @@ impl RouterState {
             all_sessions,
             ..
         } = &event
+            && !self.is_catalog_reply(&event)
         {
             self.session_id = session_id.clone();
             self.live_sessions = Some(all_sessions.clone());

@@ -2,6 +2,36 @@
 
 use super::*;
 
+/// Catalog-only History can omit capabilities while the provider is busy.
+pub(super) fn apply_catalog_state(state: &mut SessionUiState, event: &ServerEvent) {
+    if let ServerEvent::History {
+        provider_name,
+        provider_model,
+        available_models,
+        reasoning_effort,
+        available_reasoning_efforts,
+        ..
+    } = event
+    {
+        let previous_provider = state.provider_name.clone();
+        let previous_model = state.model.clone();
+        if provider_name.is_some() {
+            state.provider_name = provider_name.clone();
+        }
+        if provider_model.is_some() {
+            state.model = provider_model.clone();
+        }
+        state.available_models = available_models.clone();
+        state.reasoning_effort = reasoning_effort.clone();
+        if available_reasoning_efforts.is_some()
+            || previous_provider != state.provider_name
+            || previous_model != state.model
+        {
+            state.available_reasoning_efforts = available_reasoning_efforts.clone();
+        }
+    }
+}
+
 pub(super) const CONFIG_ID_MODEL: &str = "model";
 pub(super) const CONFIG_ID_EFFORT: &str = "reasoning_effort";
 
@@ -155,6 +185,30 @@ pub(super) fn session_config_options(state: &SessionUiState) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_omissions_preserve_capabilities_only_for_unchanged_model() {
+        let mut state = SessionUiState {
+            provider_name: Some("copilot".into()),
+            model: Some("claude-sonnet-5".into()),
+            available_reasoning_efforts: Some(vec!["high".into()]),
+            ..Default::default()
+        };
+        let catalog = |model: &str, efforts: Value| {
+            serde_json::from_value::<ServerEvent>(json!({
+                "type": "history", "id": 5, "session_id": "s", "messages": [],
+                "provider_name": "copilot", "provider_model": model,
+                "available_reasoning_efforts": efforts
+            }))
+            .unwrap()
+        };
+        apply_catalog_state(&mut state, &catalog("claude-sonnet-5", Value::Null));
+        assert_eq!(available_efforts(&state), vec!["high"]);
+        apply_catalog_state(&mut state, &catalog("another-model", Value::Null));
+        assert!(state.available_reasoning_efforts.is_none());
+        apply_catalog_state(&mut state, &catalog("another-model", json!([])));
+        assert_eq!(state.available_reasoning_efforts, Some(vec![]));
+    }
 
     #[test]
     fn provider_default_resets_bypass_ranked_normalization() {

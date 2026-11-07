@@ -960,3 +960,43 @@ fn scoped_events_for_a_turn_that_is_not_open_are_dropped() {
     );
     assert_eq!(router.own_turn_identity(), Some(identity(5)));
 }
+
+#[test]
+fn catalog_history_preserves_live_sessions_and_attach_state() {
+    for mut router in [attached_router(), {
+        let mut legacy = legacy_router();
+        legacy.route(history_event());
+        legacy
+    }] {
+        let mut rx = router.register(2, PendingKind::Catalog);
+        let mut event = history_event();
+        if let ServerEvent::History {
+            id,
+            session_id,
+            all_sessions,
+            ..
+        } = &mut event
+        {
+            *id = 2;
+            *session_id = "catalog-session".to_string();
+            all_sessions.clear();
+        }
+        router.route(event);
+        assert_eq!(router.session_id(), "session-1");
+        assert_eq!(
+            router.live_sessions(),
+            Some(["session-1".to_string()].as_slice())
+        );
+        assert!(matches!(
+            drain(&mut rx).as_slice(),
+            [ServerEvent::History { id: 2, .. }]
+        ));
+        // A real full-history snapshot still may clear the live list.
+        let mut event = history_event();
+        if let ServerEvent::History { all_sessions, .. } = &mut event {
+            all_sessions.clear();
+        }
+        router.route(event);
+        assert_eq!(router.live_sessions(), Some([].as_slice()));
+    }
+}
