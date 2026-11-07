@@ -2177,7 +2177,24 @@ impl Provider for MultiProvider {
         if self.active_provider() == ActiveProvider::OpenRouter
             && self
                 .active_openrouter_execution_provider()
-                .is_some_and(|provider| !provider.supports_provider_routing_features())
+                .is_some_and(|provider| {
+                    let catalog_profile = provider
+                        .direct_openai_compatible_route_parts()
+                        .and_then(|(_, api_method, _)| {
+                            api_method
+                                .strip_prefix("openai-compatible:")
+                                .and_then(crate::provider_catalog::openai_compatible_profile_by_id)
+                        })
+                        .is_some_and(|profile| {
+                            profile.id != crate::provider_catalog::OPENAI_COMPAT_PROFILE.id
+                        });
+                    !provider.supports_provider_routing_features()
+                        && (!catalog_profile
+                            || provider
+                                .available_models_for_switching()
+                                .iter()
+                                .any(|known| known == requested_model))
+                })
         {
             return self.set_model_on_provider(ActiveProvider::OpenRouter, requested_model);
         }
@@ -2213,9 +2230,19 @@ impl Provider for MultiProvider {
             // whichever provider happened to be active and failed with a
             // misleading "not supported by <active provider>" error.
             self.set_model_on_openai_compatible_profile(profile, model)
-        } else {
-            // Unknown model - try current provider.
+        } else if self
+            .available_models_for_switching()
+            .iter()
+            .any(|known| known == model)
+        {
+            // Live catalogs may advertise provider-local names that have no
+            // built-in family heuristic. Only delegate names we can resolve.
             self.set_model_on_provider(self.active_provider(), model)
+        } else {
+            anyhow::bail!(
+                "Unknown model '{}'. Use /model to choose an available model, or /model <provider>:<model> to select a provider explicitly.",
+                requested_model
+            )
         }
     }
 

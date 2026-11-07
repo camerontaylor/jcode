@@ -2503,6 +2503,9 @@ impl App {
         if !is_preview {
             return Ok(false);
         }
+        if *code == KeyCode::Enter && self.dismiss_model_preview_for_direct_command() {
+            return Ok(false);
+        }
         match code {
             KeyCode::Down => {
                 if let Some(picker) = self.inline_interactive_state.as_mut() {

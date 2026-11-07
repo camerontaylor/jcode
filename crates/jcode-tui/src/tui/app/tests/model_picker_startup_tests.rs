@@ -1,4 +1,53 @@
 #[test]
+fn test_model_preview_enter_submits_typed_spec_unchanged() {
+    for model in ["openai:gpt-6.1-sol", "not-a-model", "gpt-5.4"] {
+        let mut app = create_test_app();
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        app.provider = Arc::new(OpenRouterSpecCaptureProvider {
+            set_model_calls: calls.clone(),
+        });
+        for c in format!("/model {model}").chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        wait_for_model_picker_load(&mut app);
+        assert!(
+            app.inline_interactive_state
+                .as_ref()
+                .is_some_and(|picker| picker.preview)
+        );
+
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), vec![model.to_string()]);
+        assert!(app.inline_interactive_state.is_none());
+        assert!(app.input().is_empty());
+    }
+}
+
+#[test]
+fn test_model_preview_submit_input_submits_typed_spec_unchanged() {
+    let mut app = create_test_app();
+    let calls = StdArc::new(StdMutex::new(Vec::new()));
+    app.provider = Arc::new(OpenRouterSpecCaptureProvider {
+        set_model_calls: calls.clone(),
+    });
+    app.input = "/model openai:gpt-6.1-sol".to_string();
+    app.cursor_pos = app.input.len();
+    app.sync_model_picker_preview_from_input();
+    wait_for_model_picker_load(&mut app);
+
+    app.submit_input();
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["openai:gpt-6.1-sol".to_string()]
+    );
+    assert!(app.inline_interactive_state.is_none());
+}
+
+#[test]
 fn test_model_picker_preview_arrow_keys_navigate() {
     let mut app = create_test_app();
     configure_test_remote_models(&mut app);
