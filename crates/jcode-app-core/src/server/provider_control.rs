@@ -405,6 +405,14 @@ fn send_model_changed_result(
                 resolved_credential,
                 provider_oauth_email: super::provider_oauth_email(agent.provider_handle().as_ref()),
                 provider_oauth_account_label: agent.provider_handle().serving_oauth_account_label(),
+                available_reasoning_efforts: Some(
+                    agent
+                        .provider_handle()
+                        .available_efforts()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                ),
                 reasoning_effort,
             });
         }
@@ -426,6 +434,7 @@ fn send_model_changed_result(
                 resolved_credential: None,
                 provider_oauth_email: None,
                 provider_oauth_account_label: None,
+                available_reasoning_efforts: None,
                 reasoning_effort: None,
             });
         }
@@ -449,6 +458,7 @@ fn apply_cycle_model(
             resolved_credential: None,
             provider_oauth_email: None,
             provider_oauth_account_label: None,
+            available_reasoning_efforts: None,
             reasoning_effort: None,
         });
         return;

@@ -143,6 +143,14 @@ pub(super) fn apply_failover_target(
         resolved_credential: agent.active_resolved_credential(),
         provider_oauth_email: super::provider_oauth_email(agent.provider_handle().as_ref()),
         provider_oauth_account_label: agent.provider_handle().serving_oauth_account_label(),
+        available_reasoning_efforts: Some(
+            agent
+                .provider_handle()
+                .available_efforts()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        ),
         reasoning_effort: agent.provider_reasoning_effort(),
     });
     let _ = event_tx.send(ServerEvent::ConnectionPhase {

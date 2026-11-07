@@ -758,6 +758,10 @@ pub enum ServerEvent {
         /// Reasoning effort for providers that expose it
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
+        /// Authoritative model effort ladder. Empty means unsupported; absent
+        /// means an older daemon did not report capabilities.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available_reasoning_efforts: Option<Vec<String>>,
         /// Service tier override for OpenAI models
         #[serde(skip_serializing_if = "Option::is_none")]
         service_tier: Option<String>,
@@ -882,6 +886,10 @@ pub enum ServerEvent {
         /// client can tell "cleared" from an older server that omits it.
         #[serde(default)]
         reasoning_effort: Option<String>,
+        /// Authoritative model effort ladder. Empty means unsupported; absent
+        /// means an older daemon did not report capabilities.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available_reasoning_efforts: Option<Vec<String>>,
     },
 
     /// Reasoning effort changed (response to set_reasoning_effort)

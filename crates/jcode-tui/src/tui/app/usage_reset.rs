@@ -805,6 +805,7 @@ mod tests {
                     provider_oauth_email: None,
                     provider_oauth_account_label: None,
                     resolved_credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+                    available_reasoning_efforts: None,
                     reasoning_effort: None,
                     context_window: None,
                 },

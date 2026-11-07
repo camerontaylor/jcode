@@ -46,6 +46,8 @@ pub(super) enum PendingKind {
     Prompt,
     /// A helper request/response pair (history, model catalog, config change).
     Reply,
+    /// A catalog History omits live-session and turn snapshots.
+    Catalog,
 }
 
 pub(super) struct PendingRequest {
@@ -79,6 +81,8 @@ pub(super) enum SessionStateChange {
     Model {
         model: String,
         provider_name: Option<String>,
+        reasoning_effort: Option<String>,
+        available_reasoning_efforts: Option<Vec<String>>,
     },
     Effort {
         effort: Option<String>,
@@ -222,11 +226,18 @@ impl RouterState {
     /// Route one daemon event. Prompt and reply delivery happen through the
     /// registered channels; the returned actions are what the adapter must
     /// render for other clients' activity.
+    pub(super) fn is_catalog_reply(&self, event: &ServerEvent) -> bool {
+        reply_request_id(event)
+            .and_then(|id| self.pending.get(&id))
+            .is_some_and(|pending| pending.kind == PendingKind::Catalog)
+    }
+
     pub(super) fn route(&mut self, event: ServerEvent) -> Vec<RouteAction> {
         let mut actions = Vec::new();
 
         // Session metadata first: a client attaching mid-turn needs the
         // running turn opened, and feature flags gate everything else.
+        let catalog_only = self.is_catalog_reply(&event);
         if let ServerEvent::History {
             session_id,
             server_features,
@@ -235,6 +246,7 @@ impl RouterState {
             messages,
             ..
         } = &event
+            && !catalog_only
         {
             self.session_id = session_id.clone();
             self.features = server_features.clone();
@@ -520,11 +532,15 @@ fn session_state_change(event: &ServerEvent) -> Option<SessionStateChange> {
         ServerEvent::ModelChanged {
             model,
             provider_name,
+            reasoning_effort,
+            available_reasoning_efforts,
             error: None,
             ..
         } => Some(SessionStateChange::Model {
             model: model.clone(),
             provider_name: provider_name.clone(),
+            reasoning_effort: reasoning_effort.clone(),
+            available_reasoning_efforts: available_reasoning_efforts.clone(),
         }),
         ServerEvent::ReasoningEffortChanged {
             effort,
@@ -596,6 +612,37 @@ mod tests {
             value["active_turn"] = active_turn;
         }
         serde_json::from_value(value).expect("history decodes")
+    }
+
+    #[test]
+    fn catalog_history_preserves_live_sessions_and_features() {
+        let mut router = RouterState::new("client", "session-1");
+        router.route(history_event(&["turn_events"], None));
+        let mut rx = router.register(2, PendingKind::Catalog);
+        let mut event = history_event(&[], None);
+        if let ServerEvent::History {
+            id, all_sessions, ..
+        } = &mut event
+        {
+            *id = 2;
+            all_sessions.clear();
+        }
+        router.route(event);
+        assert_eq!(
+            router.live_sessions(),
+            Some(["session-1".to_string()].as_slice())
+        );
+        assert!(matches!(
+            drain(&mut rx).as_slice(),
+            [ServerEvent::History { id: 2, .. }]
+        ));
+        // A real full-history snapshot still may clear the live list.
+        let mut event = history_event(&[], None);
+        if let ServerEvent::History { all_sessions, .. } = &mut event {
+            all_sessions.clear();
+        }
+        router.route(event);
+        assert_eq!(router.live_sessions(), Some([].as_slice()));
     }
 
     fn turn_started(turn_id: &str, origin: TurnOrigin, content: Option<&str>) -> ServerEvent {
@@ -912,12 +959,14 @@ mod tests {
             resolved_credential: None,
             provider_oauth_email: None,
             provider_oauth_account_label: None,
-            reasoning_effort: None,
+            available_reasoning_efforts: Some(vec!["low".into(), "high".into()]),
+            reasoning_effort: Some("low".into()),
         });
         assert!(matches!(
             actions.as_slice(),
-            [RouteAction::SessionState(SessionStateChange::Model { model, .. })]
-                if model == "peer-model"
+            [RouteAction::SessionState(SessionStateChange::Model { model, reasoning_effort, available_reasoning_efforts, .. })]
+                if model == "peer-model" && reasoning_effort.as_deref() == Some("low")
+                    && available_reasoning_efforts.as_ref().unwrap() == &["low", "high"]
         ));
 
         let actions = router.route(ServerEvent::SessionRenamed {
@@ -943,6 +992,7 @@ mod tests {
                     resolved_credential: None,
                     provider_oauth_email: None,
                     provider_oauth_account_label: None,
+                    available_reasoning_efforts: None,
                     reasoning_effort: None,
                 })
                 .is_empty()
