@@ -309,7 +309,14 @@ fn advertised_commands_cover_all_acp_daemon_model_controls() {
         .iter()
         .map(|command| command["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["model", "models", "effort"]);
+    assert_eq!(names, ["model", "models", "effort", "compact", "subagent"]);
+    assert!(commands[3].get("input").is_none());
+    assert!(
+        commands[4]["input"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("<prompt>")
+    );
     assert_eq!(commands[0]["input"]["hint"], "model id (optional)");
     assert!(commands[1].get("input").is_none());
     assert!(
@@ -341,6 +348,42 @@ fn advertised_commands_parse_to_real_dispatch_variants() {
         AcpSlashCommand::Effort(Some("xhigh".to_string()))
     );
     assert!(parse_acp_slash_command("/models now").unwrap().is_err());
+    assert_eq!(
+        parse_acp_slash_command("/compact").unwrap().unwrap(),
+        AcpSlashCommand::Compact
+    );
+    assert!(parse_acp_slash_command("/compact now").unwrap().is_err());
+    assert_eq!(
+        parse_acp_slash_command("/subagent --model gpt-6.1-sol --type review check the -- flags")
+            .unwrap()
+            .unwrap(),
+        AcpSlashCommand::Subagent(AcpSubagentSpec {
+            prompt: "check the -- flags".to_string(),
+            subagent_type: "review".to_string(),
+            model: Some("gpt-6.1-sol".to_string()),
+        })
+    );
+    assert_eq!(
+        parse_acp_slash_command("/subagent fix the build")
+            .unwrap()
+            .unwrap(),
+        AcpSlashCommand::Subagent(AcpSubagentSpec {
+            prompt: "fix the build".to_string(),
+            subagent_type: "general".to_string(),
+            model: None,
+        })
+    );
+    assert!(parse_acp_slash_command("/subagent").unwrap().is_err());
+    assert!(
+        parse_acp_slash_command("/subagent --model")
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        parse_acp_slash_command("/subagent --bogus x")
+            .unwrap()
+            .is_err()
+    );
     assert!(parse_acp_slash_command("/not-advertised").is_none());
     assert!(parse_acp_slash_command(" /model literal").is_none());
     assert!(parse_acp_slash_command("ordinary prompt").is_none());
