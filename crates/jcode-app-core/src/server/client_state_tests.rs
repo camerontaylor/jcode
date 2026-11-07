@@ -1115,3 +1115,45 @@ fn history_reload_recovery_does_not_mark_delivered_until_continuation_is_accepte
 
 #[path = "client_state_tests/history_delta.rs"]
 mod history_delta;
+
+#[test]
+fn history_messages_carry_their_stored_index() {
+    let mut session =
+        crate::session::Session::create_with_id("session_stored_index".into(), None, None);
+    for (role, text) in [
+        (crate::message::Role::User, "first prompt"),
+        (crate::message::Role::Assistant, "first answer"),
+        (crate::message::Role::User, "second prompt"),
+        (crate::message::Role::Assistant, "second answer"),
+    ] {
+        session.add_message(
+            role,
+            vec![crate::message::ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+        );
+    }
+    let rendered = crate::session::render_messages(&session);
+    let expected: Vec<Option<usize>> = rendered.iter().map(|row| row.stored_index).collect();
+    let history: Vec<_> = rendered
+        .into_iter()
+        .map(super::rendered_to_history_message)
+        .collect();
+    assert_eq!(
+        history
+            .iter()
+            .map(|row| row.stored_index)
+            .collect::<Vec<_>>(),
+        expected,
+        "every row keeps the stored index it was rendered from"
+    );
+    let prompts: Vec<_> = history
+        .iter()
+        .filter(|row| row.content.ends_with("prompt"))
+        .map(|row| row.stored_index)
+        .collect();
+    assert_eq!(prompts, vec![Some(0), Some(2)]);
+    let wire = serde_json::to_value(&history[0]).unwrap();
+    assert_eq!(wire["stored_index"], 0);
+}

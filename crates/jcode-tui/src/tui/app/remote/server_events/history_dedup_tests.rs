@@ -12,6 +12,7 @@ fn message(role: &str, content: &str) -> HistoryMessage {
         content: content.to_string(),
         tool_calls: None,
         tool_data: None,
+        stored_index: None,
     }
 }
 
