@@ -444,6 +444,12 @@ pub struct MultiProvider {
 }
 
 impl MultiProvider {
+    /// Preserve an explicit startup selection when the daemon forks new sessions.
+    /// Later session-local model changes remain unrestricted.
+    pub fn preserve_initial_selection(&mut self) {
+        self.initial_provider = Some(self.active_provider());
+    }
+
     fn bound_session_id(&self) -> Option<String> {
         self.session_id
             .read()

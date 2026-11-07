@@ -898,18 +898,10 @@ async fn run_default_command(args: Args) -> Result<()> {
         .await;
     }
 
-    if server_running && explicit_provider_or_model {
+    if server_running && explicit_provider_or_model && args.model.is_none() {
         output::stderr_info(
-            "Server already running; provider/model flags only apply when starting a new server.",
+            "Server already running; use --model with --provider to select this session's model.",
         );
-        output::stderr_info(format!(
-            "Current server settings control `/model`. Restart server to apply: --provider {}{}",
-            args.provider.as_arg_value(),
-            args.model
-                .as_ref()
-                .map(|m| format!(" --model {}", m))
-                .unwrap_or_default()
-        ));
     }
 
     if server_running && explicit_tool_options {
@@ -948,6 +940,7 @@ async fn run_default_command(args: Args) -> Result<()> {
     if std::env::var("JCODE_RESUMING").is_err() && server_running {
         output::stderr_info("Connecting to server...");
     }
+    let startup_model = provider_init::startup_model_spec(&args.provider, args.model.as_deref());
     tui_launch::run_tui_client(
         args.resume,
         startup_hints,
@@ -956,6 +949,7 @@ async fn run_default_command(args: Args) -> Result<()> {
         args.remote_working_dir,
         args.onboarding_sim,
         args.update_sim,
+        startup_model,
     )
     .await?;
 

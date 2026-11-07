@@ -6,6 +6,24 @@ use super::*;
 use crate::tui::{backend, keybind};
 
 impl App {
+    pub(super) fn cancel_startup_model(&mut self) {
+        self.startup_model = None;
+        self.startup_model_request_id = None;
+        self.remote_model_switch_in_flight = false;
+        self.submit_input_on_startup = false;
+        let prepared = self
+            .pending_prompt_after_model_switch
+            .take()
+            .or_else(|| self.pending_prompt_before_history.take());
+        if let Some(prepared) = prepared {
+            remote::restore_prepared_remote_input(self, prepared);
+        }
+    }
+
+    pub fn set_startup_model(&mut self, model: Option<String>) {
+        self.startup_model = model;
+    }
+
     /// Re-parse keybinding snapshots when the config cache has reloaded.
     ///
     /// The parsed bindings are cached on `App` for cheap per-keystroke lookup,
@@ -633,6 +651,8 @@ impl App {
             pending_model_picker_load: None,
             model_picker_load_request_id: 0,
             pending_model_switch: None,
+            startup_model: None,
+            startup_model_request_id: None,
             pending_route_selection: None,
             pending_automatic_failover_route: None,
             pending_automatic_failover_request_id: None,
@@ -1118,6 +1138,8 @@ impl App {
             pending_model_picker_load: None,
             model_picker_load_request_id: 0,
             pending_model_switch: None,
+            startup_model: None,
+            startup_model_request_id: None,
             pending_route_selection: None,
             pending_automatic_failover_route: None,
             pending_automatic_failover_request_id: None,

@@ -234,3 +234,31 @@ async fn keeps_server_spawning_phase_while_listener_is_not_live() {
         "server startup banner should stay hidden when client did not request it"
     );
 }
+
+#[test]
+fn startup_model_flags_preserve_provider_and_explicit_route() {
+    use crate::cli::provider_init::ProviderChoice;
+    assert_eq!(
+        crate::cli::provider_init::startup_model_spec(&ProviderChoice::Auto, Some("gpt-5.4")),
+        Some("gpt-5.4".into())
+    );
+    assert_eq!(
+        crate::cli::provider_init::startup_model_spec(&ProviderChoice::OpenaiApi, Some("gpt-5.4")),
+        Some("openai-api:gpt-5.4".into())
+    );
+    assert_eq!(
+        crate::cli::provider_init::startup_model_spec(
+            &ProviderChoice::Openrouter,
+            Some("openai:gpt-5.4")
+        ),
+        Some("openai:gpt-5.4".into())
+    );
+    assert_eq!(
+        crate::cli::provider_init::startup_model_spec(&ProviderChoice::Auto, None),
+        None
+    );
+    assert_eq!(
+        crate::cli::provider_init::startup_model_spec(&ProviderChoice::Ollama, Some("llama3.1:8b")),
+        Some("ollama:llama3.1:8b".into())
+    );
+}

@@ -55,9 +55,9 @@ use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 pub(super) use input_dispatch::{
     apply_remote_transcript_event, apply_transcript_event, begin_remote_send,
     begin_remote_split_launch, finish_remote_split_launch, history_matches_pending_startup_prompt,
-    route_prepared_input_to_new_remote_session, stage_turn_for_remote_tick_loop,
-    submit_prepared_remote_input, submit_remote_slash_input, submit_remote_voice_transcript,
-    submit_voice_transcript,
+    restore_prepared_remote_input, route_prepared_input_to_new_remote_session,
+    stage_turn_for_remote_tick_loop, submit_prepared_remote_input, submit_remote_slash_input,
+    submit_remote_voice_transcript, submit_voice_transcript,
 };
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
@@ -1089,6 +1089,9 @@ pub(super) fn handle_disconnect(
     // queued prompt for reconnect, but release the transient model-setup gate so
     // it cannot remain blocked forever waiting for an event that was lost.
     app.finish_auth_catalog_refresh();
+    if app.startup_model_request_id.take().is_some() {
+        app.remote_model_switch_in_flight = false;
+    }
     state.last_disconnect_reason = Some(detail.clone());
 
     let scheduled_retry =
@@ -1374,6 +1377,33 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     // mismatch reload-handoff stall).
     if app.pending_server_reload && !app.is_processing {
         dispatch_pending_server_reload(app, remote).await;
+        return;
+    }
+
+    // Subscribe must attach the correct session before applying client flags.
+    // Wait for its History, then await the matching model acknowledgment before
+    // any staged prompt can use the daemon's previous/default model.
+    if app.startup_model_request_id.is_some() {
+        return;
+    }
+    if app.startup_model.is_some() {
+        if !remote.has_loaded_history() {
+            return;
+        }
+        let model = app.startup_model.clone().expect("checked startup model");
+        match remote.set_model(&model).await {
+            Ok(id) => {
+                app.startup_model_request_id = Some(id);
+                app.remote_model_switch_in_flight = true;
+            }
+            Err(error) => {
+                app.cancel_startup_model();
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to select startup model '{model}': {error}"
+                )));
+                app.set_status_notice("Model switch failed");
+            }
+        }
         return;
     }
 

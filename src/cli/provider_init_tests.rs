@@ -1051,6 +1051,15 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
     assert!(request_error.contains("not configured"), "{request_error}");
     assert!(request_error.contains("/login"), "{request_error}");
 
+    // Explicit startup models fail closed even though credential-free serve
+    // otherwise remains available for onboarding.
+    let error =
+        match init_provider_for_serve(&ProviderChoice::Auto, Some("openai-api:gpt-5.4")).await {
+            Ok(_) => panic!("explicit model without credentials must fail"),
+            Err(error) => error.to_string(),
+        };
+    assert!(error.contains("Failed to select model"), "{error}");
+
     // Serve opts in locally, rather than leaking a process-wide exemption.
     assert!(std::env::var_os("JCODE_DEFERRED_AUTH_BOOTSTRAP").is_none());
     assert!(init_provider(&ProviderChoice::Auto, None).await.is_err());
