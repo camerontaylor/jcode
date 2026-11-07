@@ -1747,6 +1747,14 @@ pub(super) async fn handle_resume_session(
                         provider_oauth_email: super::provider_oauth_email(
                             guard.provider_handle().as_ref(),
                         ),
+                        available_reasoning_efforts: Some(
+                            guard
+                                .provider_handle()
+                                .available_efforts()
+                                .into_iter()
+                                .map(str::to_string)
+                                .collect(),
+                        ),
                         reasoning_effort: guard.provider_reasoning_effort(),
                         provider_oauth_account_label: guard
                             .provider_handle()

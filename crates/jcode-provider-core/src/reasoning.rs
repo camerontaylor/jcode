@@ -34,6 +34,25 @@ pub fn canonical_reasoning_effort(value: &str) -> Option<&'static str> {
     }
 }
 
+/// Map a known effort to the nearest level supported by a model.
+/// Ties prefer the lower level; UI-only sentinels never become provider values.
+pub fn closest_reasoning_effort<'a>(requested: &str, available: &'a [&str]) -> Option<&'a str> {
+    const LEVELS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    let normalized = canonical_reasoning_effort(requested)?;
+    let rank = LEVELS.iter().position(|level| *level == normalized)?;
+    available
+        .iter()
+        .copied()
+        .filter_map(|level| {
+            LEVELS
+                .iter()
+                .position(|candidate| *candidate == level)
+                .map(|index| (level, index))
+        })
+        .min_by_key(|(_, index)| (rank.abs_diff(*index), *index))
+        .map(|(level, _)| level)
+}
+
 /// Infer the selectable effort ladder when only provider/model identity is
 /// available, such as in a remote TUI session.
 pub fn inferred_reasoning_efforts(
@@ -55,7 +74,7 @@ pub fn inferred_reasoning_efforts(
         return OPENAI_SELECTABLE_EFFORTS.to_vec();
     }
 
-    let is_openai_model = model.starts_with("gpt-")
+    let is_openai_model = (model.starts_with("gpt-") && !model.starts_with("gpt-oss"))
         || model.starts_with("o1")
         || model.starts_with("o3")
         || model.starts_with("o4")
@@ -100,6 +119,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn closest_effort_uses_model_levels_and_ignores_sentinels() {
+        assert_eq!(
+            closest_reasoning_effort(" HIGH ", &["low", "high"]),
+            Some("high")
+        );
+        assert_eq!(
+            closest_reasoning_effort("minimal", &["none", "low"]),
+            Some("none")
+        );
+        assert_eq!(
+            closest_reasoning_effort("max", &["low", "medium", "high"]),
+            Some("high")
+        );
+        assert_eq!(closest_reasoning_effort("none", &["high"]), Some("high"));
+        assert_eq!(closest_reasoning_effort("high", &[]), None);
+        assert_eq!(closest_reasoning_effort("high", &["swarm"]), None);
+        assert_eq!(closest_reasoning_effort("typo", &["high"]), None);
+    }
+
+    #[test]
     fn provider_ladders_preserve_distinct_max_semantics() {
         assert_eq!(
             inferred_reasoning_efforts(Some("openai"), Some("gpt-5.4")),
@@ -114,6 +153,15 @@ mod tests {
             inferred_reasoning_efforts(Some("openai-compatible:custom"), Some("gpt-5.6")),
             OPENAI_SELECTABLE_EFFORTS,
             "direct OpenAI-compatible runtimes use the OpenAI reasoning_effort vocabulary"
+        );
+    }
+
+    #[test]
+    fn gpt_oss_does_not_imply_openai_reasoning_support() {
+        assert!(inferred_reasoning_efforts(Some("Cerebras"), Some("gpt-oss-120b")).is_empty());
+        assert!(
+            inferred_reasoning_efforts(Some("openai-compatible:cerebras"), Some("gpt-oss-120b"))
+                .is_empty()
         );
     }
 

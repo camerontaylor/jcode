@@ -61,15 +61,39 @@ pub(super) fn session_models(state: &SessionUiState) -> Option<Value> {
     }))
 }
 
-pub(super) fn available_efforts(state: &SessionUiState) -> Vec<&'static str> {
-    crate::provider::inferred_reasoning_efforts(
-        state.provider_name.as_deref(),
-        state.model.as_deref(),
-    )
-    .into_iter()
-    // `swarm` is a TUI sentinel, not provider effort levels.
-    .filter(|effort| !effort.starts_with("swarm"))
-    .collect()
+pub(super) fn available_efforts(state: &SessionUiState) -> Vec<&str> {
+    let efforts = match &state.available_reasoning_efforts {
+        Some(efforts) => efforts.iter().map(String::as_str).collect(),
+        None => crate::provider::inferred_reasoning_efforts(
+            state.provider_name.as_deref(),
+            state.model.as_deref(),
+        ),
+    };
+    efforts
+        .into_iter()
+        .filter(|effort| jcode_provider_core::canonical_reasoning_effort(effort).is_some())
+        .collect()
+}
+
+/// An unsupported effort is a harmless no-op; valid levels are clamped to the
+/// nearest advertised level before contacting the daemon.
+pub(super) fn normalize_effort(state: &SessionUiState, requested: &str) -> Result<Option<String>> {
+    let efforts = available_efforts(state);
+    if efforts.is_empty() {
+        let warning = format!(
+            "Ignoring reasoning effort '{requested}': model '{}' does not support it",
+            state.model.as_deref().unwrap_or("unknown")
+        );
+        crate::logging::warn(&warning);
+        eprintln!("Warning: {warning}");
+        return Ok(None);
+    }
+    let selected = jcode_provider_core::closest_reasoning_effort(requested, &efforts)
+        .ok_or_else(|| anyhow::anyhow!("Unknown reasoning effort: {requested}"))?;
+    if !selected.eq_ignore_ascii_case(requested.trim()) {
+        eprintln!("Warning: reasoning effort '{requested}' is unavailable; using '{selected}'");
+    }
+    Ok(Some(selected.to_string()))
 }
 
 /// Build the ACP `configOptions` array (model selector plus reasoning effort)
@@ -99,17 +123,11 @@ pub(super) fn session_config_options(state: &SessionUiState) -> Vec<Value> {
 
     let efforts = available_efforts(state);
     if !efforts.is_empty() {
-        let current = state
-            .reasoning_effort
-            .as_deref()
-            .filter(|effort| efforts.contains(effort))
-            .unwrap_or_else(|| {
-                if efforts.contains(&"medium") {
-                    "medium"
-                } else {
-                    efforts[0]
-                }
-            });
+        let current = jcode_provider_core::closest_reasoning_effort(
+            state.reasoning_effort.as_deref().unwrap_or("medium"),
+            &efforts,
+        )
+        .unwrap_or(efforts[0]);
         let select_options: Vec<Value> = efforts
             .iter()
             .map(|name| json!({ "value": name, "name": name }))
@@ -125,4 +143,48 @@ pub(super) fn session_config_options(state: &SessionUiState) -> Vec<Value> {
     }
 
     options
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authoritative_capabilities_override_name_inference() {
+        let state = SessionUiState {
+            provider_name: Some("openai-compatible:cerebras".into()),
+            model: Some("gpt-oss-120b".into()),
+            available_reasoning_efforts: Some(vec![]),
+            ..Default::default()
+        };
+        let options = session_config_options(&state);
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0]["id"], CONFIG_ID_MODEL);
+        assert_eq!(normalize_effort(&state, "high").unwrap(), None);
+    }
+
+    #[test]
+    fn model_ladder_controls_options_and_normalizes_requests() {
+        let state = SessionUiState {
+            provider_name: Some("openai".into()),
+            model: Some("gpt-5-pro".into()),
+            reasoning_effort: Some("high".into()),
+            available_reasoning_efforts: Some(vec!["high".into(), "swarm".into()]),
+            ..Default::default()
+        };
+        let options = session_config_options(&state);
+        assert_eq!(
+            options[1]["options"],
+            json!([{"value":"high","name":"high"}])
+        );
+        assert_eq!(
+            normalize_effort(&state, "max").unwrap().as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            normalize_effort(&state, "none").unwrap().as_deref(),
+            Some("high")
+        );
+        assert!(normalize_effort(&state, "swarm").is_err());
+    }
 }
