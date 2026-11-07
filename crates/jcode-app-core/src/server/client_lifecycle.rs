@@ -898,7 +898,7 @@ pub(super) async fn handle_client(
         // that writer can be busy long enough that an already-decoded cancel would sit
         // behind outbound bytes instead of signalling the agent's lock-free cancel
         // handle. Queue the Ack through the event channel and signal cancellation first.
-        if let Request::Cancel { id } = request {
+        if let Request::Cancel { id, ref turn } = request {
             let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
             crate::logging::info(&format!(
                 "SERVER_INTERRUPT_CANCEL_PRE_ACK_DISPATCH id={} session={} ack_queued={} decoded_to_dispatch_ms={}",
@@ -908,27 +908,39 @@ pub(super) async fn handle_client(
                 request_decoded_at.elapsed().as_millis()
             ));
             let cancel_dispatch_start = Instant::now();
-            cancel_processing_message(
-                &mut ProcessingState {
-                    client_is_processing: &mut client_is_processing,
-                    message_id: &mut processing_message_id,
-                    session_id: &mut processing_session_id,
-                    task: &mut processing_task,
-                },
-                &session_control,
-                &client_event_tx,
-                &SwarmStatusRefs {
-                    members: &swarm_members,
-                    swarms_by_id: &swarms_by_id,
-                    event_history: &event_history,
-                    event_counter: &event_counter,
-                    event_tx: &swarm_event_tx,
-                },
-                Some(id),
-                Some(request_decoded_at),
-                Some(&sessions),
-            )
-            .await;
+            // A turn-scoped cancel whose turn is no longer active is answered by
+            // the Ack alone: that turn has already published its terminal, and
+            // the running turn (if any) belongs to someone else.
+            let targets_active =
+                cancel_targets_active_turn(&sessions, &client_session_id, turn.as_ref());
+            if !targets_active {
+                crate::logging::info(&format!(
+                    "SERVER_INTERRUPT_CANCEL_STALE_TURN id={} session={} turn={:?}",
+                    id, client_session_id, turn
+                ));
+            } else {
+                cancel_processing_message(
+                    &mut ProcessingState {
+                        client_is_processing: &mut client_is_processing,
+                        message_id: &mut processing_message_id,
+                        session_id: &mut processing_session_id,
+                        task: &mut processing_task,
+                    },
+                    &session_control,
+                    &client_event_tx,
+                    &SwarmStatusRefs {
+                        members: &swarm_members,
+                        swarms_by_id: &swarms_by_id,
+                        event_history: &event_history,
+                        event_counter: &event_counter,
+                        event_tx: &swarm_event_tx,
+                    },
+                    Some(id),
+                    Some(request_decoded_at),
+                    Some(&sessions),
+                )
+                .await;
+            }
             crate::logging::info(&format!(
                 "SERVER_INTERRUPT_CANCEL_PRE_ACK_DONE id={} session={} dispatch_ms={} total_since_decode_ms={}",
                 id,
@@ -1165,7 +1177,12 @@ pub(super) async fn handle_client(
                 }
             }
 
-            Request::Cancel { id } => {
+            Request::Cancel { id, turn } => {
+                // Normally handled before dispatch (pre-ack path above).
+                if !cancel_targets_active_turn(&sessions, &client_session_id, turn.as_ref()) {
+                    let _ = client_event_tx.send(ServerEvent::Ack { id });
+                    continue;
+                }
                 cancel_processing_message(
                     &mut ProcessingState {
                         client_is_processing: &mut client_is_processing,
@@ -3397,9 +3414,9 @@ pub(super) async fn handle_client(
 mod client_processing;
 use client_processing::{
     append_context_message, cancel_processing_message, cancel_soft_interrupts_by_id,
-    clear_soft_interrupts, move_tool_to_background, queue_soft_interrupt,
-    reconcile_processing_completions, record_processing_completion, start_processing_message,
-    try_available_models_snapshot,
+    cancel_targets_active_turn, clear_soft_interrupts, move_tool_to_background,
+    queue_soft_interrupt, reconcile_processing_completions, record_processing_completion,
+    start_processing_message, try_available_models_snapshot,
 };
 
 /// Process a message and stream events (mpsc channel - per-client)

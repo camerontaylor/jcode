@@ -609,7 +609,12 @@ impl AcpRuntime {
         };
         if let Some(session) = session {
             let cancel_id = session.next_id();
-            let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+            let _ = session
+                .send(&Request::Cancel {
+                    id: cancel_id,
+                    turn: None,
+                })
+                .await;
         }
         if let Some(id) = message.id {
             self.write_result(id, json!({})).await?;
@@ -631,7 +636,12 @@ impl AcpRuntime {
         };
         if let Some(session) = self.sessions.lock().await.remove(&session_id) {
             let cancel_id = session.next_id();
-            let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+            let _ = session
+                .send(&Request::Cancel {
+                    id: cancel_id,
+                    turn: None,
+                })
+                .await;
         }
         self.write_result(id, json!({})).await?;
         Ok(())

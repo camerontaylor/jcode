@@ -426,6 +426,26 @@ pub(super) async fn start_processing_message(
     });
 }
 
+/// Whether a turn-scoped cancel still targets the session's running turn.
+///
+/// `None` (a session-wide cancel) always proceeds. A scoped cancel proceeds
+/// only while its turn is the runtime's active turn: once that turn has ended,
+/// or a newer turn has started, cancelling would stop work the requester did
+/// not ask to stop.
+pub(super) fn cancel_targets_active_turn(
+    sessions: &SessionAgents,
+    session_id: &str,
+    expected: Option<&crate::protocol::TurnIdentity>,
+) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    sessions
+        .turn_observer(session_id)
+        .and_then(|observer| observer.snapshot().1)
+        .is_some_and(|active| &active == expected)
+}
+
 pub(super) async fn cancel_processing_message(
     state: &mut ProcessingState<'_>,
     session_control: &SessionControlHandle,

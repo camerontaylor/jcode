@@ -466,3 +466,97 @@ async fn cancel_turn_stopped_is_scoped_to_the_active_turn_for_every_attachment()
         );
     }
 }
+
+/// A turn-scoped cancel only reaches the turn it names. A stale identity (the
+/// requester's turn already ended and a newer one started) must not stop the
+/// newer turn; an unscoped cancel keeps the session-wide behaviour.
+#[tokio::test]
+async fn turn_scoped_cancel_only_targets_the_active_turn() {
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let mut harness = TurnHarness::new(
+        "session_turn_channel_scoped_cancel",
+        1,
+        Arc::new(HangingStreamProvider),
+    )
+    .await;
+    let mut rx = harness.take_receiver(0);
+
+    let mut client_is_processing = false;
+    let mut message_id = None;
+    let mut processing_session_id = None;
+    let mut task = None;
+    harness
+        .start_prompt(
+            0,
+            41,
+            "keep running",
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut message_id,
+                session_id: &mut processing_session_id,
+                task: &mut task,
+            },
+        )
+        .await;
+    let events = read_until(&mut rx, |event| {
+        scoped_payload(event)
+            .is_some_and(|(_, event)| matches!(event, ServerEvent::TextDelta { .. }))
+    })
+    .await;
+    let Some(ServerEvent::TurnStarted {
+        identity: active, ..
+    }) = events.first().cloned()
+    else {
+        panic!("the turn announces itself first: {events:?}");
+    };
+    assert!(active.turn_id > 0);
+
+    let older = crate::protocol::TurnIdentity {
+        runtime_generation: active.runtime_generation.clone(),
+        turn_id: active.turn_id - 1,
+    };
+    let other_runtime = crate::protocol::TurnIdentity {
+        runtime_generation: "previous-runtime".into(),
+        turn_id: active.turn_id,
+    };
+    let session_id = harness.session_id.clone();
+    for stale in [&older, &other_runtime] {
+        assert!(
+            !cancel_targets_active_turn(&harness.sessions, &session_id, Some(stale)),
+            "a stale turn identity must not cancel the running turn: {stale:?}"
+        );
+    }
+    assert!(cancel_targets_active_turn(
+        &harness.sessions,
+        &session_id,
+        Some(&active)
+    ));
+    assert!(cancel_targets_active_turn(
+        &harness.sessions,
+        &session_id,
+        None
+    ));
+    assert!(
+        !task
+            .as_ref()
+            .expect("turn still owns its task")
+            .is_finished(),
+        "the running turn is untouched"
+    );
+
+    task.take().unwrap().abort();
+    let ended = read_until(&mut rx, |event| is_scoped_done(event, 41)).await;
+    assert!(!ended.is_empty());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while harness.agent.lock().await.claim_server_turn().is_err() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the aborted turn releases the runtime");
+    assert!(
+        !cancel_targets_active_turn(&harness.sessions, &session_id, Some(&active)),
+        "once the turn ended, a cancel naming it is stale"
+    );
+}
