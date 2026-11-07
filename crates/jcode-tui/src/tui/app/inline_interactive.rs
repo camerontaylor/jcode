@@ -3453,6 +3453,7 @@ impl App {
                     .unwrap_or(false)
                 {
                     picker.selected = next;
+                    picker.navigated = true;
                     picker.column = 0;
                     return picker
                         .entries
