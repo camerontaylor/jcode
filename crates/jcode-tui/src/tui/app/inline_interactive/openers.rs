@@ -83,6 +83,7 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            navigated: false,
         });
         self.input.clear();
         self.cursor_pos = 0;
@@ -208,6 +209,7 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            navigated: false,
         });
         self.input.clear();
         self.cursor_pos = 0;

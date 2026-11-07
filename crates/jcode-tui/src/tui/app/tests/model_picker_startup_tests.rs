@@ -1,4 +1,104 @@
 #[test]
+fn test_model_preview_navigation_preserves_selection_for_partial_spec() {
+    let mut app = create_test_app();
+    configure_test_remote_models(&mut app);
+    app.remote_available_entries = vec!["claude-sonnet-5".into(), "claude-opus-4.6".into()];
+    for c in "/model claude-".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+    app.handle_key(KeyCode::Down, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.inline_interactive_state.as_ref().unwrap().selected, 1);
+    app.handle_key(KeyCode::Char('o'), KeyModifiers::empty())
+        .unwrap();
+    let picker = app.inline_interactive_state.as_ref().unwrap();
+    assert!(!picker.navigated);
+    assert!(!picker.filtered.is_empty());
+    let selected = picker.filtered[picker.selected];
+    let expected = picker.entries[selected].name.split(" (").next().unwrap().to_string();
+    let entry = &mut app.inline_interactive_state.as_mut().unwrap().entries[selected];
+    for route in &mut entry.options { route.available = true; }
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    assert!(app.inline_interactive_state.is_none());
+    assert!(app.pending_model_switch.as_deref().is_some_and(|spec| spec.contains(&expected)), "{:?}", app.pending_model_switch);
+}
+
+#[test]
+fn test_model_preview_favorite_cycle_is_deliberate_navigation() {
+    let mut app = create_test_app();
+    configure_test_remote_models(&mut app);
+    for c in "/model gpt-".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+    let picker = app.inline_interactive_state.as_mut().unwrap();
+    let target = picker.filtered[1];
+    picker.entries[target].is_favorite = true;
+    let expected = picker.entries[target].name.split(" (").next().unwrap().to_string();
+    for route in &mut picker.entries[target].options { route.available = true; }
+    app.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT)
+        .unwrap();
+    let picker = app.inline_interactive_state.as_ref().unwrap();
+    assert!(picker.navigated);
+    assert_eq!(picker.selected, 1);
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    assert!(app.inline_interactive_state.is_none());
+    assert!(app.pending_model_switch.as_deref().is_some_and(|spec| spec.contains(&expected)), "{:?}", app.pending_model_switch);
+}
+
+#[test]
+fn test_model_preview_enter_submits_typed_spec_unchanged() {
+    for model in ["openai:gpt-6.1-sol", "not-a-model", "gpt-5.4"] {
+        let mut app = create_test_app();
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        app.provider = Arc::new(OpenRouterSpecCaptureProvider {
+            set_model_calls: calls.clone(),
+        });
+        for c in format!("/model {model}").chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        wait_for_model_picker_load(&mut app);
+        assert!(
+            app.inline_interactive_state
+                .as_ref()
+                .is_some_and(|picker| picker.preview)
+        );
+
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), vec![model.to_string()]);
+        assert!(app.inline_interactive_state.is_none());
+        assert!(app.input().is_empty());
+    }
+}
+
+#[test]
+fn test_model_preview_submit_input_submits_typed_spec_unchanged() {
+    let mut app = create_test_app();
+    let calls = StdArc::new(StdMutex::new(Vec::new()));
+    app.provider = Arc::new(OpenRouterSpecCaptureProvider {
+        set_model_calls: calls.clone(),
+    });
+    app.input = "/model openai:gpt-6.1-sol".to_string();
+    app.cursor_pos = app.input.len();
+    app.sync_model_picker_preview_from_input();
+    wait_for_model_picker_load(&mut app);
+
+    app.submit_input();
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["openai:gpt-6.1-sol".to_string()]
+    );
+    assert!(app.inline_interactive_state.is_none());
+}
+
+#[test]
 fn test_model_picker_preview_arrow_keys_navigate() {
     let mut app = create_test_app();
     configure_test_remote_models(&mut app);
@@ -109,7 +209,9 @@ fn test_large_remote_model_picker_builds_off_ui_thread_then_caches() {
         "large catalog should build in the background"
     );
     assert_eq!(
-        app.inline_interactive_state.as_ref().map(|p| p.entries.len()),
+        app.inline_interactive_state
+            .as_ref()
+            .map(|p| p.entries.len()),
         Some(1),
         "picker should open immediately with a loading row"
     );
@@ -126,7 +228,10 @@ fn test_large_remote_model_picker_builds_off_ui_thread_then_caches() {
         .as_ref()
         .map(|p| p.entries.len())
         .unwrap_or(0);
-    assert!(entries >= 600, "background build should fill the picker, got {entries}");
+    assert!(
+        entries >= 600,
+        "background build should fill the picker, got {entries}"
+    );
 
     app.inline_interactive_state = None;
     app.open_model_picker();

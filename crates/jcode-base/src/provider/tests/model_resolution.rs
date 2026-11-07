@@ -7,11 +7,78 @@ fn test_provider_for_model_claude() {
 
 #[test]
 fn test_provider_for_model_openai() {
+    assert_eq!(provider_for_model("gpt-6.1-sol"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.2-codex"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.5"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.4"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.4[1m]"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.4-pro"), Some("openai"));
+}
+
+#[test]
+fn test_model_resolution_rejects_unknown_names_without_changing_selection() {
+    with_clean_provider_test_env(|| {
+        let provider = test_multi_provider_with_cursor();
+        let original_model = provider.model();
+
+        for request in ["not-a-model", "missing-provider:not-a-model"] {
+            let error = provider.set_model(request).unwrap_err().to_string();
+            assert!(error.contains("Unknown model"), "{request}: {error}");
+            assert!(error.contains("/model <provider>:<model>"), "{error}");
+            assert_eq!(provider.active_provider(), ActiveProvider::Cursor);
+            assert_eq!(provider.model(), original_model);
+        }
+    });
+}
+
+#[test]
+fn test_model_resolution_keeps_catalog_model_ids_and_explicit_provider_routes() {
+    with_clean_provider_test_env(|| {
+        let provider = test_multi_provider_with_cursor();
+        *provider.cursor.write().unwrap() = Some(Arc::new(StubExternalRuntime::new(
+            "cursor",
+            "Cursor",
+            "cursor",
+            &["local-model", "other-local-model"],
+        )));
+
+        provider.set_model("other-local-model").unwrap();
+        assert_eq!(provider.model(), "other-local-model");
+        provider.set_model("cursor:local-model").unwrap();
+        assert_eq!(provider.active_provider(), ActiveProvider::Cursor);
+        assert_eq!(provider.model(), "local-model");
+        let error = provider
+            .set_model("cursor:missing-model")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Unsupported Cursor model 'missing-model'"),
+            "{error}"
+        );
+        assert_eq!(provider.model(), "local-model");
+    });
+}
+
+#[test]
+fn test_model_resolution_unavailable_provider_never_uses_active_runtime() {
+    with_clean_provider_test_env(|| {
+        let provider = test_multi_provider_with_cursor();
+        // Cursor can serve this GPT model, but an unqualified GPT name targets
+        // OpenAI. Neither that inference nor an explicit prefix may fall back.
+        provider.set_model("cursor:gpt-5").unwrap();
+        for request in ["gpt-5", "openai:gpt-5", "openai:gpt-6.1-sol"] {
+            let error = provider.set_model(request).unwrap_err().to_string();
+            assert!(
+                error.contains("OpenAI credentials not available"),
+                "{request}: {error}"
+            );
+            assert_eq!(provider.active_provider(), ActiveProvider::Cursor);
+            assert_eq!(provider.model(), "gpt-5");
+        }
+
+        assert!(provider.set_model("cursor:").is_err());
+        assert_eq!(provider.model(), "gpt-5");
+    });
 }
 
 #[test]
@@ -795,7 +862,7 @@ fn test_bare_model_served_by_active_catalog_profile_stays_on_that_profile() {
 }
 
 #[test]
-fn test_bare_model_absent_from_active_catalog_profile_still_rebinds_to_openrouter() {
+fn test_bare_model_absent_from_active_catalog_profile_reports_unknown_model() {
     with_clean_provider_test_env(|| {
         let profile = crate::provider_catalog::OPENCODE_GO_PROFILE;
         crate::env::set_var(profile.api_key_env, "test-opencode-go-key");
@@ -808,11 +875,13 @@ fn test_bare_model_absent_from_active_catalog_profile_still_rebinds_to_openroute
 
         let error = provider
             .set_model("not-in-opencode-go-catalog")
-            .expect_err("unknown bare model should still attempt native OpenRouter");
+            .expect_err("unknown bare model should fail resolution");
 
         assert!(
-            error.to_string().contains("OPENROUTER_API_KEY"),
-            "unexpected rebind error: {error:#}"
+            error
+                .to_string()
+                .contains("Unknown model 'not-in-opencode-go-catalog'"),
+            "unexpected resolution error: {error:#}"
         );
         assert_eq!(provider.model(), "kimi-k2.5");
         assert_eq!(

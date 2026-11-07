@@ -39,6 +39,7 @@ fn sample_picker() -> crate::tui::InlineInteractiveState {
         column: 0,
         filter: String::new(),
         preview: false,
+        navigated: false,
         entries: vec![crate::tui::PickerEntry {
             name: "gpt-5.4".to_string(),
             options: vec![crate::tui::PickerOption {
@@ -184,6 +185,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
         column: 0,
         filter: String::new(),
         preview: false,
+        navigated: false,
         entries: models,
     }
 }
@@ -196,6 +198,7 @@ fn sample_agent_target_picker() -> crate::tui::InlineInteractiveState {
         column: 0,
         filter: String::new(),
         preview: false,
+        navigated: false,
         entries: vec![crate::tui::PickerEntry {
             name: "Swarm / subagent".to_string(),
             options: vec![crate::tui::PickerOption {

@@ -149,6 +149,7 @@ fn runtime_model_picker_scope_excludes_agent_model_picker() {
         column: 0,
         filter: String::new(),
         preview: false,
+        navigated: false,
     };
     let mut agent_entry = picker_entry("Swarm / subagent", "gpt-5 default", 0);
     agent_entry.action = PickerAction::AgentTarget(AgentModelTarget::Swarm);
@@ -160,6 +161,7 @@ fn runtime_model_picker_scope_excludes_agent_model_picker() {
         column: 0,
         filter: String::new(),
         preview: false,
+        navigated: false,
     };
 
     assert!(picker_is_runtime_model_picker(&runtime));
@@ -211,6 +213,7 @@ fn favorite_cycle_reaches_every_favorite_across_fresh_picker_sorts() {
             column: 0,
             filter: String::new(),
             preview: false,
+            navigated: false,
         };
 
         let next = next_model_favorite_after_current(&picker)
@@ -243,6 +246,7 @@ fn model_picker_fuzzy_filter_prefers_previously_selected_route() {
         column: 0,
         filter: "opus".to_string(),
         preview: false,
+        navigated: false,
     };
 
     App::apply_inline_interactive_filter(&mut picker);
@@ -263,6 +267,7 @@ fn model_picker_fuzzy_filter_tolerates_common_typos() {
         column: 0,
         filter: "codxe".to_string(),
         preview: false,
+        navigated: false,
     };
 
     App::apply_inline_interactive_filter(&mut picker);
@@ -283,6 +288,7 @@ fn model_picker_exact_name_outranks_longer_frequently_used_prefix() {
         column: 0,
         filter: "gpt-5".to_string(),
         preview: false,
+        navigated: false,
     };
 
     App::apply_inline_interactive_filter(&mut picker);
