@@ -11,6 +11,8 @@ async fn cancelled_task_progress_retains_turn_until_scoped_events_drain() {
         fallback,
         &lease,
         0,
+        crate::protocol::TurnOrigin::server(crate::protocol::TurnOriginKind::Swarm),
+        None,
     ));
     let (bus, _) = broadcast::channel(16);
     let progress = super::task_progress_event_sender(

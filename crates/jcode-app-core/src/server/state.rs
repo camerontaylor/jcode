@@ -509,14 +509,106 @@ fn is_turn_terminal(event: &ServerEvent) -> bool {
     matches!(event, ServerEvent::Done { .. } | ServerEvent::Error { .. })
 }
 
+/// The user-visible prompt of a turn, or `None` when there is nothing to show
+/// (reminder-only continuations, empty wake turns).
+pub(super) fn turn_user_content(content: &str) -> Option<String> {
+    (!content.trim().is_empty()).then(|| content.to_string())
+}
+
+/// Publishing side of a [`TurnEventChannel`], owned by its drain task.
+struct TurnEventDrain {
+    session_id: String,
+    members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    fallback: mpsc::UnboundedSender<ServerEvent>,
+    identity: crate::protocol::TurnIdentity,
+    publication: crate::agent::TurnPublicationPin,
+    cancel: crate::agent::CancelProbe,
+    terminal_id: u64,
+    ended: bool,
+}
+
+impl TurnEventDrain {
+    async fn publish(&self, event: ServerEvent) {
+        if fanout_session_event(&self.members, &self.session_id, event.clone()).await == 0 {
+            let _ = self.fallback.send(event);
+        }
+    }
+
+    /// Forward one producer event in the turn's scope. The first terminal is
+    /// preceded by `turn_ended`.
+    async fn forward(&mut self, event: ServerEvent) {
+        if !self.ended && is_turn_terminal(&event) {
+            let (status, message) = match &event {
+                ServerEvent::Error { message, .. } => (
+                    crate::protocol::TurnEndStatus::Failed,
+                    Some(message.clone()),
+                ),
+                _ if self.cancel.cancelled() => (crate::protocol::TurnEndStatus::Cancelled, None),
+                _ => (crate::protocol::TurnEndStatus::Completed, None),
+            };
+            self.end(status, message).await;
+        }
+        self.publish(ServerEvent::TurnEvent {
+            identity: self.identity.clone(),
+            event: Box::new(event),
+        })
+        .await;
+    }
+
+    async fn end(&mut self, status: crate::protocol::TurnEndStatus, message: Option<String>) {
+        self.ended = true;
+        // Retire first: a client attaching after `turn_ended` must not be told
+        // that this turn is still running.
+        self.publication.retire();
+        self.publish(ServerEvent::TurnEnded {
+            identity: self.identity.clone(),
+            status,
+            message,
+        })
+        .await;
+    }
+
+    /// Close a turn whose producer never queued a terminal.
+    async fn close(mut self, exit: TurnEventExit) {
+        if self.ended {
+            return;
+        }
+        let terminal = match exit {
+            TurnEventExit::Dropped { panicking: true } => ServerEvent::Error {
+                id: self.terminal_id,
+                message: "The turn panicked before it reported completion.".into(),
+                retry_after_secs: None,
+            },
+            TurnEventExit::Dropped { panicking: false } => {
+                self.end(
+                    crate::protocol::TurnEndStatus::Cancelled,
+                    Some("The turn ended before it reported completion.".into()),
+                )
+                .await;
+                ServerEvent::Done {
+                    id: self.terminal_id,
+                }
+            }
+            TurnEventExit::Finished => ServerEvent::Done {
+                id: self.terminal_id,
+            },
+        };
+        self.forward(terminal).await;
+    }
+}
+
 /// Owns one turn's event queue. Closing or aborting the producer drains all
 /// accepted events before releasing the runtime's publication reservation.
 ///
-/// Every turn published through the channel ends with exactly one scoped
-/// terminal (`done`/`error`). If the producer never queued one, typically
-/// because its task was aborted, the drain task publishes `done` with the
-/// channel's `terminal_id` after all queued output, so every attachment sees
-/// the turn end instead of only the cancelling connection.
+/// The drain task publishes, in order: `turn_started` (with the turn's origin
+/// and prompt), every queued event in the turn's scope, then exactly one
+/// `turn_ended` immediately followed by the scoped terminal (`done`/`error`).
+/// If the producer never queued a terminal, typically because its task was
+/// aborted, the drain task supplies both after all queued output, so every
+/// attachment sees the turn end instead of only the cancelling connection.
+///
+/// The turn's attribution is published to the runtime's turn state before
+/// `turn_started` is queued, and withdrawn before `turn_ended`.
 pub(super) struct TurnEventChannel {
     tx: mpsc::UnboundedSender<ServerEvent>,
     close: Option<tokio::sync::oneshot::Sender<TurnEventExit>>,
@@ -532,32 +624,33 @@ impl TurnEventChannel {
         fallback: mpsc::UnboundedSender<ServerEvent>,
         lease: &crate::agent::TurnLease,
         terminal_id: u64,
+        origin: crate::protocol::TurnOrigin,
+        user_content: Option<String>,
     ) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
         let (close, mut closed) = tokio::sync::oneshot::channel::<TurnEventExit>();
-        let publication = lease.publication_pin();
-        let identity = lease.identity().clone();
+        lease.attribute(crate::agent::TurnAttribution {
+            origin: origin.clone(),
+            user_content: user_content.clone(),
+        });
+        let mut drain = TurnEventDrain {
+            session_id,
+            members,
+            fallback,
+            identity: lease.identity().clone(),
+            publication: lease.publication_pin(),
+            cancel: lease.cancel_probe(),
+            terminal_id,
+            ended: false,
+        };
         let task = tokio::spawn(async move {
-            let _publication = publication;
-            let publish = |event: ServerEvent| {
-                let members = &members;
-                let session_id = &session_id;
-                let fallback = &fallback;
-                async move {
-                    if fanout_session_event(members, session_id, event.clone()).await == 0 {
-                        let _ = fallback.send(event);
-                    }
-                }
-            };
-            let scoped = |event: ServerEvent| ServerEvent::TurnEvent {
-                identity: identity.clone(),
-                event: Box::new(event),
-            };
-            publish(ServerEvent::TurnStarted {
-                identity: identity.clone(),
-            })
-            .await;
-            let mut terminal_seen = false;
+            drain
+                .publish(ServerEvent::TurnStarted {
+                    identity: drain.identity.clone(),
+                    origin: Some(origin),
+                    user_content,
+                })
+                .await;
             let exit = loop {
                 let event = tokio::select! {
                     biased;
@@ -570,26 +663,12 @@ impl TurnEventChannel {
                 let Some(event) = event else {
                     break TurnEventExit::Dropped { panicking: false };
                 };
-                terminal_seen |= is_turn_terminal(&event);
-                publish(scoped(event)).await;
+                drain.forward(event).await;
             };
             while let Some(event) = rx.recv().await {
-                terminal_seen |= is_turn_terminal(&event);
-                publish(scoped(event)).await;
+                drain.forward(event).await;
             }
-            if !terminal_seen {
-                let terminal = match exit {
-                    TurnEventExit::Dropped { panicking: true } => ServerEvent::Error {
-                        id: terminal_id,
-                        message: "The turn panicked before it reported completion.".into(),
-                        retry_after_secs: None,
-                    },
-                    TurnEventExit::Dropped { panicking: false } | TurnEventExit::Finished => {
-                        ServerEvent::Done { id: terminal_id }
-                    }
-                };
-                publish(scoped(terminal)).await;
-            }
+            drain.close(exit).await;
         });
         Self {
             tx,
