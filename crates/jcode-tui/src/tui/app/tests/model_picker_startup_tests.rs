@@ -9,7 +9,10 @@ fn test_model_preview_navigation_preserves_selection_for_partial_spec() {
     app.handle_key(KeyCode::Down, KeyModifiers::empty()).unwrap();
     app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
     assert!(app.inline_interactive_state.as_ref().unwrap().navigated);
-    assert!(!app.dismiss_model_preview_for_direct_command());
+    let selected = app.inline_interactive_state.clone();
+    assert!(app.activate_picker_from_preview());
+    app.inline_interactive_state = selected;
+    app.input = "/model claude-".into();
     app.input.push('x');
     app.sync_model_picker_preview_from_input();
     assert!(!app.inline_interactive_state.as_ref().unwrap().navigated);
