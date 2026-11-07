@@ -223,7 +223,10 @@ pub(crate) fn startup_model_spec(provider: &ProviderChoice, model: Option<&str>)
             provider::explicit_model_provider_prefix(model).is_some()
                 || provider::oauth_account_label(prefix).is_some()
                 || crate::provider_catalog::openai_compatible_profile_by_id(prefix).is_some()
-                || matches!(prefix, "jcode" | "jcode-subscription" | "grok-build")
+                || matches!(
+                    prefix,
+                    "jcode" | "jcode-subscription" | "grok-build" | "azure" | "azure-openai"
+                )
                 || crate::config::config().providers.contains_key(prefix)
         });
         if matches!(provider, ProviderChoice::Auto | ProviderChoice::Google) || explicit_route {
