@@ -2469,6 +2469,7 @@ fn test_remote_model_changed_updates_resolved_credential() {
             provider_oauth_email: None,
             provider_oauth_account_label: None,
             resolved_credential: Some(jcode_provider_core::ResolvedCredential::ApiKey),
+            available_reasoning_efforts: None,
             reasoning_effort: None,
         },
         &mut remote,
@@ -2498,6 +2499,7 @@ fn model_changed_event(
         provider_oauth_email: None,
         provider_oauth_account_label: None,
         resolved_credential: None,
+        available_reasoning_efforts: None,
         reasoning_effort: reasoning_effort.map(str::to_string),
     }
 }
@@ -2564,6 +2566,7 @@ fn test_remote_model_changed_for_same_model_adopts_window_silently() {
             resolved_credential,
             provider_oauth_email: None,
             provider_oauth_account_label: None,
+            available_reasoning_efforts: None,
             reasoning_effort,
         },
         &mut remote,

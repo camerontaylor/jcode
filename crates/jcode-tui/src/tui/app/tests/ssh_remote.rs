@@ -261,6 +261,7 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             provider_oauth_email: None,
             provider_oauth_account_label: None,
             resolved_credential: None,
+            available_reasoning_efforts: None,
             reasoning_effort: None,
             service_tier: None,
             available_service_tiers: None,

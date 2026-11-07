@@ -563,6 +563,7 @@ fn history_event_for_session(session_id: &str) -> crate::protocol::ServerEvent {
         provider_oauth_email: None,
         provider_oauth_account_label: None,
         resolved_credential: None,
+        available_reasoning_efforts: None,
         reasoning_effort: None,
         service_tier: None,
         available_service_tiers: None,

@@ -64,11 +64,11 @@ pub use jcode_provider_core::{
     JCODE_USER_AGENT, ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute,
     ModelRouteApiMethod, NativeCompactionResult, NativeToolResult, NativeToolResultSender,
     PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
-    RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
-    explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
-    inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
-    oauth_account_label, provider_from_model_key, shared_http_client,
-    summarize_model_catalog_refresh,
+    RouteCostSource, RouteSelection, RuntimeKey, canonical_reasoning_effort,
+    closest_reasoning_effort, dedupe_model_routes, explicit_model_provider_prefix,
+    fresh_transport_client, grok_build_model_spec, inferred_reasoning_efforts,
+    model_name_for_provider, normalize_copilot_model_name, oauth_account_label,
+    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
@@ -446,6 +446,12 @@ pub struct MultiProvider {
 }
 
 impl MultiProvider {
+    /// Preserve an explicit startup selection when the daemon forks new sessions.
+    /// Later session-local model changes remain unrestricted.
+    pub fn preserve_initial_selection(&mut self) {
+        self.initial_provider = Some(self.active_provider());
+    }
+
     fn bound_session_id(&self) -> Option<String> {
         self.session_id
             .read()
@@ -2085,6 +2091,28 @@ impl Provider for MultiProvider {
             }
         }
 
+        if let Some(target_model) = requested_model
+            .strip_prefix("azure-openai:")
+            .or_else(|| requested_model.strip_prefix("azure:"))
+        {
+            let target_model = target_model.trim();
+            if target_model.is_empty() {
+                anyhow::bail!("Azure model cannot be empty");
+            }
+            let registry = ProviderRegistry::new(self);
+            let provider = if let Some(provider) = registry.compatible_profile("azure-openai") {
+                provider
+            } else {
+                activation::apply_azure_openai_runtime()?;
+                external::instantiate_openrouter_runtime(external::OpenRouterRuntimeSpec::Default)?
+            };
+            provider.set_model(target_model)?;
+            registry.install_compatible_profile("azure-openai", provider);
+            registry.set_active_compatible_profile("azure-openai");
+            self.set_active_provider(ActiveProvider::OpenRouter);
+            return Ok(());
+        }
+
         if let Some(target_model) = requested_model.strip_prefix("grok-build:") {
             let target_model = target_model.trim();
             if target_model.is_empty() {
@@ -2179,7 +2207,24 @@ impl Provider for MultiProvider {
         if self.active_provider() == ActiveProvider::OpenRouter
             && self
                 .active_openrouter_execution_provider()
-                .is_some_and(|provider| !provider.supports_provider_routing_features())
+                .is_some_and(|provider| {
+                    let catalog_profile = provider
+                        .direct_openai_compatible_route_parts()
+                        .and_then(|(_, api_method, _)| {
+                            api_method
+                                .strip_prefix("openai-compatible:")
+                                .and_then(crate::provider_catalog::openai_compatible_profile_by_id)
+                        })
+                        .is_some_and(|profile| {
+                            profile.id != crate::provider_catalog::OPENAI_COMPAT_PROFILE.id
+                        });
+                    !provider.supports_provider_routing_features()
+                        && (!catalog_profile
+                            || provider
+                                .available_models_for_switching()
+                                .iter()
+                                .any(|known| known == requested_model))
+                })
         {
             return self.set_model_on_provider(ActiveProvider::OpenRouter, requested_model);
         }
@@ -2215,9 +2260,19 @@ impl Provider for MultiProvider {
             // whichever provider happened to be active and failed with a
             // misleading "not supported by <active provider>" error.
             self.set_model_on_openai_compatible_profile(profile, model)
-        } else {
-            // Unknown model - try current provider.
+        } else if self
+            .available_models_for_switching()
+            .iter()
+            .any(|known| known == model)
+        {
+            // Live catalogs may advertise provider-local names that have no
+            // built-in family heuristic. Only delegate names we can resolve.
             self.set_model_on_provider(self.active_provider(), model)
+        } else {
+            anyhow::bail!(
+                "Unknown model '{}'. Use /model to choose an available model, or /model <provider>:<model> to select a provider explicitly.",
+                requested_model
+            )
         }
     }
 

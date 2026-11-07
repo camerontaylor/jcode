@@ -60,6 +60,8 @@ pub(super) enum PendingKind {
     Prompt,
     /// A helper request/response pair (history, model catalog, config change).
     Reply,
+    /// A catalog History omits live-session and turn snapshots.
+    Catalog,
 }
 
 pub(super) struct PendingRequest {
@@ -168,6 +170,8 @@ pub(super) enum SessionStateChange {
     Model {
         model: String,
         provider_name: Option<String>,
+        reasoning_effort: Option<String>,
+        available_reasoning_efforts: Option<Vec<String>>,
     },
     Effort {
         effort: Option<String>,
@@ -555,7 +559,9 @@ impl RouterState {
     /// daemon does not scope.
     fn on_flat(&mut self, event: ServerEvent) -> Vec<RouteAction> {
         let mut actions = Vec::new();
-        if let ServerEvent::History { .. } = &event {
+        if let ServerEvent::History { .. } = &event
+            && !self.is_catalog_reply(&event)
+        {
             actions.extend(self.on_history(&event));
         }
 
@@ -603,6 +609,14 @@ impl RouterState {
         actions
     }
 
+    /// A model-catalog reply reuses `History` but omits the live-session list
+    /// and transcript, so it must not overwrite session metadata.
+    pub(super) fn is_catalog_reply(&self, event: &ServerEvent) -> bool {
+        reply_request_id(event)
+            .and_then(|id| self.pending.get(&id))
+            .is_some_and(|pending| pending.kind == PendingKind::Catalog)
+    }
+
     /// Session metadata from a `History`. The first one is the attach
     /// snapshot: a peer turn announced before it whose prompt it already
     /// contains must not show that prompt again.
@@ -645,6 +659,7 @@ impl RouterState {
             all_sessions,
             ..
         } = &event
+            && !self.is_catalog_reply(&event)
         {
             self.session_id = session_id.clone();
             self.live_sessions = Some(all_sessions.clone());
@@ -813,11 +828,15 @@ fn session_state_change(event: &ServerEvent) -> Option<SessionStateChange> {
         ServerEvent::ModelChanged {
             model,
             provider_name,
+            reasoning_effort,
+            available_reasoning_efforts,
             error: None,
             ..
         } => Some(SessionStateChange::Model {
             model: model.clone(),
             provider_name: provider_name.clone(),
+            reasoning_effort: reasoning_effort.clone(),
+            available_reasoning_efforts: available_reasoning_efforts.clone(),
         }),
         ServerEvent::ReasoningEffortChanged {
             effort,
