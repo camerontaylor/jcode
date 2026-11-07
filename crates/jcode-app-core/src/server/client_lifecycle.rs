@@ -3477,3 +3477,7 @@ mod tests;
 #[cfg(test)]
 #[path = "client_target_attach_tests.rs"]
 mod target_attach_tests;
+
+#[cfg(test)]
+#[path = "turn_event_channel_tests.rs"]
+mod turn_event_channel_tests;

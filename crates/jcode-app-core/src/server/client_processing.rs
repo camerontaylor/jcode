@@ -288,6 +288,7 @@ pub(super) async fn start_processing_message(
         Arc::clone(swarm.members),
         client_event_tx.clone(),
         &turn_lease,
+        id,
     );
     let tx = events.sender();
     let done_tx = processing_done_tx.clone();

@@ -1251,7 +1251,7 @@ async fn run_relay_turn(
     let lease = agent.claim_server_turn()?;
     let start_message_index = agent.message_count();
     let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
-    let events = TurnEventChannel::new(session_id.into(), swarm_members, fallback, &lease);
+    let events = TurnEventChannel::new(session_id.into(), swarm_members, fallback, &lease, 0);
     let result = process_reserved_message_streaming_mpsc(
         &mut agent,
         &lease,

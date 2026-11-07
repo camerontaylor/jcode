@@ -10,6 +10,7 @@ async fn cancelled_task_progress_retains_turn_until_scoped_events_drain() {
         Arc::clone(&members),
         fallback,
         &lease,
+        0,
     ));
     let (bus, _) = broadcast::channel(16);
     let progress = super::task_progress_event_sender(
