@@ -434,6 +434,7 @@ fn message_after_peer_turn_cancel_is_not_killed_by_the_stale_signal() -> anyhow:
                 system_reminder: None,
                 active_skill: None,
                 server_failover: false,
+                client_instance_id: None,
             },
             session_id,
             &mut ProcessingState {

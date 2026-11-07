@@ -1289,6 +1289,19 @@ pub(super) async fn handle_client(
                     // until this pickup event. Publish only after acceptance:
                     // a rejected prompt must remain recoverable by its caller.
                     if processing_message_id == Some(id) {
+                        // Other attachments see only the turn's stream, as for
+                        // a `Message`: announce the prompt that started it.
+                        if !accepted_content.trim().is_empty() {
+                            super::state::fanout_peer_client_event(
+                                &swarm_members,
+                                &client_session_id,
+                                &client_connection_id,
+                                ServerEvent::PeerUserMessage {
+                                    content: accepted_content.clone(),
+                                },
+                            )
+                            .await;
+                        }
                         let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
                             content: accepted_content,
                             display_role: None,
