@@ -34,6 +34,8 @@ fn idle_soft_interrupt_cancel_settles_pre_stream_turn_without_replaying_prompt()
             app.handle_server_event(
                 ServerEvent::TurnStarted {
                     identity: identity.clone(),
+                    origin: None,
+                    user_content: None,
                 },
                 &mut remote,
             );

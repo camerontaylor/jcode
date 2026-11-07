@@ -640,6 +640,8 @@ pub(super) async fn spawn_swarm_agent(
                     fallback,
                     &lease,
                     0,
+                    crate::protocol::TurnOrigin::server(crate::protocol::TurnOriginKind::Swarm),
+                    super::state::turn_user_content(&initial_msg),
                 );
                 let start_message_index = agent.message_count();
                 let result = process_reserved_locked_message_with_server_failover(

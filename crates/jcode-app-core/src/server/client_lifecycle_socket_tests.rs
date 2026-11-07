@@ -392,7 +392,7 @@ async fn sdk_socket_cancel_workflow(
                 assert!(client_reader.read_line(&mut line).await.unwrap() > 0);
                 let event: ServerEvent = serde_json::from_str(&line).unwrap();
                 match event {
-                    ServerEvent::TurnStarted { identity } => {
+                    ServerEvent::TurnStarted { identity, .. } => {
                         assert!(active.replace(identity).is_none());
                     }
                     ServerEvent::TurnEvent { identity, event } => {

@@ -435,6 +435,8 @@ fn spawn_assigned_task_run(
             fallback,
             &turn_lease,
             0,
+            crate::protocol::TurnOrigin::server(crate::protocol::TurnOriginKind::Swarm),
+            super::state::turn_user_content(&assignment_text),
         ));
         {
             let now_ms = now_unix_ms();
@@ -2428,6 +2430,7 @@ async fn wake_session_without_plan(
         &session_id,
         &wake_message,
         None,
+        crate::protocol::TurnOriginKind::Swarm,
         sessions,
         super::live_turn::LiveTurnSwarmContext::new(
             swarm_members,

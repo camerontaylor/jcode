@@ -111,3 +111,26 @@ fn same_turn_bootstrap_is_idempotent_and_legacy_bridge_remains_compatible() {
             .any(|f| matches!(f.event, ApiEvent::TurnDone { .. }))
     );
 }
+
+#[test]
+fn turn_ended_is_attribution_only_and_leaves_the_turn_open_for_its_terminal() {
+    let mut state = bridge();
+    state.legacy_event_to_api(&json!({
+        "type": "turn_started",
+        "identity": {"runtime_generation": "runtime", "turn_id": 1},
+        "origin": {"kind": "client", "client_instance_id": "tui", "request_id": 5},
+        "user_content": "hi"
+    }));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "turn_ended",
+        "identity": {"runtime_generation": "runtime", "turn_id": 1},
+        "status": "completed"
+    }));
+    assert!(frames.is_empty());
+    assert!(
+        state.turn_fence.active(),
+        "the scoped terminal closes the turn"
+    );
+    state.legacy_event_to_api(&scoped("runtime", 1, json!({"type":"done","id":5})));
+    assert!(!state.turn_fence.active());
+}

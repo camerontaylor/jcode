@@ -357,6 +357,8 @@ pub(super) async fn handle_clear_session(
         runtime_generation: observer.runtime_generation().to_string(),
         latest_turn_id,
         turn_id: None,
+        active_origin: None,
+        active_user_content: None,
     });
     let _ = client_event_tx.send(ServerEvent::Done { id });
     crate::logging::event_info(

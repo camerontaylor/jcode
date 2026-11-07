@@ -24,7 +24,7 @@ mod turn_execution;
 mod turn_loops;
 mod turn_ownership;
 pub(crate) use turn_ownership::{
-    RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
+    CancelProbe, RuntimeMutationLease, TurnAttribution, TurnLease, TurnObserver, TurnPublicationPin,
 };
 mod turn_streaming_mpsc;
 mod utils;
@@ -386,7 +386,10 @@ impl Agent {
     }
 
     pub(crate) fn claim_server_turn(&self) -> Result<TurnLease> {
-        self.turn_ownership.claim()
+        Ok(self
+            .turn_ownership
+            .claim()?
+            .with_cancel_signal(self.graceful_shutdown.clone()))
     }
 
     pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {

@@ -1254,12 +1254,18 @@ pub(super) async fn session_activity_snapshot(
 
 fn history_turn_state(sessions: &SessionAgents, session_id: &str) -> Option<ServerEvent> {
     let observer = sessions.turn_observer(session_id)?;
-    let (latest_turn_id, active) = observer.snapshot();
+    let snapshot = observer.active_turn();
+    let (active_origin, active_user_content) = snapshot
+        .attribution
+        .map(|attribution| (Some(attribution.origin), attribution.user_content))
+        .unwrap_or_default();
     Some(ServerEvent::TurnState {
         session_id: session_id.to_string(),
         runtime_generation: observer.runtime_generation().to_string(),
-        turn_id: active.map(|identity| identity.turn_id),
-        latest_turn_id,
+        turn_id: snapshot.active.map(|identity| identity.turn_id),
+        latest_turn_id: snapshot.latest_turn_id,
+        active_origin,
+        active_user_content,
     })
 }
 
