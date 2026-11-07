@@ -28,7 +28,10 @@ use update_metadata::{record_release_update_duration, record_source_update_durat
 pub use update_rate_limit::{RATE_LIMIT_ERROR_PREFIX, is_rate_limit_error};
 use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
 
-const GITHUB_REPO: &str = "1jehuang/jcode";
+// Fork: releases (and so `jcode update` / auto-update) come from the
+// camerontaylor/jcode fork, which carries the Paseo ACP commands on top of
+// upstream. Versions are upstream patch * 1000 + fork build (0.99.1 -> 0.99.1001).
+const GITHUB_REPO: &str = "camerontaylor/jcode";
 /// Minimum gap between *automatic* update checks.
 ///
 /// Every automatic check costs one or two unauthenticated `api.github.com`
