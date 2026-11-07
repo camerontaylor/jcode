@@ -465,6 +465,7 @@ fn session_state_from_peers_becomes_an_update_and_replies_still_route() {
             resolved_credential: None,
             provider_oauth_email: None,
             provider_oauth_account_label: None,
+            available_reasoning_efforts: None,
             reasoning_effort: None,
         };
     let actions = router.route(model_changed(0, "peer-model", Some("peer-provider")));
@@ -472,6 +473,30 @@ fn session_state_from_peers_becomes_an_update_and_replies_still_route() {
         actions.as_slice(),
         [RouteAction::SessionState(SessionStateChange::Model { model, .. })]
             if model == "peer-model"
+    ));
+
+    // A peer model change carries the new model's effort ladder and level.
+    let mut with_efforts = model_changed(0, "peer-model", Some("peer-provider"));
+    if let ServerEvent::ModelChanged {
+        available_reasoning_efforts,
+        reasoning_effort,
+        ..
+    } = &mut with_efforts
+    {
+        *available_reasoning_efforts = Some(vec!["low".into(), "high".into()]);
+        *reasoning_effort = Some("low".into());
+    }
+    let actions = router.route(with_efforts);
+    assert!(matches!(
+        actions.as_slice(),
+        [RouteAction::SessionState(SessionStateChange::Model {
+            model,
+            reasoning_effort,
+            available_reasoning_efforts,
+            ..
+        })] if model == "peer-model"
+            && reasoning_effort.as_deref() == Some("low")
+            && available_reasoning_efforts.as_ref().unwrap() == &["low", "high"]
     ));
 
     let actions = router.route(ServerEvent::SessionRenamed {
