@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -86,7 +86,8 @@ impl JsonRpcMessage {
 
 struct DaemonSession {
     writer: Mutex<WriteHalf>,
-    next_request_id: AtomicU64,
+    /// Shared with the router, which builds steer recovery requests itself.
+    next_request_id: Arc<AtomicU64>,
     /// Client instance id of *this connection*: `{process}/{n}`. Two sessions
     /// in one adapter process must not look like each other's peer, so the
     /// per-process id is not enough.
@@ -95,8 +96,9 @@ struct DaemonSession {
     /// reader owns clones of the shared state, never the session itself, so
     /// dropping the session really does stop reading the daemon.
     router: Arc<Mutex<RouterState>>,
-    active_prompt_id: Mutex<Option<u64>>,
-    prompt_running: AtomicBool,
+    /// `session/prompt` requests in progress. A steering daemon takes several
+    /// at once (each joins the running turn); otherwise at most one.
+    prompts: AtomicUsize,
     catalog_refresh: Mutex<()>,
     ui_state: Arc<Mutex<SessionUiState>>,
     /// Workspace root reported by the ACP client, used to compose the
@@ -145,6 +147,108 @@ where
     }
     drop(guard);
     Ok(())
+}
+
+/// Executes routing actions for one daemon connection: renders peer output,
+/// sends the requests the router asks for, and runs its timers. Holds the
+/// session only weakly, like the reader.
+#[derive(Clone)]
+struct RouteSink {
+    acp: AcpRuntime,
+    router: Arc<Mutex<RouterState>>,
+    ui_state: Arc<Mutex<SessionUiState>>,
+    gate: Arc<Mutex<PeerActionGate>>,
+    peer_mapper: Arc<Mutex<Option<EventMapper>>>,
+    session: std::sync::Weak<DaemonSession>,
+}
+
+impl RouteSink {
+    fn apply(&self, actions: Vec<RouteAction>) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            for action in actions {
+                match action {
+                    RouteAction::Send(request) => {
+                        let Some(session) = self.session.upgrade() else {
+                            continue;
+                        };
+                        if let Err(err) = session.send(&request).await {
+                            crate::logging::debug(&format!(
+                                "acp: dropping a routed request: {err:#}"
+                            ));
+                        }
+                    }
+                    RouteAction::Wake { after, token } => {
+                        let sink = self.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(after).await;
+                            if sink.session.strong_count() == 0 {
+                                return;
+                            }
+                            let actions = sink.router.lock().await.wake(token);
+                            sink.apply(actions).await;
+                        });
+                    }
+                    action => {
+                        if let Err(err) = self
+                            .acp
+                            .dispatch_route_action(
+                                &self.router,
+                                &self.ui_state,
+                                &self.gate,
+                                &self.peer_mapper,
+                                action,
+                            )
+                            .await
+                        {
+                            crate::logging::debug(&format!("acp: dropping route action: {err:#}"));
+                        }
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// One `session/prompt` slot, released exactly once: before the prompt's
+/// answer is written (so the client can send the next one at once), or on
+/// drop if the prompt task ended early.
+struct PromptTicket {
+    session: Arc<DaemonSession>,
+    prompt_id: Option<u64>,
+    released: bool,
+}
+
+impl PromptTicket {
+    fn new(session: Arc<DaemonSession>) -> Self {
+        Self {
+            session,
+            prompt_id: None,
+            released: false,
+        }
+    }
+
+    async fn release(&mut self) {
+        if std::mem::replace(&mut self.released, true) {
+            return;
+        }
+        if let Some(prompt_id) = self.prompt_id {
+            self.session.unregister(prompt_id).await;
+        }
+        self.session.prompts.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Drop for PromptTicket {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.session.prompts.fetch_sub(1, Ordering::SeqCst);
+        if let Some(prompt_id) = self.prompt_id {
+            let router = Arc::clone(&self.session.router);
+            tokio::spawn(async move { router.lock().await.unregister(prompt_id) });
+        }
+    }
 }
 
 impl PeerActionGate {
@@ -349,13 +453,15 @@ impl DaemonSession {
         instance_id: String,
         next_request_id: u64,
     ) -> Self {
+        let next_request_id = Arc::new(AtomicU64::new(next_request_id));
+        let mut router = RouterState::new(instance_id.clone(), session_id);
+        router.share_request_ids(Arc::clone(&next_request_id));
         Self {
             writer: Mutex::new(writer),
-            next_request_id: AtomicU64::new(next_request_id),
+            next_request_id,
             instance_id: instance_id.clone(),
-            router: Arc::new(Mutex::new(RouterState::new(instance_id, session_id))),
-            active_prompt_id: Mutex::new(None),
-            prompt_running: AtomicBool::new(false),
+            router: Arc::new(Mutex::new(router)),
+            prompts: AtomicUsize::new(0),
             catalog_refresh: Mutex::new(()),
             ui_state: Arc::new(Mutex::new(SessionUiState::default())),
             working_dir,
@@ -421,6 +527,34 @@ impl DaemonSession {
         self.router.lock().await.unregister(request_id);
     }
 
+    /// Claim a prompt slot. `concurrent` prompts may share the session with
+    /// others; any other prompt needs it to itself.
+    fn try_begin_prompt(&self, concurrent: bool) -> bool {
+        if concurrent {
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+            return true;
+        }
+        self.prompts
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn prompt_active(&self) -> bool {
+        self.prompts.load(Ordering::SeqCst) > 0
+    }
+
+    /// Everything a routing action needs, without keeping the session alive.
+    fn sink(self: &Arc<Self>, acp: AcpRuntime) -> RouteSink {
+        RouteSink {
+            acp,
+            router: Arc::clone(&self.router),
+            ui_state: Arc::clone(&self.ui_state),
+            gate: Arc::clone(&self.peer_gate),
+            peer_mapper: Arc::clone(&self.peer_mapper),
+            session: Arc::downgrade(self),
+        }
+    }
+
     /// Read the daemon connection for the lifetime of the session, routing
     /// every event. A single undecodable line never ends the session: a newer
     /// daemon's event that this build does not know is skipped and logged.
@@ -428,10 +562,9 @@ impl DaemonSession {
         // Only shared state, never `Arc<DaemonSession>`: a task holding the
         // session would keep it (and its socket) alive forever, because the
         // session's `Drop` is what aborts this task.
+        let sink = self.sink(acp.clone());
         let router = Arc::clone(&self.router);
         let ui_state = Arc::clone(&self.ui_state);
-        let gate = Arc::clone(&self.peer_gate);
-        let peer_mapper = Arc::clone(&self.peer_mapper);
         let session = Arc::downgrade(self);
         let (catalog_tx, mut catalog_rx) = tokio::sync::watch::channel(());
         let catalog_acp = acp.clone();
@@ -476,27 +609,13 @@ impl DaemonSession {
                     apply_catalog_state(&mut *ui_state.lock().await, &event);
                 }
                 let actions = router.lock().await.route(event);
-                for action in actions {
-                    if let Err(err) = acp
-                        .dispatch_route_action(&router, &ui_state, &gate, &peer_mapper, action)
-                        .await
-                    {
-                        crate::logging::debug(&format!("acp: dropping route action: {err:#}"));
-                    }
-                }
+                sink.apply(actions).await;
             }
             // Release every waiter so a dead connection fails prompts instead
             // of leaving them blocked forever, and close any peer turn still
             // open so the client does not keep a running turn.
             let closing = router.lock().await.close();
-            for action in closing {
-                if let Err(err) = acp
-                    .dispatch_route_action(&router, &ui_state, &gate, &peer_mapper, action)
-                    .await
-                {
-                    crate::logging::debug(&format!("acp: dropping closing action: {err:#}"));
-                }
-            }
+            sink.apply(closing).await;
         });
         if let Ok(mut slot) = self.reader_task.lock() {
             *slot = Some(handle);
@@ -791,11 +910,12 @@ impl AcpRuntime {
             return Ok(());
         };
 
-        if session
-            .prompt_running
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
+        // A steering daemon injects a second prompt into the running turn, so
+        // prompts may overlap. Slash commands and legacy daemons still take
+        // the session one prompt at a time.
+        let concurrent =
+            session.router.lock().await.steering() && parse_acp_slash_command(&text).is_none();
+        if !session.try_begin_prompt(concurrent) {
             self.write_error_value(
                 id,
                 JSONRPC_SERVER_ERROR,
@@ -807,9 +927,18 @@ impl AcpRuntime {
 
         let runtime = self.clone();
         tokio::spawn(async move {
+            let mut ticket = PromptTicket::new(Arc::clone(&session));
             let result = runtime
-                .run_prompt(id.clone(), session, text, images, explicit_skill)
+                .run_prompt(
+                    id.clone(),
+                    session,
+                    text,
+                    images,
+                    explicit_skill,
+                    &mut ticket,
+                )
                 .await;
+            ticket.release().await;
             if let Err(err) = result {
                 let _ = runtime
                     .write_error_value(
@@ -839,12 +968,17 @@ impl AcpRuntime {
             sessions.get(&session_id).cloned()
         };
         if let Some(session) = session {
-            // A stop targets the turn this view shows running: our own, or the
-            // peer turn being mirrored (stopping a TUI turn from the ACP client
-            // cancels it everywhere). Scoping it means a cancel that arrives
-            // after that turn ended cannot hit the next one. With no turn known
-            // (an older daemon, or a prompt not yet accepted) it stays
-            // session-wide.
+            // Prompts still waiting for a turn are withdrawn from the daemon's
+            // queue and answer as cancelled. Sent before the cancel, so a steer
+            // the daemon has just started as a turn is the turn it stops.
+            let withdraw = session.router.lock().await.stop();
+            session.sink(self.clone()).apply(withdraw).await;
+            // A stop targets the turn this view shows running: our own (or one
+            // our prompt adopted), or the peer turn being mirrored (stopping a
+            // TUI turn from the ACP client cancels it everywhere). Scoping it
+            // means a cancel that arrives after that turn ended cannot hit the
+            // next one. With no turn known (an older daemon, or a prompt not
+            // yet accepted) it stays session-wide.
             let turn = session.router.lock().await.active_turn_identity();
             let cancel_id = session.next_id();
             let _ = session
@@ -872,23 +1006,17 @@ impl AcpRuntime {
                 return Ok(());
             }
         };
-        if let Some(session) = self.sessions.lock().await.remove(&session_id) {
+        let session = self.sessions.lock().await.remove(&session_id);
+        if let Some(session) = session {
             // Closing this view is not a user stop, so it must never interrupt
-            // a peer's turn: cancel only our *own* running turn, scoped to its
-            // identity so the daemon ignores the cancel if that turn already
-            // ended and a peer's turn has started in the meantime. A prompt the
-            // daemon has not accepted as a turn has nothing to cancel; closing
-            // the connection is enough.
-            let own_turn = session.router.lock().await.own_turn_identity();
-            if let Some(turn) = own_turn {
-                let cancel_id = session.next_id();
-                let _ = session
-                    .send(&Request::Cancel {
-                        id: cancel_id,
-                        turn: Some(turn),
-                    })
-                    .await;
-            }
+            // another client's turn: it cancels only a turn this view started,
+            // scoped to its identity so the daemon ignores the cancel if that
+            // turn already ended and a peer's turn has started in the
+            // meantime. A turn our prompt adopted from a peer keeps running;
+            // the prompt stops following it. Prompts still waiting for a turn
+            // are withdrawn from the daemon's queue.
+            let actions = session.router.lock().await.close_view();
+            session.sink(self.clone()).apply(actions).await;
         }
         self.write_result(id, json!({})).await?;
         Ok(())
@@ -986,7 +1114,7 @@ impl AcpRuntime {
             .await?;
             return Ok(());
         };
-        if session.prompt_running.load(Ordering::SeqCst) {
+        if session.prompt_active() {
             self.write_error_value(
                 id,
                 JSONRPC_SERVER_ERROR,
@@ -1154,8 +1282,11 @@ impl AcpRuntime {
             self.request_id_base,
         ));
         session.spawn_reader(reader, self.clone());
-        let turn_origin = probe_turn_origin(&session).await?;
-        session.router.lock().await.set_turn_origin(turn_origin);
+        let capabilities = probe_capabilities(&session).await?;
+        let mut router = session.router.lock().await;
+        router.set_turn_origin(capabilities.turn_origin);
+        router.set_soft_interrupt_ids(capabilities.soft_interrupt_ids);
+        drop(router);
         Ok(session)
     }
 
@@ -1337,6 +1468,7 @@ impl AcpRuntime {
         text: String,
         images: Vec<(String, String)>,
         explicit_skill: Option<String>,
+        ticket: &mut PromptTicket,
     ) -> Result<()> {
         let mut subagent = None;
         if let Some(command) = parse_acp_slash_command(&text) {
@@ -1345,7 +1477,9 @@ impl AcpRuntime {
                 // the prompt event loop below instead of returning one message.
                 subagent = Some(spec);
             } else {
-                return self.run_command_prompt(rpc_id, &session, command).await;
+                return self
+                    .run_command_prompt(rpc_id, &session, command, ticket)
+                    .await;
             }
         }
 
@@ -1372,7 +1506,7 @@ impl AcpRuntime {
         if let Some(name) = selected_skill {
             let skills = session.skills();
             let Some(skill) = skills.get(&name) else {
-                cleanup_prompt_state(&session).await;
+                ticket.release().await;
                 self.write_error_value(
                     rpc_id,
                     JSONRPC_INVALID_PARAMS,
@@ -1397,7 +1531,7 @@ impl AcpRuntime {
             .await?;
             if text.trim().is_empty() && images.is_empty() {
                 // Bare `/skill`: select it for the following prompts, like the TUI.
-                cleanup_prompt_state(&session).await;
+                ticket.release().await;
                 self.write_result(rpc_id, prompt_response("end_turn", &TurnUsage::default()))
                     .await?;
                 return Ok(());
@@ -1407,10 +1541,7 @@ impl AcpRuntime {
 
         let prompt_id = session.next_id();
         let mut prompt_rx = session.register(prompt_id, PendingKind::Prompt).await;
-        {
-            let mut active = session.active_prompt_id.lock().await;
-            *active = Some(prompt_id);
-        }
+        ticket.prompt_id = Some(prompt_id);
 
         let request = match subagent {
             Some(spec) => Request::RunSubagent {
@@ -1420,21 +1551,22 @@ impl AcpRuntime {
                 model: spec.model,
                 session_id: None,
             },
-            None => Request::Message {
-                id: prompt_id,
-                content: text,
+            None => prompt_request(
+                &mut *session.router.lock().await,
+                prompt_id,
+                text,
                 images,
-                system_reminder: None,
                 active_skill,
-                no_reply: false,
-            },
+            ),
         };
         let send_result = session.send(&request).await;
         if let Err(err) = send_result {
-            cleanup_prompt_state(&session).await;
+            ticket.release().await;
             return Err(err);
         }
-        self.stream_prompt_events(rpc_id, &session, prompt_id, &mut prompt_rx)
+        let follow_up = session.router.lock().await.prompt_sent(prompt_id);
+        session.sink(self.clone()).apply(follow_up).await;
+        self.stream_prompt_events(rpc_id, &session, prompt_id, &mut prompt_rx, ticket)
             .await
     }
 
@@ -1443,12 +1575,13 @@ impl AcpRuntime {
         rpc_id: Value,
         session: &Arc<DaemonSession>,
         command: Result<AcpSlashCommand>,
+        ticket: &mut PromptTicket,
     ) -> Result<()> {
         let response = match command {
             Ok(command) => self.run_session_command(session, command).await,
             Err(err) => Err(err),
         };
-        cleanup_prompt_state(session).await;
+        ticket.release().await;
         let response = response?;
         let session_id = session.session_id().await;
         self.write_notification(
@@ -1480,20 +1613,19 @@ impl AcpRuntime {
         session: &Arc<DaemonSession>,
         prompt_id: u64,
         prompt_rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
+        ticket: &mut PromptTicket,
     ) -> Result<()> {
         let session_id = session.session_id().await;
-        let mut mapper = EventMapper::with_scope(
-            session_id.clone(),
-            self.profile,
-            format!("{session_id}:own:{prompt_id}"),
-        );
+        let scope = format!("{session_id}:own:{prompt_id}");
+        let mut mapper = EventMapper::with_scope(session_id.clone(), self.profile, scope.clone());
         let mut stop_reason = "end_turn".to_string();
         let mut turn_usage = TurnUsage::default();
+        let mut steers = 0u32;
         loop {
             let event = match next_routed(prompt_rx).await {
                 Ok(event) => event,
                 Err(err) => {
-                    cleanup_prompt_state(session).await;
+                    ticket.release().await;
                     return Err(err);
                 }
             };
@@ -1508,10 +1640,42 @@ impl AcpRuntime {
                     stop_reason = "cancelled".to_string();
                 }
                 ServerEvent::Error { id, message, .. } if id == prompt_id => {
-                    cleanup_prompt_state(session).await;
+                    ticket.release().await;
                     self.write_error_value(rpc_id, JSONRPC_SERVER_ERROR, message)
                         .await?;
                     return Ok(());
+                }
+                // This prompt adopted a peer turn announced by `_jcode/turn`
+                // "started": close that bracket after the turn's output and
+                // before the answer.
+                ServerEvent::TurnEnded {
+                    identity,
+                    status,
+                    message,
+                } => {
+                    self.write_turn_notification(
+                        &session_id,
+                        &turn_id_string(&identity),
+                        turn_end_state(status),
+                        None,
+                        message.as_deref(),
+                    )
+                    .await?;
+                }
+                // Another client steered the turn answering this prompt.
+                ServerEvent::SoftInterruptInjected { content, .. } => {
+                    if !content.trim().is_empty() {
+                        self.write_notification(
+                            "session/update",
+                            user_message_chunk(
+                                &session_id,
+                                format!("{scope}:steer:{steers}"),
+                                &content,
+                            ),
+                        )
+                        .await?;
+                    }
+                    steers += 1;
                 }
                 ServerEvent::KvCacheRequest { .. } | ServerEvent::RetryRollback { .. } => {
                     turn_usage.begin_call();
@@ -1553,7 +1717,7 @@ impl AcpRuntime {
             }
         }
 
-        cleanup_prompt_state(session).await;
+        ticket.release().await;
         self.write_result(rpc_id, prompt_response(&stop_reason, &turn_usage))
             .await?;
         Ok(())
@@ -1882,20 +2046,39 @@ impl AcpRuntime {
                 message,
             } => {
                 *peer_mapper.lock().await = None;
-                let state = match status {
-                    TurnEndStatus::Completed => "completed",
-                    TurnEndStatus::Failed => "failed",
-                    TurnEndStatus::Cancelled => "canceled",
-                };
                 self.write_turn_notification(
                     &session_id,
                     &turn_id,
-                    state,
+                    turn_end_state(status),
                     None,
                     message.as_deref(),
                 )
                 .await?;
             }
+            RouteAction::PeerSteer {
+                turn_id,
+                index,
+                content,
+            } => {
+                if !content.trim().is_empty() {
+                    self.write_notification(
+                        "session/update",
+                        user_message_chunk(
+                            &session_id,
+                            format!("{session_id}:{turn_id}:steer:{index}"),
+                            &content,
+                        ),
+                    )
+                    .await?;
+                }
+            }
+            RouteAction::PeerTurnAdopted { turn_id } => {
+                // The prompt that adopted the turn maps the rest of it.
+                crate::logging::debug(&format!("acp: prompt adopted peer turn {turn_id}"));
+                *peer_mapper.lock().await = None;
+            }
+            // Executed by `RouteSink::apply`, never rendered.
+            RouteAction::Send(_) | RouteAction::Wake { .. } => {}
             RouteAction::SessionState(change) => {
                 self.apply_session_state(ui_state, &session_id, change)
                     .await?;
@@ -2106,14 +2289,28 @@ fn random_uuid_v4() -> String {
 
 /// `session/update` for the prompt that started a mirrored peer turn.
 fn peer_user_message_chunk(session_id: &str, turn_id: &str, content: &str) -> Value {
+    user_message_chunk(session_id, format!("{session_id}:{turn_id}:user"), content)
+}
+
+/// `session/update` showing another client's message.
+fn user_message_chunk(session_id: &str, message_id: String, content: &str) -> Value {
     json!({
         "sessionId": session_id,
         "update": {
             "sessionUpdate": "user_message_chunk",
-            "messageId": format!("{session_id}:{turn_id}:user"),
+            "messageId": message_id,
             "content": { "type": "text", "text": content },
         }
     })
+}
+
+/// `_jcode/turn` state of an ended turn.
+fn turn_end_state(status: TurnEndStatus) -> &'static str {
+    match status {
+        TurnEndStatus::Completed => "completed",
+        TurnEndStatus::Failed => "failed",
+        TurnEndStatus::Cancelled => "canceled",
+    }
 }
 
 /// `session/update` notifications that replay stored history.
@@ -2161,13 +2358,77 @@ fn history_replay_updates(
 /// without turn attribution.
 const CAPABILITY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Whether the daemon attributes turns (`turn_origin`), from `Pong`.
+/// The request that sends prompt `prompt_id`, tracked by the router until a
+/// turn takes it.
+///
+/// A steering daemon gets a soft interrupt, like the TUI and SDK clients send:
+/// an idle session runs it as a new turn, a busy one injects it into the
+/// running turn (ours or a peer's) instead of rejecting it. A soft interrupt
+/// cannot carry the sticky skill selection, so such a prompt goes as a
+/// `Message` first and steers only if the session turns out to be busy. A
+/// legacy daemon always gets a `Message`.
+fn prompt_request(
+    router: &mut RouterState,
+    prompt_id: u64,
+    text: String,
+    images: Vec<(String, String)>,
+    active_skill: Option<String>,
+) -> Request {
+    if router.steering() && active_skill.is_none() {
+        router.track_prompt(
+            prompt_id,
+            PromptDelivery::Steer,
+            text.clone(),
+            images.clone(),
+        );
+        // Untracked only once the connection closed; the send then fails.
+        if let Some(request) = router.steer_request(prompt_id) {
+            return request;
+        }
+    }
+    router.track_prompt(
+        prompt_id,
+        PromptDelivery::Message,
+        text.clone(),
+        images.clone(),
+    );
+    Request::Message {
+        id: prompt_id,
+        content: text,
+        images,
+        system_reminder: None,
+        active_skill,
+        no_reply: false,
+    }
+}
+
+/// The daemon capabilities the adapter adapts to, from `Pong`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DaemonCapabilities {
+    /// Turns are attributed (`turn_origin`).
+    turn_origin: bool,
+    /// Soft interrupts carry client ids (`soft_interrupt_ids`); with
+    /// `turn_origin`, prompts are steered.
+    soft_interrupt_ids: bool,
+}
+
+impl DaemonCapabilities {
+    fn from_pong(capabilities: &[String]) -> Self {
+        let has = |name: &str| capabilities.iter().any(|capability| capability == name);
+        Self {
+            turn_origin: has(crate::protocol::SERVER_CAPABILITY_TURN_ORIGIN),
+            soft_interrupt_ids: has("soft_interrupt_ids"),
+        }
+    }
+}
+
+/// The daemon's capabilities, from `Pong`.
 ///
 /// Sent before `Subscribe`: the daemon answers a `Ping` on a fresh connection
 /// and keeps it open for the subscription. A daemon that does not answer in
-/// time, or does not advertise the capability, is read with the legacy flat
+/// time, or does not advertise `turn_origin`, is read with the legacy flat
 /// routing.
-async fn probe_turn_origin(session: &Arc<DaemonSession>) -> Result<bool> {
+async fn probe_capabilities(session: &Arc<DaemonSession>) -> Result<DaemonCapabilities> {
     let id = session.next_id();
     let mut rx = session.register(id, PendingKind::Reply).await;
     let result = async {
@@ -2176,11 +2437,11 @@ async fn probe_turn_origin(session: &Arc<DaemonSession>) -> Result<bool> {
             loop {
                 match next_routed(&mut rx).await? {
                     ServerEvent::Pong { capabilities, .. } => {
-                        return Ok::<bool, anyhow::Error>(capabilities.iter().any(|capability| {
-                            capability == crate::protocol::SERVER_CAPABILITY_TURN_ORIGIN
-                        }));
+                        return Ok::<_, anyhow::Error>(DaemonCapabilities::from_pong(
+                            &capabilities,
+                        ));
                     }
-                    ServerEvent::Error { .. } => return Ok(false),
+                    ServerEvent::Error { .. } => return Ok(DaemonCapabilities::default()),
                     _ => {}
                 }
             }
@@ -2190,24 +2451,13 @@ async fn probe_turn_origin(session: &Arc<DaemonSession>) -> Result<bool> {
             Ok(reply) => reply,
             Err(_) => {
                 crate::logging::debug("acp: daemon did not answer the capability probe");
-                Ok(false)
+                Ok(DaemonCapabilities::default())
             }
         }
     }
     .await;
     session.unregister(id).await;
     result
-}
-
-async fn cleanup_prompt_state(session: &DaemonSession) {
-    let prompt_id = {
-        let mut active = session.active_prompt_id.lock().await;
-        active.take()
-    };
-    if let Some(prompt_id) = prompt_id {
-        session.unregister(prompt_id).await;
-    }
-    session.prompt_running.store(false, Ordering::SeqCst);
 }
 
 /// Next routed event for a waiter. A closed channel means the daemon

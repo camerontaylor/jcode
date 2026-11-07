@@ -18,12 +18,44 @@
 //! flat, with the legacy behaviour: events go to the running prompt or are
 //! drained.
 //!
+//! A daemon that also advertises `soft_interrupt_ids` is *steered*: a prompt is
+//! sent as a soft interrupt, so it starts a turn on an idle session and is
+//! injected into the running turn otherwise (see [`PromptDelivery`]). The
+//! router tracks each prompt until a turn takes it, recovers a steer left in
+//! the daemon's queue when the turn it waited for ended, and hands a peer turn
+//! that took our steer over to the prompt.
+//!
 //! The routing state is deliberately free of sockets and stdout so the whole
-//! policy is unit-testable with scripted [`ServerEvent`] sequences.
+//! policy is unit-testable with scripted [`ServerEvent`] sequences. Requests
+//! the policy needs sent come back as [`RouteAction::Send`], timers as
+//! [`RouteAction::Wake`].
 
 use super::*;
 use crate::protocol::{TurnEndStatus, TurnIdentity, TurnOrigin};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::time::Duration;
+
+/// The daemon's reply when a turn cannot start because another one (or a
+/// runtime mutation) holds the session.
+const ALREADY_PROCESSING: &str = "Already processing a message";
+
+/// Backoff before resending a steer the daemon rejected as busy, like the
+/// TUI's queued follow-up.
+pub(super) const STEER_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// How long a steer sent while no turn is visible may sit in the daemon's
+/// queue before the router asks whether it is stranded there (the daemon
+/// queues a steer while the previous turn is still finalizing).
+pub(super) const STEER_IDLE_PROBE_DELAY: Duration = Duration::from_millis(300);
+
+/// How long to wait for the injection event of a steer the daemon reported as
+/// no longer queued. If none arrives, the queue was cleared by someone else.
+pub(super) const STEER_CONFIRM_GRACE: Duration = Duration::from_secs(5);
+
+/// Upper bound on resends of one prompt, so a session that never becomes free
+/// fails the prompt instead of retrying forever (about 30 s of 100 ms
+/// retries).
+const MAX_STEER_ATTEMPTS: u32 = 300;
 
 /// Decode one newline-delimited daemon event. `None` means the line is not an
 /// event this build understands, which is expected across daemon/binary
@@ -69,11 +101,36 @@ pub(super) struct PendingRequest {
     tx: mpsc::UnboundedSender<ServerEvent>,
 }
 
-/// A turn this adapter's client started.
+/// A turn that answers this adapter's prompts.
 #[derive(Debug, Clone)]
 struct OwnTurn {
     identity: TurnIdentity,
+    /// The prompt that receives the turn's stream and answers with its usage.
     request_id: u64,
+    /// Further prompts steered into the turn. They resolve when it ends.
+    joined: Vec<u64>,
+    /// The turn was started by another client and taken over when our steer
+    /// was injected into it. Close never cancels it.
+    adopted: bool,
+    /// The turn was announced with a `_jcode/turn` "started" while it was
+    /// mirrored as a peer turn, and its terminal bracket is still owed.
+    bracket_open: bool,
+}
+
+impl OwnTurn {
+    fn started(identity: TurnIdentity, request_id: u64) -> Self {
+        Self {
+            identity,
+            request_id,
+            joined: Vec::new(),
+            adopted: false,
+            bracket_open: false,
+        }
+    }
+
+    fn members(&self) -> impl Iterator<Item = u64> + '_ {
+        std::iter::once(self.request_id).chain(self.joined.iter().copied())
+    }
 }
 
 /// A turn another attachment started, being mirrored to the ACP client.
@@ -83,6 +140,72 @@ struct PeerTurn {
     /// Its prompt, while the attach replay may still contain it (the turn was
     /// opened before this connection's first `History`).
     unreplayed_prompt: Option<String>,
+    /// Steers other clients injected into it so far; numbers their messages.
+    steers: u32,
+}
+
+/// How a prompt reaches the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PromptDelivery {
+    /// `Message`: starts a turn on an idle session and is rejected on a busy
+    /// one. Used by a legacy daemon, and first for a prompt that carries a
+    /// skill selection (a soft interrupt cannot), falling back to a steer
+    /// when the session is busy.
+    Message,
+    /// `SoftInterrupt` with a client id: starts a turn on an idle session and
+    /// is injected into the running turn otherwise.
+    Steer,
+}
+
+/// Where a prompt that no turn has taken yet stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitPhase {
+    /// Sent; the daemon started a turn with it, queued it, or rejected it.
+    Sent,
+    /// A `CancelSoftInterrupts` with this request id asks whether it is still
+    /// queued.
+    Probing(u64),
+    /// Rejected as busy; resent after a backoff or at the next turn end.
+    RetryWait,
+    /// The daemon no longer had it queued, so a turn took it; its injection
+    /// event has not arrived yet.
+    Unconfirmed,
+}
+
+/// Why a waiting prompt is being withdrawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Withdrawal {
+    Stop,
+    Close,
+}
+
+/// A prompt no turn has taken yet.
+#[derive(Debug, Clone)]
+struct WaitingPrompt {
+    client_id: String,
+    content: String,
+    images: Vec<(String, String)>,
+    delivery: PromptDelivery,
+    phase: WaitPhase,
+    withdrawal: Option<Withdrawal>,
+    attempts: u32,
+}
+
+/// A timer the router asked for; see [`RouterState::wake`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WakeKind {
+    /// Ask whether a steer sent while no turn was visible is stranded.
+    Probe,
+    /// Resend a steer rejected as busy.
+    Retry,
+    /// Give up on the injection event of a steer no longer queued.
+    Confirm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SteerWake {
+    pub(super) prompt_id: u64,
+    pub(super) kind: WakeKind,
 }
 
 /// Port of the TUI's turn fence (`tui/app/remote/turn_identity.rs`): retire
@@ -209,7 +332,26 @@ pub(super) enum RouteAction {
         status: TurnEndStatus,
         message: Option<String>,
     },
+    /// Another client steered the mirrored peer turn: show its message.
+    PeerSteer {
+        turn_id: String,
+        index: u32,
+        content: String,
+    },
+    /// Our steer was injected into the mirrored peer turn, which now answers
+    /// that prompt: stop mirroring it. Its `_jcode/turn` terminal is written by
+    /// the prompt, after the rest of its output.
+    PeerTurnAdopted {
+        turn_id: String,
+    },
     SessionState(SessionStateChange),
+    /// Send this request to the daemon.
+    Send(Request),
+    /// Call [`RouterState::wake`] with `token` once `after` has passed.
+    Wake {
+        after: Duration,
+        token: SteerWake,
+    },
 }
 
 /// Routing state for one daemon connection.
@@ -230,6 +372,17 @@ pub(super) struct RouterState {
     /// Set once the connection is gone: no new waiter can be satisfied, and an
     /// open peer turn is closed.
     closed: bool,
+    /// The daemon accepts client ids on soft interrupts (`soft_interrupt_ids`).
+    soft_interrupt_ids: bool,
+    /// Request ids, shared with the connection so router-built requests never
+    /// collide with the adapter's own.
+    request_ids: Arc<AtomicU64>,
+    /// Prompts no turn has taken yet, by request id.
+    waiting: BTreeMap<u64, WaitingPrompt>,
+    /// Outstanding `CancelSoftInterrupts` request ids.
+    probes: HashSet<u64>,
+    /// `session/close` ran: nothing may start or adopt a turn for this view.
+    view_closed: bool,
 }
 
 impl RouterState {
@@ -245,7 +398,37 @@ impl RouterState {
             fence: TurnFence::default(),
             history_seen: false,
             closed: false,
+            soft_interrupt_ids: false,
+            request_ids: Arc::new(AtomicU64::new(1 << 62)),
+            waiting: BTreeMap::new(),
+            probes: HashSet::new(),
+            view_closed: false,
         }
+    }
+
+    /// Share the connection's request-id counter.
+    pub(super) fn share_request_ids(&mut self, request_ids: Arc<AtomicU64>) {
+        self.request_ids = request_ids;
+    }
+
+    fn next_request_id(&self) -> u64 {
+        self.request_ids.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Record whether the daemon accepts client ids on soft interrupts.
+    pub(super) fn set_soft_interrupt_ids(&mut self, supported: bool) {
+        self.soft_interrupt_ids = supported;
+    }
+
+    /// Whether prompts are steered: sent as soft interrupts that join a
+    /// running turn instead of being rejected by it.
+    pub(super) fn steering(&self) -> bool {
+        self.turn_origin && self.soft_interrupt_ids
+    }
+
+    /// The soft-interrupt client id of prompt `prompt_id`.
+    pub(super) fn steer_client_id(&self, prompt_id: u64) -> String {
+        format!("{}/p{prompt_id}", self.instance_id)
     }
 
     pub(super) fn session_id(&self) -> &str {
@@ -274,9 +457,15 @@ impl RouterState {
         self.own_turn.is_some()
     }
 
-    /// Identity of this adapter's own running turn.
+    /// Identity of the turn answering this adapter's prompts, including a
+    /// peer turn it adopted.
     pub(super) fn own_turn_identity(&self) -> Option<TurnIdentity> {
         self.own_turn.as_ref().map(|turn| turn.identity.clone())
+    }
+
+    /// Whether any turn is open on this view.
+    fn turn_open(&self) -> bool {
+        self.own_turn.is_some() || self.peer_turn.is_some()
     }
 
     /// Identity of the turn this connection sees running: its own, or the
@@ -303,6 +492,335 @@ impl RouterState {
 
     pub(super) fn unregister(&mut self, request_id: u64) {
         self.pending.remove(&request_id);
+        self.waiting.remove(&request_id);
+    }
+
+    /// Track prompt `prompt_id` (already registered as a [`PendingKind::Prompt`])
+    /// until a turn takes it. Only meaningful when [`Self::steering`].
+    pub(super) fn track_prompt(
+        &mut self,
+        prompt_id: u64,
+        delivery: PromptDelivery,
+        content: String,
+        images: Vec<(String, String)>,
+    ) {
+        if self.closed || !self.steering() {
+            return;
+        }
+        let client_id = self.steer_client_id(prompt_id);
+        self.waiting.insert(
+            prompt_id,
+            WaitingPrompt {
+                client_id,
+                content,
+                images,
+                delivery,
+                phase: WaitPhase::Sent,
+                withdrawal: None,
+                attempts: 0,
+            },
+        );
+    }
+
+    /// The soft interrupt that steers prompt `prompt_id`.
+    pub(super) fn steer_request(&self, prompt_id: u64) -> Option<Request> {
+        let waiting = self.waiting.get(&prompt_id)?;
+        Some(Request::SoftInterrupt {
+            id: prompt_id,
+            content: waiting.content.clone(),
+            images: waiting.images.clone(),
+            urgent: false,
+            client_id: Some(waiting.client_id.clone()),
+        })
+    }
+
+    /// Call after prompt `prompt_id` was sent. A steer sent while no turn is
+    /// visible may still be queued behind a turn that is finalizing, which no
+    /// turn end will report, so it is checked on a timer.
+    pub(super) fn prompt_sent(&mut self, prompt_id: u64) -> Vec<RouteAction> {
+        let idle = !self.turn_open();
+        match self.waiting.get(&prompt_id) {
+            Some(waiting)
+                if idle
+                    && waiting.delivery == PromptDelivery::Steer
+                    && waiting.phase == WaitPhase::Sent =>
+            {
+                vec![RouteAction::Wake {
+                    after: STEER_IDLE_PROBE_DELAY,
+                    token: SteerWake {
+                        prompt_id,
+                        kind: WakeKind::Probe,
+                    },
+                }]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// A timer requested by a [`RouteAction::Wake`] fired.
+    pub(super) fn wake(&mut self, token: SteerWake) -> Vec<RouteAction> {
+        let Some(waiting) = self.waiting.get(&token.prompt_id) else {
+            return Vec::new();
+        };
+        match (token.kind, waiting.phase) {
+            // While a turn is open, its end probes instead.
+            (WakeKind::Probe, WaitPhase::Sent) if !self.turn_open() => {
+                self.probe(vec![token.prompt_id])
+            }
+            (WakeKind::Retry, WaitPhase::RetryWait) => self.resend(token.prompt_id),
+            (WakeKind::Confirm, WaitPhase::Unconfirmed) => {
+                // The daemon had already dropped it and no turn ever took it:
+                // another client cleared the session's queue.
+                crate::logging::debug(&format!(
+                    "acp: steer {} left the daemon queue without running",
+                    token.prompt_id
+                ));
+                self.resolve_cancelled(token.prompt_id);
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// `session/cancel`: withdraw every prompt still waiting for a turn. The
+    /// caller still cancels the running turn.
+    pub(super) fn stop(&mut self) -> Vec<RouteAction> {
+        self.withdraw(Withdrawal::Stop)
+    }
+
+    /// `session/close`: withdraw waiting prompts, cancel this view's own
+    /// running turn, and release an adopted peer turn without cancelling it.
+    /// From now on nothing starts or adopts a turn for this view.
+    pub(super) fn close_view(&mut self) -> Vec<RouteAction> {
+        self.view_closed = true;
+        let mut actions = self.withdraw(Withdrawal::Close);
+        let Some(own) = self.own_turn.as_ref() else {
+            return actions;
+        };
+        if !own.adopted {
+            // Scoped, so a cancel that arrives after the turn ended cannot hit
+            // a peer's turn that began in the meantime.
+            actions.push(RouteAction::Send(Request::Cancel {
+                id: self.next_request_id(),
+                turn: Some(own.identity.clone()),
+            }));
+            return actions;
+        }
+        // Another client started it: let it run, but stop answering our
+        // prompts with it. Its remaining events are dropped as not open.
+        let own = self.own_turn.take().expect("checked above");
+        if own.bracket_open {
+            self.deliver(
+                own.request_id,
+                ServerEvent::TurnEnded {
+                    identity: own.identity.clone(),
+                    status: TurnEndStatus::Cancelled,
+                    message: Some(
+                        "The session was closed; the turn continues for the client that started it."
+                            .to_string(),
+                    ),
+                },
+            );
+        }
+        for member in own.members() {
+            self.deliver(member, ServerEvent::Interrupted);
+            self.deliver(member, ServerEvent::Done { id: member });
+        }
+        actions
+    }
+
+    fn withdraw(&mut self, reason: Withdrawal) -> Vec<RouteAction> {
+        let mut probe = Vec::new();
+        let mut resolve = Vec::new();
+        for (prompt_id, waiting) in self.waiting.iter_mut() {
+            waiting.withdrawal = Some(reason);
+            match waiting.phase {
+                WaitPhase::Sent if waiting.delivery == PromptDelivery::Steer => {
+                    probe.push(*prompt_id)
+                }
+                // A `Message` in flight becomes a turn (cancelled by the
+                // caller's stop, or by the close rule) or a rejection.
+                WaitPhase::Sent => {}
+                // The outstanding probe's reply decides.
+                WaitPhase::Probing(_) => {}
+                // Nothing is queued on the daemon.
+                WaitPhase::RetryWait | WaitPhase::Unconfirmed => resolve.push(*prompt_id),
+            }
+        }
+        for prompt_id in resolve {
+            self.resolve_cancelled(prompt_id);
+        }
+        if probe.is_empty() {
+            return Vec::new();
+        }
+        self.probe(probe)
+    }
+
+    /// Ask the daemon to remove these prompts' steers from its queue. The
+    /// decision is made under the queue lock: each comes back either
+    /// cancelled (still queued) or not queued (a turn took it).
+    fn probe(&mut self, prompt_ids: Vec<u64>) -> Vec<RouteAction> {
+        let id = self.next_request_id();
+        let mut client_ids = Vec::new();
+        for prompt_id in prompt_ids {
+            if let Some(waiting) = self.waiting.get_mut(&prompt_id) {
+                waiting.phase = WaitPhase::Probing(id);
+                client_ids.push(waiting.client_id.clone());
+            }
+        }
+        if client_ids.is_empty() {
+            return Vec::new();
+        }
+        self.probes.insert(id);
+        vec![RouteAction::Send(Request::CancelSoftInterrupts {
+            id,
+            client_ids: Some(client_ids),
+        })]
+    }
+
+    /// Send prompt `prompt_id` again as a steer.
+    fn resend(&mut self, prompt_id: u64) -> Vec<RouteAction> {
+        let Some(waiting) = self.waiting.get_mut(&prompt_id) else {
+            return Vec::new();
+        };
+        waiting.attempts += 1;
+        if waiting.attempts > MAX_STEER_ATTEMPTS {
+            self.waiting.remove(&prompt_id);
+            self.deliver(
+                prompt_id,
+                ServerEvent::Error {
+                    id: prompt_id,
+                    message: format!("{ALREADY_PROCESSING}; the session stayed busy"),
+                    retry_after_secs: None,
+                },
+            );
+            return Vec::new();
+        }
+        waiting.delivery = PromptDelivery::Steer;
+        waiting.phase = WaitPhase::Sent;
+        let mut actions: Vec<RouteAction> = self
+            .steer_request(prompt_id)
+            .map(RouteAction::Send)
+            .into_iter()
+            .collect();
+        actions.extend(self.prompt_sent(prompt_id));
+        actions
+    }
+
+    /// Answer a withdrawn (or lost) prompt as cancelled.
+    fn resolve_cancelled(&mut self, prompt_id: u64) {
+        self.waiting.remove(&prompt_id);
+        self.deliver(prompt_id, ServerEvent::Interrupted);
+        self.deliver(prompt_id, ServerEvent::Done { id: prompt_id });
+    }
+
+    /// Take the waiting prompts whose steers `client_ids` names: a turn took
+    /// them. Returns their request ids in injection order.
+    fn take_waiting(&mut self, client_ids: &[String]) -> Vec<u64> {
+        let mut taken = Vec::new();
+        for client_id in client_ids {
+            let found = self
+                .waiting
+                .iter()
+                .find_map(|(id, waiting)| (&waiting.client_id == client_id).then_some(*id));
+            if let Some(prompt_id) = found {
+                self.waiting.remove(&prompt_id);
+                taken.push(prompt_id);
+            }
+        }
+        taken
+    }
+
+    /// A turn ended. Steers still waiting were not injected into it: a
+    /// rejected one is resent, and the daemon is asked about the others,
+    /// because nothing drains a steer left queued when its turn ends.
+    fn on_turn_closed(&mut self) -> Vec<RouteAction> {
+        let mut probe = Vec::new();
+        let mut retry = Vec::new();
+        for (prompt_id, waiting) in &self.waiting {
+            match waiting.phase {
+                WaitPhase::Sent if waiting.delivery == PromptDelivery::Steer => {
+                    probe.push(*prompt_id)
+                }
+                WaitPhase::RetryWait => retry.push(*prompt_id),
+                _ => {}
+            }
+        }
+        let mut actions = self.probe(probe);
+        for prompt_id in retry {
+            actions.extend(self.resend(prompt_id));
+        }
+        actions
+    }
+
+    /// The reply to a `CancelSoftInterrupts` this router sent.
+    fn on_probe_reply(
+        &mut self,
+        id: u64,
+        cancelled: &[String],
+        not_queued: &[String],
+    ) -> Vec<RouteAction> {
+        let probing = |waiting: &WaitingPrompt| waiting.phase == WaitPhase::Probing(id);
+        let mut actions = Vec::new();
+        for client_id in cancelled {
+            let Some((prompt_id, withdrawal)) = self.waiting.iter().find_map(|(prompt_id, w)| {
+                (&w.client_id == client_id && probing(w)).then_some((*prompt_id, w.withdrawal))
+            }) else {
+                continue;
+            };
+            if withdrawal.is_some() {
+                self.resolve_cancelled(prompt_id);
+            } else {
+                // Stranded behind a turn that ended: send it again, to start
+                // a turn of its own or join one that just began.
+                actions.extend(self.resend(prompt_id));
+            }
+        }
+        for client_id in not_queued {
+            let found = self.waiting.iter().find_map(|(prompt_id, w)| {
+                (&w.client_id == client_id && probing(w)).then_some(*prompt_id)
+            });
+            if let Some(prompt_id) = found {
+                if let Some(waiting) = self.waiting.get_mut(&prompt_id) {
+                    waiting.phase = WaitPhase::Unconfirmed;
+                }
+                actions.push(RouteAction::Wake {
+                    after: STEER_CONFIRM_GRACE,
+                    token: SteerWake {
+                        prompt_id,
+                        kind: WakeKind::Confirm,
+                    },
+                });
+            }
+        }
+        actions
+    }
+
+    /// An unscoped "Already processing" for a waiting prompt: the daemon could
+    /// not start or queue it right now. Returns `None` for any other error.
+    fn on_rejected(&mut self, prompt_id: u64, message: &str) -> Option<Vec<RouteAction>> {
+        if message != ALREADY_PROCESSING {
+            return None;
+        }
+        let waiting = self.waiting.get_mut(&prompt_id)?;
+        if waiting.withdrawal.is_some() {
+            self.resolve_cancelled(prompt_id);
+            return Some(Vec::new());
+        }
+        match waiting.delivery {
+            // A busy session: steer into its turn instead.
+            PromptDelivery::Message => Some(self.resend(prompt_id)),
+            PromptDelivery::Steer => {
+                waiting.phase = WaitPhase::RetryWait;
+                Some(vec![RouteAction::Wake {
+                    after: STEER_RETRY_DELAY,
+                    token: SteerWake {
+                        prompt_id,
+                        kind: WakeKind::Retry,
+                    },
+                }])
+            }
+        }
     }
 
     /// Drop every waiter so tasks blocked on a channel learn the connection is
@@ -311,11 +829,27 @@ impl RouterState {
     pub(super) fn close(&mut self) -> Vec<RouteAction> {
         self.closed = true;
         self.pending.clear();
-        self.own_turn = None;
-        self.close_peer_turn(
-            TurnEndStatus::Cancelled,
-            Some("The connection closed before the turn ended.".to_string()),
-        )
+        self.waiting.clear();
+        self.probes.clear();
+        let message = "The connection closed before the turn ended.";
+        let mut actions = self.own_turn.take().map_or_else(Vec::new, |own| {
+            Self::adopted_bracket_end(&own, Some(message.to_string()))
+        });
+        actions.extend(self.close_peer_turn(TurnEndStatus::Cancelled, Some(message.to_string())));
+        actions
+    }
+
+    /// The `_jcode/turn` terminal still owed for an adopted turn that ends
+    /// without answering its prompt (the connection or runtime went away).
+    fn adopted_bracket_end(own: &OwnTurn, message: Option<String>) -> Vec<RouteAction> {
+        if !own.bracket_open {
+            return Vec::new();
+        }
+        vec![RouteAction::PeerTurnEnded {
+            turn_id: turn_id_string(&own.identity),
+            status: TurnEndStatus::Cancelled,
+            message,
+        }]
     }
 
     fn prompt_request_id(&self) -> Option<u64> {
@@ -411,10 +945,9 @@ impl RouterState {
         if self.is_own_origin(&origin) {
             // A snapshot taken during our own prompt (a catalog refresh) whose
             // `turn_started` this connection somehow missed.
-            self.own_turn = Some(OwnTurn {
-                request_id: origin.request_id.unwrap_or_default(),
-                identity,
-            });
+            let request_id = origin.request_id.unwrap_or_default();
+            self.waiting.remove(&request_id);
+            self.own_turn = Some(OwnTurn::started(identity, request_id));
             return actions;
         }
         actions.extend(self.close_peer_turn(
@@ -459,10 +992,19 @@ impl RouterState {
         let origin = origin
             .unwrap_or_else(|| TurnOrigin::server(crate::protocol::TurnOriginKind::Background));
         if self.is_own_origin(&origin) {
-            self.own_turn = Some(OwnTurn {
-                request_id: origin.request_id.unwrap_or_default(),
-                identity,
-            });
+            // Our prompt started this turn (a `Message`, or a steer the daemon
+            // ran at once because the session was idle).
+            let request_id = origin.request_id.unwrap_or_default();
+            self.waiting.remove(&request_id);
+            if self.view_closed {
+                // Sent before `session/close` and started after it: the close
+                // rule cancels this view's own turn.
+                actions.push(RouteAction::Send(Request::Cancel {
+                    id: self.next_request_id(),
+                    turn: Some(identity.clone()),
+                }));
+            }
+            self.own_turn = Some(OwnTurn::started(identity, request_id));
         } else {
             actions.extend(self.open_peer_turn(identity, origin, user_content));
         }
@@ -485,15 +1027,21 @@ impl RouterState {
             // cancel path's own `interrupted` reaches this connection only
             // after the turn's terminal (and only if this connection
             // cancelled).
+            let members: Vec<u64> = own.members().collect();
+            let primary = own.request_id;
             if status == TurnEndStatus::Cancelled {
-                let request_id = own.request_id;
-                self.deliver(request_id, ServerEvent::Interrupted);
+                for member in members {
+                    self.deliver(member, ServerEvent::Interrupted);
+                }
             }
+            self.end_adopted_bracket(primary, identity, status, message);
             return Vec::new();
         }
         if self.peer_matches(&identity) {
             self.fence.complete(&identity);
-            return self.close_peer_turn(status, message);
+            let mut actions = self.close_peer_turn(status, message);
+            actions.extend(self.on_turn_closed());
+            return actions;
         }
         crate::logging::debug(&format!(
             "acp: dropping turn_ended for a turn that is not open: {}",
@@ -514,6 +1062,15 @@ impl RouterState {
                 return Vec::new();
             }
         };
+        if let ServerEvent::SoftInterruptInjected {
+            content,
+            client_ids,
+            ..
+        } = &event
+        {
+            let (content, client_ids) = (content.clone(), client_ids.clone());
+            return self.on_injected(identity, event, content, &client_ids);
+        }
         let terminal = matches!(event, ServerEvent::Done { .. } | ServerEvent::Error { .. });
         if let Some(own) = self
             .own_turn
@@ -522,8 +1079,27 @@ impl RouterState {
         {
             let request_id = own.request_id;
             if terminal {
-                self.own_turn = None;
+                let own = self.own_turn.take().expect("matched above");
                 self.fence.complete(&identity);
+                // Without a `turn_ended` (an older daemon build) the adopted
+                // turn's bracket is still open.
+                if own.bracket_open {
+                    let (status, message) = terminal_status(&event);
+                    self.deliver(
+                        own.request_id,
+                        ServerEvent::TurnEnded {
+                            identity,
+                            status,
+                            message,
+                        },
+                    );
+                }
+                // Every prompt the turn answers resolves with it; a terminal
+                // carries the id of the request that started the turn.
+                for member in own.members() {
+                    self.deliver(member, retarget_terminal(&event, member));
+                }
+                return self.on_turn_closed();
             } else if let Some(change) = session_state_change(&event) {
                 return vec![RouteAction::SessionState(change)];
             }
@@ -535,13 +1111,10 @@ impl RouterState {
                 // Normally `turn_ended` closed the turn already; this is a
                 // terminal without one (an older daemon build).
                 self.fence.complete(&identity);
-                let (status, message) = match &event {
-                    ServerEvent::Error { message, .. } => {
-                        (TurnEndStatus::Failed, Some(message.clone()))
-                    }
-                    _ => (TurnEndStatus::Completed, None),
-                };
-                return self.close_peer_turn(status, message);
+                let (status, message) = terminal_status(&event);
+                let mut actions = self.close_peer_turn(status, message);
+                actions.extend(self.on_turn_closed());
+                return actions;
             }
             if let Some(change) = session_state_change(&event) {
                 return vec![RouteAction::SessionState(change)];
@@ -555,9 +1128,146 @@ impl RouterState {
         Vec::new()
     }
 
+    /// A steer was injected into turn `identity`.
+    ///
+    /// Ours (its client ids name a waiting prompt) joins our own turn, or
+    /// makes a mirrored peer turn ours. Anyone else's is shown as a user
+    /// message: a peer turn's by the mirror, our own turn's by its prompt. A
+    /// group that combines our steer with another client's is treated as ours,
+    /// so our text is never echoed back as a peer message.
+    fn on_injected(
+        &mut self,
+        identity: TurnIdentity,
+        event: ServerEvent,
+        content: String,
+        client_ids: &[String],
+    ) -> Vec<RouteAction> {
+        let ours = self.take_waiting(client_ids);
+        if let Some(own) = self
+            .own_turn
+            .as_mut()
+            .filter(|own| own.identity == identity)
+        {
+            if ours.is_empty() {
+                let request_id = own.request_id;
+                self.deliver(request_id, event);
+            } else {
+                own.joined.extend(ours);
+            }
+            return Vec::new();
+        }
+        if self.peer_matches(&identity) {
+            if ours.is_empty() {
+                let peer = self.peer_turn.as_mut().expect("matched above");
+                let index = peer.steers;
+                peer.steers += 1;
+                return vec![RouteAction::PeerSteer {
+                    turn_id: turn_id_string(&identity),
+                    index,
+                    content,
+                }];
+            }
+            if self.view_closed {
+                // The view closed while the steer waited: the turn stays a
+                // peer turn.
+                for prompt_id in ours {
+                    self.resolve_cancelled(prompt_id);
+                }
+                return Vec::new();
+            }
+            // Adopt the turn: from here on its output answers our prompt.
+            let peer = self.peer_turn.take().expect("matched above");
+            let turn_id = turn_id_string(&peer.identity);
+            let mut members = ours.into_iter();
+            let request_id = members.next().expect("not empty");
+            self.own_turn = Some(OwnTurn {
+                identity: peer.identity,
+                request_id,
+                joined: members.collect(),
+                adopted: true,
+                bracket_open: true,
+            });
+            return vec![RouteAction::PeerTurnAdopted { turn_id }];
+        }
+        if ours.is_empty() {
+            crate::logging::debug(&format!(
+                "acp: dropping a steer injected into a turn that is not open: {}",
+                turn_id_string(&identity)
+            ));
+            return Vec::new();
+        }
+        if self.own_turn.is_some() || self.view_closed || !self.fence.admits(&identity) {
+            for prompt_id in ours {
+                self.resolve_cancelled(prompt_id);
+            }
+            return Vec::new();
+        }
+        // A turn this view never saw start took our steer; it still answers
+        // the prompt, without a bracket.
+        let mut members = ours.into_iter();
+        let request_id = members.next().expect("not empty");
+        self.own_turn = Some(OwnTurn {
+            identity,
+            request_id,
+            joined: members.collect(),
+            adopted: true,
+            bracket_open: false,
+        });
+        Vec::new()
+    }
+
+    /// Hand an adopted turn's owed `_jcode/turn` terminal to its prompt, which
+    /// writes it after the turn's remaining output.
+    fn end_adopted_bracket(
+        &mut self,
+        request_id: u64,
+        identity: TurnIdentity,
+        status: TurnEndStatus,
+        message: Option<String>,
+    ) {
+        let Some(own) = self
+            .own_turn
+            .as_mut()
+            .filter(|own| own.identity == identity && own.bracket_open)
+        else {
+            return;
+        };
+        own.bracket_open = false;
+        self.deliver(
+            request_id,
+            ServerEvent::TurnEnded {
+                identity,
+                status,
+                message,
+            },
+        );
+    }
+
     /// An unscoped event: a reply, session state, or (rarely) a notice the
     /// daemon does not scope.
     fn on_flat(&mut self, event: ServerEvent) -> Vec<RouteAction> {
+        if let ServerEvent::SoftInterruptsCancelled {
+            id,
+            cancelled,
+            not_queued,
+        } = &event
+        {
+            if self.probes.remove(id) {
+                return self.on_probe_reply(*id, cancelled, not_queued);
+            }
+            return Vec::new();
+        }
+        if let ServerEvent::SoftInterruptInjected { client_ids, .. } = &event {
+            // `turn_start`: the daemon ran our steer as a new turn, announced
+            // by its `turn_started`. Never part of a turn's stream.
+            self.take_waiting(client_ids);
+            return Vec::new();
+        }
+        if let ServerEvent::Error { id, message, .. } = &event
+            && let Some(actions) = self.on_rejected(*id, message)
+        {
+            return actions;
+        }
         let mut actions = Vec::new();
         if let ServerEvent::History { .. } = &event
             && !self.is_catalog_reply(&event)
@@ -710,21 +1420,44 @@ impl RouterState {
     /// The runtime this connection watched was replaced: its turns can never
     /// end on this connection.
     fn retire_runtime(&mut self) -> Vec<RouteAction> {
+        let mut actions = Vec::new();
         if let Some(own) = self.own_turn.take() {
+            actions.extend(Self::adopted_bracket_end(
+                &own,
+                Some("The session's runtime was replaced before the turn ended.".to_string()),
+            ));
+            for member in own.members() {
+                self.deliver(
+                    member,
+                    ServerEvent::Error {
+                        id: member,
+                        message: "The session's runtime was replaced before the turn ended."
+                            .to_string(),
+                        retry_after_secs: None,
+                    },
+                );
+            }
+        }
+        // The replaced runtime's queue went with it.
+        let waiting: Vec<u64> = self.waiting.keys().copied().collect();
+        self.waiting.clear();
+        self.probes.clear();
+        for prompt_id in waiting {
             self.deliver(
-                own.request_id,
+                prompt_id,
                 ServerEvent::Error {
-                    id: own.request_id,
-                    message: "The session's runtime was replaced before the turn ended."
+                    id: prompt_id,
+                    message: "The session's runtime was replaced before the prompt ran."
                         .to_string(),
                     retry_after_secs: None,
                 },
             );
         }
-        self.close_peer_turn(
+        actions.extend(self.close_peer_turn(
             TurnEndStatus::Cancelled,
             Some("The session's runtime was replaced before the turn ended.".to_string()),
-        )
+        ));
+        actions
     }
 
     fn open_peer_turn(
@@ -742,6 +1475,7 @@ impl RouterState {
         self.peer_turn = Some(PeerTurn {
             identity,
             unreplayed_prompt,
+            steers: 0,
         });
         vec![RouteAction::PeerTurnStarted {
             turn_id,
@@ -775,6 +1509,32 @@ impl RouterState {
             return;
         };
         let _ = pending.tx.send(event);
+    }
+}
+
+/// End status of a turn whose scoped terminal arrived without `turn_ended`.
+fn terminal_status(event: &ServerEvent) -> (TurnEndStatus, Option<String>) {
+    match event {
+        ServerEvent::Error { message, .. } => (TurnEndStatus::Failed, Some(message.clone())),
+        _ => (TurnEndStatus::Completed, None),
+    }
+}
+
+/// A turn's terminal addressed to prompt `request_id`: the daemon's carries
+/// the id of the request that started the turn, which a steered or adopting
+/// prompt does not share.
+fn retarget_terminal(event: &ServerEvent, request_id: u64) -> ServerEvent {
+    match event {
+        ServerEvent::Error {
+            message,
+            retry_after_secs,
+            ..
+        } => ServerEvent::Error {
+            id: request_id,
+            message: message.clone(),
+            retry_after_secs: *retry_after_secs,
+        },
+        _ => ServerEvent::Done { id: request_id },
     }
 }
 
