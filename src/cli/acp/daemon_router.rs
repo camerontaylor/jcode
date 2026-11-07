@@ -215,6 +215,7 @@ pub(super) struct RouterState {
     /// The daemon advertised `turn_origin`: the connection subscribes with
     /// turn identity and routes on it. Otherwise events are read flat.
     turn_origin: bool,
+    live_sessions: Option<Vec<String>>,
     pending: HashMap<u64, PendingRequest>,
     own_turn: Option<OwnTurn>,
     peer_turn: Option<PeerTurn>,
@@ -233,6 +234,7 @@ impl RouterState {
             instance_id: instance_id.into(),
             session_id: session_id.into(),
             turn_origin: false,
+            live_sessions: None,
             pending: HashMap::new(),
             own_turn: None,
             peer_turn: None,
@@ -244,6 +246,11 @@ impl RouterState {
 
     pub(super) fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Live session ids reported by the daemon, once any `History` arrived.
+    pub(super) fn live_sessions(&self) -> Option<&[String]> {
+        self.live_sessions.as_deref()
     }
 
     /// Record whether the daemon advertised `turn_origin`. Call before
@@ -602,6 +609,7 @@ impl RouterState {
     fn on_history(&mut self, event: &ServerEvent) -> Vec<RouteAction> {
         let ServerEvent::History {
             session_id,
+            all_sessions,
             messages,
             ..
         } = event
@@ -609,6 +617,7 @@ impl RouterState {
             return Vec::new();
         };
         self.session_id = session_id.clone();
+        self.live_sessions = Some(all_sessions.clone());
         self.history_seen = true;
         let Some(peer) = self.peer_turn.as_mut() else {
             return Vec::new();
@@ -631,8 +640,14 @@ impl RouterState {
             return Vec::new();
         };
         let mut actions = Vec::new();
-        if let ServerEvent::History { session_id, .. } = &event {
+        if let ServerEvent::History {
+            session_id,
+            all_sessions,
+            ..
+        } = &event
+        {
             self.session_id = session_id.clone();
+            self.live_sessions = Some(all_sessions.clone());
             self.history_seen = true;
         }
         if let Some(request_id) = reply_request_id(&event) {
