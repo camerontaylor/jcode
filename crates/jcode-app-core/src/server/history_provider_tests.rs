@@ -11,6 +11,33 @@ fn session_with_provider_key(key: Option<&str>) -> crate::session::Session {
 }
 
 #[test]
+fn catalog_fallback_requires_provider_and_model_identity() {
+    let mut session = session_with_provider_key(Some("copilot"));
+    session.model = Some("claude-sonnet-5".into());
+    assert!(catalog_fallback_matches_session(
+        &session,
+        "GitHub Copilot",
+        "claude-sonnet-5"
+    ));
+    assert!(!catalog_fallback_matches_session(
+        &session,
+        "Anthropic",
+        "claude-sonnet-5"
+    ));
+    assert!(!catalog_fallback_matches_session(
+        &session,
+        "GitHub Copilot",
+        "other-model"
+    ));
+    session.provider_key = None;
+    assert!(!catalog_fallback_matches_session(
+        &session,
+        "GitHub Copilot",
+        "claude-sonnet-5"
+    ));
+}
+
+#[test]
 fn history_provider_name_prefers_persisted_openai_key() {
     let session = session_with_provider_key(Some("openai"));
     assert_eq!(
