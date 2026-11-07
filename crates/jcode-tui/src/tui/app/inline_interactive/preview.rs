@@ -203,7 +203,7 @@ impl App {
             return false;
         }
         if !argument.is_empty()
-            && (argument.contains([':', '/', '@', '-', '.'])
+            && (argument.contains([':', '/', '@'])
                 || picker.filtered.is_empty()
                 || picker
                     .entries
