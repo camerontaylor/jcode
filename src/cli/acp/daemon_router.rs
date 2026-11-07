@@ -46,6 +46,8 @@ pub(super) enum PendingKind {
     Prompt,
     /// A helper request/response pair (history, model catalog, config change).
     Reply,
+    /// A catalog History omits live-session and turn snapshots.
+    Catalog,
 }
 
 pub(super) struct PendingRequest {
@@ -229,6 +231,9 @@ impl RouterState {
 
         // Session metadata first: a client attaching mid-turn needs the
         // running turn opened, and feature flags gate everything else.
+        let catalog_only = reply_request_id(&event)
+            .and_then(|id| self.pending.get(&id))
+            .is_some_and(|pending| pending.kind == PendingKind::Catalog);
         if let ServerEvent::History {
             session_id,
             server_features,
@@ -237,6 +242,7 @@ impl RouterState {
             messages,
             ..
         } = &event
+            && !catalog_only
         {
             self.session_id = session_id.clone();
             self.features = server_features.clone();
@@ -602,6 +608,37 @@ mod tests {
             value["active_turn"] = active_turn;
         }
         serde_json::from_value(value).expect("history decodes")
+    }
+
+    #[test]
+    fn catalog_history_preserves_live_sessions_and_features() {
+        let mut router = RouterState::new("client", "session-1");
+        router.route(history_event(&["turn_events"], None));
+        let mut rx = router.register(2, PendingKind::Catalog);
+        let mut event = history_event(&[], None);
+        if let ServerEvent::History {
+            id, all_sessions, ..
+        } = &mut event
+        {
+            *id = 2;
+            all_sessions.clear();
+        }
+        router.route(event);
+        assert_eq!(
+            router.live_sessions(),
+            Some(["session-1".to_string()].as_slice())
+        );
+        assert!(matches!(
+            drain(&mut rx).as_slice(),
+            [ServerEvent::History { id: 2, .. }]
+        ));
+        // A real full-history snapshot still may clear the live list.
+        let mut event = history_event(&[], None);
+        if let ServerEvent::History { all_sessions, .. } = &mut event {
+            all_sessions.clear();
+        }
+        router.route(event);
+        assert_eq!(router.live_sessions(), Some([].as_slice()));
     }
 
     fn turn_started(turn_id: &str, origin: TurnOrigin, content: Option<&str>) -> ServerEvent {
