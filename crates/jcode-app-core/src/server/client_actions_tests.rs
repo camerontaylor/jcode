@@ -2,8 +2,8 @@
 
 use super::{
     NotifySessionContext, clone_split_session, create_transfer_child_session,
-    handle_notify_session, handle_rename_session, handle_resume_all_sessions, handle_set_feature,
-    handle_split,
+    handle_notify_session, handle_rename_session, handle_resume_all_sessions, handle_run_subagent,
+    handle_set_feature, handle_split, subagent_swarm_spawn_input,
 };
 use crate::agent::Agent;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
@@ -1119,4 +1119,207 @@ async fn daemon_saved_flag_survives_later_session_writes() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[test]
+fn manual_subagent_launches_through_swarm_spawn() {
+    let input = subagent_swarm_spawn_input(
+        "  review the parser changes for regressions  ",
+        "general",
+        Some("gpt-6.1-sol".to_string()),
+        None,
+    )
+    .expect("spawn input");
+    assert_eq!(input["action"], "spawn");
+    assert_eq!(input["label"], "review the parser changes");
+    assert_eq!(input["prompt"], "review the parser changes for regressions");
+    assert_eq!(input["model"], "gpt-6.1-sol");
+
+    let typed = subagent_swarm_spawn_input("audit deps", "security", None, None).unwrap();
+    assert!(typed.get("model").is_none());
+    assert_eq!(typed["prompt"], "[subagent type: security]\n\naudit deps");
+}
+
+#[test]
+fn manual_subagent_rejects_continue_and_blank_prompt() {
+    assert!(subagent_swarm_spawn_input("x", "general", None, Some("s".into())).is_err());
+    assert!(subagent_swarm_spawn_input("   ", "general", None, None).is_err());
+}
+
+async fn collect_until_terminal(
+    rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
+    request_id: u64,
+) -> Vec<ServerEvent> {
+    let mut events = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let event = timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("subagent launch responds promptly")
+            .expect("event channel stays open");
+        let terminal = matches!(
+            unwrap_test_turn_event(event.clone()),
+            ServerEvent::Done { id } | ServerEvent::Error { id, .. } if id == request_id
+        );
+        events.push(event);
+        if terminal {
+            break;
+        }
+    }
+    events
+}
+
+/// A `/subagent` launch claims a regular turn lease. It must be bracketed by
+/// its own `turn_started`/`turn_ended` with a client origin, and every event in
+/// between must carry that turn's identity, or an identity-aware client (the
+/// ACP adapter) drops them as belonging to no open turn.
+#[tokio::test]
+async fn subagent_launch_is_bracketed_by_its_own_turn() {
+    let _lock = crate::storage::lock_test_env();
+    let agent = new_split_test_agent().await;
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+
+    handle_run_subagent(
+        91,
+        "investigate the failing test".to_string(),
+        "general".to_string(),
+        None,
+        None,
+        Some("acp-test/0".to_string()),
+        &agent,
+        &tx,
+    );
+
+    let events = collect_until_terminal(&mut rx, 91).await;
+    let started = events
+        .iter()
+        .position(|event| matches!(event, ServerEvent::TurnStarted { .. }))
+        .expect("the launch announces its turn");
+    let ended = events
+        .iter()
+        .position(|event| matches!(event, ServerEvent::TurnEnded { .. }))
+        .expect("the launch ends its turn");
+    let tool_start = events
+        .iter()
+        .position(|event| {
+            matches!(
+                unwrap_test_turn_event(event.clone()),
+                ServerEvent::ToolStart { .. }
+            )
+        })
+        .expect("the launch streams its tool call");
+    let terminal = events.len() - 1;
+    assert!(
+        started < tool_start && tool_start < ended && ended < terminal,
+        "turn_started → tool stream → turn_ended → terminal: {events:?}"
+    );
+
+    let ServerEvent::TurnStarted {
+        identity,
+        origin,
+        user_content,
+    } = &events[started]
+    else {
+        unreachable!("checked above")
+    };
+    let origin = origin.as_ref().expect("the launch reports its origin");
+    assert_eq!(origin.kind, crate::protocol::TurnOriginKind::Client);
+    assert_eq!(origin.request_id, Some(91));
+    assert_eq!(origin.client_instance_id.as_deref(), Some("acp-test/0"));
+    assert_eq!(
+        user_content.as_deref(),
+        Some("investigate the failing test"),
+        "the launch reports the subagent prompt as the turn's content"
+    );
+    for event in &events[started + 1..] {
+        match event {
+            ServerEvent::TurnEvent {
+                identity: scope, ..
+            }
+            | ServerEvent::TurnEnded {
+                identity: scope, ..
+            } => assert_eq!(scope, identity, "every launch event is scoped to its turn"),
+            other => panic!("unscoped event inside the launch: {other:?}"),
+        }
+    }
+
+    // The lease is released once the launch has published its terminal.
+    assert!(
+        agent.lock().await.claim_server_turn().is_ok(),
+        "the launch releases its turn lease"
+    );
+}
+
+/// The launch holds a turn lease, so it is serialised with model turns: while
+/// another turn owns the runtime it is rejected immediately, the same way a
+/// concurrent prompt is.
+#[tokio::test]
+async fn subagent_launch_is_rejected_while_another_turn_runs() {
+    let _lock = crate::storage::lock_test_env();
+    let agent = new_split_test_agent().await;
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let running = agent.lock().await.claim_server_turn().unwrap();
+
+    handle_run_subagent(
+        93,
+        "investigate".to_string(),
+        "general".to_string(),
+        None,
+        None,
+        Some("acp-test/0".to_string()),
+        &agent,
+        &tx,
+    );
+
+    let event = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("a rejected launch answers promptly")
+        .expect("event channel stays open");
+    assert!(
+        matches!(&event, ServerEvent::Error { id: 93, message, .. } if message.contains("Already processing")),
+        "the launch reports the busy runtime: {event:?}"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "no turn events are emitted for a rejected launch"
+    );
+    drop(running);
+}
+
+/// An invalid `/subagent` must report its error immediately: it has nothing to
+/// do with the agent, so it must not queue behind a running turn's lock.
+#[tokio::test]
+async fn invalid_subagent_reports_without_waiting_for_the_agent_lock() {
+    let _lock = crate::storage::lock_test_env();
+    let agent = new_split_test_agent().await;
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+
+    // Hold the agent exactly like a running turn would.
+    let guard = agent.lock().await;
+
+    handle_run_subagent(
+        92,
+        "ignored".to_string(),
+        "general".to_string(),
+        None,
+        // `--continue` is rejected by the input builder before any agent work.
+        Some("some-session".to_string()),
+        Some("acp-test/0".to_string()),
+        &agent,
+        &tx,
+    );
+
+    let event = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("an invalid launch answers without the agent lock")
+        .expect("event channel stays open");
+    assert!(
+        matches!(&event, ServerEvent::Error { id: 92, message, .. } if message.contains("--continue")),
+        "the launch reports its validation error: {event:?}"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "no turn events are emitted for a rejected launch"
+    );
+    drop(guard);
 }
