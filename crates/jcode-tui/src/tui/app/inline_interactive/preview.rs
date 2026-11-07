@@ -189,12 +189,51 @@ impl App {
                     self.session.subagent_model.as_deref(),
                 );
             }
+            if picker.filter != request.filter() {
+                picker.navigated = false;
+            }
             picker.filter = request.filter().to_string();
             Self::apply_inline_interactive_filter(picker);
         }
     }
 
+    pub(super) fn dismiss_model_preview_for_direct_command(&mut self) -> bool {
+        let Some(argument) = self.input.trim_start().strip_prefix("/model ") else {
+            return false;
+        };
+        let argument = argument.trim();
+        let Some(picker) = self
+            .inline_interactive_state
+            .as_ref()
+            .filter(|picker| picker.preview && picker.kind == PickerKind::Model)
+        else {
+            return false;
+        };
+        if picker.navigated && !picker.filtered.is_empty() {
+            return false;
+        }
+        if !argument.is_empty()
+            && (argument.contains([':', '/', '@'])
+                || picker.filtered.is_empty()
+                || picker
+                    .entries
+                    .iter()
+                    .any(|entry| model_entry_base_name(entry) == argument))
+        {
+            // A typed model spec is a direct request. In particular, a
+            // provider prefix or unknown name must reach the resolver rather
+            // than selecting a fuzzy match or the current-model fallback row.
+            // Matched shorthand filters such as `g52c` still select the picker.
+            self.inline_interactive_state = None;
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn activate_picker_from_preview(&mut self) -> bool {
+        if self.dismiss_model_preview_for_direct_command() {
+            return false;
+        }
         if !self
             .inline_interactive_state
             .as_ref()

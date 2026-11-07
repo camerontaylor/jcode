@@ -465,6 +465,7 @@ fn session_state_from_peers_becomes_an_update_and_replies_still_route() {
             resolved_credential: None,
             provider_oauth_email: None,
             provider_oauth_account_label: None,
+            available_reasoning_efforts: None,
             reasoning_effort: None,
         };
     let actions = router.route(model_changed(0, "peer-model", Some("peer-provider")));
@@ -472,6 +473,30 @@ fn session_state_from_peers_becomes_an_update_and_replies_still_route() {
         actions.as_slice(),
         [RouteAction::SessionState(SessionStateChange::Model { model, .. })]
             if model == "peer-model"
+    ));
+
+    // A peer model change carries the new model's effort ladder and level.
+    let mut with_efforts = model_changed(0, "peer-model", Some("peer-provider"));
+    if let ServerEvent::ModelChanged {
+        available_reasoning_efforts,
+        reasoning_effort,
+        ..
+    } = &mut with_efforts
+    {
+        *available_reasoning_efforts = Some(vec!["low".into(), "high".into()]);
+        *reasoning_effort = Some("low".into());
+    }
+    let actions = router.route(with_efforts);
+    assert!(matches!(
+        actions.as_slice(),
+        [RouteAction::SessionState(SessionStateChange::Model {
+            model,
+            reasoning_effort,
+            available_reasoning_efforts,
+            ..
+        })] if model == "peer-model"
+            && reasoning_effort.as_deref() == Some("low")
+            && available_reasoning_efforts.as_ref().unwrap() == &["low", "high"]
     ));
 
     let actions = router.route(ServerEvent::SessionRenamed {
@@ -934,4 +959,44 @@ fn scoped_events_for_a_turn_that_is_not_open_are_dropped() {
         "a doubly wrapped event is unwrapped, a nested start is not"
     );
     assert_eq!(router.own_turn_identity(), Some(identity(5)));
+}
+
+#[test]
+fn catalog_history_preserves_live_sessions_and_attach_state() {
+    for mut router in [attached_router(), {
+        let mut legacy = legacy_router();
+        legacy.route(history_event());
+        legacy
+    }] {
+        let mut rx = router.register(2, PendingKind::Catalog);
+        let mut event = history_event();
+        if let ServerEvent::History {
+            id,
+            session_id,
+            all_sessions,
+            ..
+        } = &mut event
+        {
+            *id = 2;
+            *session_id = "catalog-session".to_string();
+            all_sessions.clear();
+        }
+        router.route(event);
+        assert_eq!(router.session_id(), "session-1");
+        assert_eq!(
+            router.live_sessions(),
+            Some(["session-1".to_string()].as_slice())
+        );
+        assert!(matches!(
+            drain(&mut rx).as_slice(),
+            [ServerEvent::History { id: 2, .. }]
+        ));
+        // A real full-history snapshot still may clear the live list.
+        let mut event = history_event();
+        if let ServerEvent::History { all_sessions, .. } = &mut event {
+            all_sessions.clear();
+        }
+        router.route(event);
+        assert_eq!(router.live_sessions(), Some([].as_slice()));
+    }
 }

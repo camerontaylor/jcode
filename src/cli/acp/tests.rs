@@ -540,6 +540,7 @@ fn config_options_include_model_selector_and_effort_ladder() {
         model: Some("gpt-5.2".to_string()),
         available_models: vec!["gpt-5.2".to_string(), "gpt-5.2-codex".to_string()],
         reasoning_effort: Some("high".to_string()),
+        available_reasoning_efforts: None,
     };
     let options = session_config_options(&state);
     assert_eq!(options.len(), 2);
@@ -575,6 +576,7 @@ fn config_options_current_model_prepended_when_not_listed() {
         model: Some("claude-opus-4-6".to_string()),
         available_models: vec!["claude-sonnet-4-5".to_string()],
         reasoning_effort: None,
+        available_reasoning_efforts: None,
     };
     let options = session_config_options(&state);
     let model_values: Vec<&str> = options[0]["options"]
@@ -594,6 +596,7 @@ fn legacy_models_catalog_is_emitted_alongside_config_options() {
         model: Some("deepseek-v4-flash".to_string()),
         available_models: vec!["deepseek-v4-pro".to_string()],
         reasoning_effort: Some("high".to_string()),
+        available_reasoning_efforts: None,
     };
     let mut result = json!({"sessionId": "s1"});
     insert_session_configuration(&mut result, &state);
@@ -622,6 +625,7 @@ fn context_limit_falls_back_to_default_for_unknown_models() {
         model: Some("mystery-model-9000".to_string()),
         available_models: Vec::new(),
         reasoning_effort: None,
+        available_reasoning_efforts: None,
     };
     assert_eq!(
         state.context_limit(),
@@ -833,6 +837,7 @@ fn usage_updates_carry_the_session_context_gauge() {
         model: Some("claude-opus-4-6".to_string()),
         available_models: Vec::new(),
         reasoning_effort: None,
+        available_reasoning_efforts: None,
     };
     let payload = usage_update_payload("session-1", &state, 1_000, Some(4_000), None);
     assert_eq!(payload["sessionId"], "session-1");

@@ -62,6 +62,7 @@ fn test_model_changed_roundtrip_carries_context_window() -> Result<()> {
         resolved_credential: None,
         provider_oauth_email: None,
         provider_oauth_account_label: None,
+        available_reasoning_efforts: None,
         reasoning_effort: None,
     };
     let json = encode_event(&event);
@@ -91,6 +92,7 @@ fn test_model_changed_without_context_window_stays_absent() -> Result<()> {
         resolved_credential: None,
         provider_oauth_email: None,
         provider_oauth_account_label: None,
+        available_reasoning_efforts: None,
         reasoning_effort: None,
     };
     let json = encode_event(&event);
@@ -751,6 +753,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         resolved_credential: None,
         provider_oauth_email: None,
         provider_oauth_account_label: None,
+        available_reasoning_efforts: None,
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
@@ -1036,4 +1039,44 @@ fn history_message_stored_index_is_optional_and_roundtrips() {
     assert_eq!(value["stored_index"], 12);
     let decoded: HistoryMessage = serde_json::from_value(value).unwrap();
     assert_eq!(decoded.stored_index, Some(12));
+}
+
+#[test]
+fn reasoning_capabilities_distinguish_legacy_unsupported_and_model_levels() -> Result<()> {
+    for legacy in [
+        r#"{"type":"history","id":1,"session_id":"test","messages":[]}"#,
+        r#"{"type":"model_changed","id":1,"model":"test"}"#,
+    ] {
+        for levels in [None, Some(vec![]), Some(vec!["low", "high"])] {
+            let mut value: serde_json::Value = serde_json::from_str(legacy)?;
+            if let Some(levels) = &levels {
+                value["available_reasoning_efforts"] = serde_json::json!(levels);
+            }
+            let event = parse_event_json(&value.to_string())?;
+            let actual = match &event {
+                ServerEvent::History {
+                    available_reasoning_efforts,
+                    ..
+                }
+                | ServerEvent::ModelChanged {
+                    available_reasoning_efforts,
+                    ..
+                } => available_reasoning_efforts,
+                _ => return Err(anyhow!("wrong event type")),
+            };
+            let expected = levels.as_ref().map(|values| {
+                values.iter().map(|value| value.to_string()).collect::<Vec<_>>()
+            });
+            assert_eq!(*actual, expected);
+            let encoded: serde_json::Value = serde_json::from_str(encode_event(&event).trim())?;
+            match levels {
+                None => assert!(encoded.get("available_reasoning_efforts").is_none()),
+                Some(levels) => assert_eq!(
+                    encoded["available_reasoning_efforts"],
+                    serde_json::json!(levels)
+                ),
+            }
+        }
+    }
+    Ok(())
 }

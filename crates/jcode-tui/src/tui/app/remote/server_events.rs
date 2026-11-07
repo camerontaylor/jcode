@@ -1252,6 +1252,14 @@ fn handle_server_event_inner(
             retry_after_secs,
             ..
         } => {
+            if app.startup_model_request_id == Some(id) {
+                app.cancel_startup_model();
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to select startup model: {message}"
+                )));
+                app.set_status_notice("Model switch failed");
+                return false;
+            }
             if app.pending_agent_model_request_id == Some(id) {
                 app.pending_agent_model_request_id = None;
                 app.push_display_message(DisplayMessage::error(format!(
@@ -2599,6 +2607,17 @@ fn handle_server_event_inner(
                 .is_some_and(|expected| expected != id)
             {
                 return false;
+            }
+            if let Some(expected) = app.startup_model_request_id {
+                if expected != id {
+                    return false;
+                }
+                app.startup_model_request_id = None;
+                app.startup_model_requested_at = None;
+                app.startup_model = None;
+                if error.is_some() {
+                    app.cancel_startup_model();
+                }
             }
             app.pending_automatic_failover_request_id = None;
             app.remote_model_switch_in_flight = false;

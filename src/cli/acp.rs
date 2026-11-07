@@ -97,6 +97,7 @@ struct DaemonSession {
     router: Arc<Mutex<RouterState>>,
     active_prompt_id: Mutex<Option<u64>>,
     prompt_running: AtomicBool,
+    catalog_refresh: Mutex<()>,
     ui_state: Arc<Mutex<SessionUiState>>,
     /// Workspace root reported by the ACP client, used to compose the
     /// project-local skill overlay for slash-skill resolution.
@@ -210,6 +211,7 @@ struct SessionUiState {
     model: Option<String>,
     available_models: Vec<String>,
     reasoning_effort: Option<String>,
+    available_reasoning_efforts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -314,6 +316,7 @@ impl SessionUiState {
         provider_name: Option<String>,
         provider_model: Option<String>,
         available_models: Vec<String>,
+        available_reasoning_efforts: Option<Vec<String>>,
         reasoning_effort: Option<String>,
     ) -> Self {
         Self {
@@ -321,6 +324,7 @@ impl SessionUiState {
             model: provider_model,
             available_models,
             reasoning_effort,
+            available_reasoning_efforts,
         }
     }
 
@@ -352,6 +356,7 @@ impl DaemonSession {
             router: Arc::new(Mutex::new(RouterState::new(instance_id, session_id))),
             active_prompt_id: Mutex::new(None),
             prompt_running: AtomicBool::new(false),
+            catalog_refresh: Mutex::new(()),
             ui_state: Arc::new(Mutex::new(SessionUiState::default())),
             working_dir,
             active_skill: Mutex::new(None),
@@ -427,6 +432,26 @@ impl DaemonSession {
         let ui_state = Arc::clone(&self.ui_state);
         let gate = Arc::clone(&self.peer_gate);
         let peer_mapper = Arc::clone(&self.peer_mapper);
+        let session = Arc::downgrade(self);
+        let (catalog_tx, mut catalog_rx) = tokio::sync::watch::channel(());
+        let catalog_acp = acp.clone();
+        tokio::spawn(async move {
+            while catalog_rx.changed().await.is_ok() {
+                let Some(session) = session.upgrade() else {
+                    break;
+                };
+                match request_model_catalog(&session).await {
+                    Ok(_) => {
+                        if let Err(err) = catalog_acp.write_config_option_update(&session).await {
+                            crate::logging::debug(&format!("acp: config update failed: {err}"));
+                        }
+                    }
+                    Err(err) => {
+                        crate::logging::debug(&format!("acp: catalog refresh failed: {err}"))
+                    }
+                }
+            }
+        });
         let handle = tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
@@ -443,6 +468,13 @@ impl DaemonSession {
                 let Some(event) = decode_daemon_line(&line) else {
                     continue;
                 };
+                if matches!(&event, ServerEvent::AvailableModelsUpdated { .. }) {
+                    catalog_tx.send_replace(());
+                }
+                let catalog_reply = router.lock().await.is_catalog_reply(&event);
+                if catalog_reply {
+                    apply_catalog_state(&mut *ui_state.lock().await, &event);
+                }
                 let actions = router.lock().await.route(event);
                 for action in actions {
                     if let Err(err) = acp
@@ -977,14 +1009,21 @@ impl AcpRuntime {
                 wait_for_model_changed(&session, &mut rx, request_id).await
             }
             CONFIG_ID_EFFORT => {
-                session
-                    .send(&Request::SetReasoningEffort {
-                        id: request_id,
-                        effort: value.clone(),
-                        target_session_id: None,
-                    })
-                    .await?;
-                wait_for_effort_changed(&session, &mut rx, request_id).await
+                let normalized = normalize_effort(&*session.ui_state.lock().await, &value);
+                match normalized {
+                    Ok(Some(effort)) => {
+                        session
+                            .send(&Request::SetReasoningEffort {
+                                id: request_id,
+                                effort,
+                                target_session_id: None,
+                            })
+                            .await?;
+                        wait_for_effort_changed(&session, &mut rx, request_id).await
+                    }
+                    Ok(None) => Ok(()),
+                    Err(error) => Err(error),
+                }
             }
             other => Err(anyhow::anyhow!("Unknown config option id: {other}")),
         };
@@ -1165,12 +1204,14 @@ impl AcpRuntime {
                 provider_name,
                 provider_model,
                 available_models,
+                available_reasoning_efforts,
                 reasoning_effort,
                 ..
             } => SessionUiState::from_history_fields(
                 provider_name,
                 provider_model,
                 available_models,
+                available_reasoning_efforts,
                 reasoning_effort,
             ),
             other => anyhow::bail!("expected history after session creation, got {other:?}"),
@@ -1245,6 +1286,7 @@ impl AcpRuntime {
                     provider_name,
                     provider_model,
                     available_models,
+                    available_reasoning_efforts,
                     reasoning_effort,
                     ..
                 } => {
@@ -1252,6 +1294,7 @@ impl AcpRuntime {
                         provider_name,
                         provider_model,
                         available_models,
+                        available_reasoning_efforts,
                         reasoning_effort,
                     );
                     if replay_history {
@@ -1546,25 +1589,10 @@ impl AcpRuntime {
                 Ok(format!("Switched model to `{selected}`."))
             }
             AcpSlashCommand::Models => {
-                let event = request_model_catalog(session).await?;
-                let ServerEvent::History {
-                    provider_name,
-                    provider_model,
-                    available_models,
-                    ..
-                } = event
-                else {
-                    unreachable!("request_model_catalog only returns history")
-                };
+                request_model_catalog(session).await?;
+                // The reader has already applied this snapshot in event order.
                 let (current, models) = {
-                    let mut state = session.ui_state.lock().await;
-                    if provider_name.is_some() {
-                        state.provider_name = provider_name;
-                    }
-                    if provider_model.is_some() {
-                        state.model = provider_model;
-                    }
-                    state.available_models = available_models;
+                    let state = session.ui_state.lock().await;
                     (state.model.clone(), state.available_models.clone())
                 };
                 self.write_config_option_update(session).await?;
@@ -1591,6 +1619,13 @@ impl AcpRuntime {
                 }
             }
             AcpSlashCommand::Effort(Some(effort)) => {
+                let Some(effort) = normalize_effort(&*session.ui_state.lock().await, &effort)?
+                else {
+                    return Ok(
+                        "Reasoning effort ignored: the current model does not support it."
+                            .to_string(),
+                    );
+                };
                 let id = session.next_id();
                 let mut rx = session.register(id, PendingKind::Reply).await;
                 session
@@ -1922,7 +1957,11 @@ impl AcpRuntime {
                 SessionStateChange::Model {
                     model,
                     provider_name,
+                    reasoning_effort,
+                    available_reasoning_efforts,
                 } => {
+                    state.reasoning_effort = reasoning_effort;
+                    state.available_reasoning_efforts = available_reasoning_efforts;
                     state.model = Some(model);
                     if provider_name.is_some() {
                         state.provider_name = provider_name;
@@ -2213,8 +2252,9 @@ async fn request_history(session: &Arc<DaemonSession>) -> Result<ServerEvent> {
 }
 
 async fn request_model_catalog(session: &Arc<DaemonSession>) -> Result<ServerEvent> {
+    let _refresh = session.catalog_refresh.lock().await;
     let id = session.next_id();
-    let mut rx = session.register(id, PendingKind::Reply).await;
+    let mut rx = session.register(id, PendingKind::Catalog).await;
     session
         .send(&Request::GetModelCatalog {
             id,
@@ -2252,6 +2292,8 @@ async fn wait_for_model_changed(
                 id,
                 model,
                 provider_name,
+                reasoning_effort,
+                available_reasoning_efforts,
                 error,
                 ..
             } if id == request_id => {
@@ -2259,6 +2301,8 @@ async fn wait_for_model_changed(
                     anyhow::bail!(error);
                 }
                 let mut state = session.ui_state.lock().await;
+                state.reasoning_effort = reasoning_effort;
+                state.available_reasoning_efforts = available_reasoning_efforts;
                 state.model = Some(model);
                 if provider_name.is_some() {
                     state.provider_name = provider_name;

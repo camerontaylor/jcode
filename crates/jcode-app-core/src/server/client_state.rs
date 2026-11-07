@@ -252,6 +252,12 @@ pub(super) async fn handle_get_history(
     Ok(())
 }
 
+fn catalog_fallback_matches_session(session: &Session, provider_name: &str, model: &str) -> bool {
+    session.model.as_deref() == Some(model)
+        && history_provider_name_from_session(session)
+            .is_some_and(|name| name.eq_ignore_ascii_case(provider_name))
+}
+
 async fn build_model_catalog(
     id: u64,
     session_id: &str,
@@ -272,6 +278,13 @@ async fn build_model_catalog(
                     .collect(),
             ),
             provider.reasoning_effort(),
+            Some(
+                provider
+                    .available_efforts()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
             provider_oauth_email(provider.as_ref()),
             provider.serving_oauth_account_label(),
         )
@@ -286,12 +299,13 @@ async fn build_model_catalog(
         service_tier,
         available_service_tiers,
         reasoning_effort,
+        available_reasoning_efforts,
         source,
         provider_oauth_email,
         provider_oauth_account_label,
     ) = {
         match live {
-            Some((catalog, (credential, tier, tiers, effort, email, account_label))) => {
+            Some((catalog, (credential, tier, tiers, effort, efforts, email, account_label))) => {
                 let catalog = catalog.snapshot();
                 (
                     catalog.provider_name,
@@ -302,6 +316,7 @@ async fn build_model_catalog(
                     tier,
                     tiers,
                     effort,
+                    efforts,
                     "live",
                     email,
                     account_label,
@@ -328,7 +343,10 @@ async fn build_model_catalog(
                         // is exactly the lock-contention case a client cannot
                         // correct, so `provider.name()` here reached the header and
                         // the spend ledger as `OpenRouter`.
-                        Some(provider.display_name()),
+                        persisted
+                            .as_ref()
+                            .map(|s| history_provider_name(s, provider.as_ref()))
+                            .unwrap_or_else(|| Some(provider.display_name())),
                         persisted_model.or_else(|| Some(provider.model())),
                         provider.available_models_display(),
                         model_routes,
@@ -341,7 +359,26 @@ async fn build_model_catalog(
                                 .map(str::to_string)
                                 .collect(),
                         ),
-                        provider.reasoning_effort(),
+                        // Effort is session-specific even when provider/model match.
+                        persisted
+                            .as_ref()
+                            .and_then(|session| session.reasoning_effort.clone()),
+                        persisted
+                            .as_ref()
+                            .is_some_and(|session| {
+                                catalog_fallback_matches_session(
+                                    session,
+                                    &provider.display_name(),
+                                    &provider.model(),
+                                )
+                            })
+                            .then(|| {
+                                provider
+                                    .available_efforts()
+                                    .into_iter()
+                                    .map(str::to_string)
+                                    .collect()
+                            }),
                         "fallback",
                         provider_oauth_email(provider.as_ref()),
                         provider.serving_oauth_account_label(),
@@ -384,6 +421,7 @@ async fn build_model_catalog(
         resolved_credential,
         provider_oauth_email,
         provider_oauth_account_label,
+        available_reasoning_efforts,
         reasoning_effort,
         // Catalog replies still use History, so the TUI applies this field as
         // authoritative. Omitting it falsely turns off /fast status and its badge.
@@ -773,14 +811,20 @@ async fn send_history_from_persisted_session(
     // serialized wire bytes simultaneously.
     let provider_name = history_provider_name(&session, provider.as_ref());
     let provider_model = session.model.clone().or_else(|| Some(provider.model()));
+    let available_reasoning_efforts =
+        catalog_fallback_matches_session(&session, &provider.display_name(), &provider.model())
+            .then(|| {
+                provider
+                    .available_efforts()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            });
     let subagent_model = session.subagent_model.clone();
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
     let is_canary = session.is_canary;
-    let reasoning_effort = session
-        .reasoning_effort
-        .clone()
-        .or_else(|| provider.reasoning_effort());
+    let reasoning_effort = session.reasoning_effort.clone();
     let agent_model_overrides = session.agent_model_overrides.clone();
     let inferred_interrupted = was_interrupted
         .is_none()
@@ -852,6 +896,7 @@ async fn send_history_from_persisted_session(
         resolved_credential: provider.active_resolved_credential(),
         provider_oauth_email: provider_oauth_email(provider.as_ref()),
         provider_oauth_account_label: provider.serving_oauth_account_label(),
+        available_reasoning_efforts,
         reasoning_effort,
         // The transcript is persisted, but the tier is live provider state and
         // can be read without waiting for the busy agent's mutex.
@@ -979,7 +1024,7 @@ async fn send_history_with_guard(
         let skills_ms = skills_start.elapsed().as_millis();
 
         let provider_meta_start = Instant::now();
-        let reasoning_effort = provider.reasoning_effort();
+        let reasoning_effort = agent_guard.provider_reasoning_effort();
         let service_tier = provider.service_tier();
         let provider_meta_ms = provider_meta_start.elapsed().as_millis();
 
@@ -1021,6 +1066,14 @@ async fn send_history_with_guard(
         agent_guard
             .provider_handle()
             .available_service_tiers()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    let available_reasoning_efforts = Some(
+        agent_guard
+            .provider_handle()
+            .available_efforts()
             .into_iter()
             .map(str::to_string)
             .collect(),
@@ -1164,6 +1217,7 @@ async fn send_history_with_guard(
         resolved_credential,
         provider_oauth_email,
         provider_oauth_account_label,
+        available_reasoning_efforts,
         reasoning_effort,
         service_tier,
         compaction_mode,
