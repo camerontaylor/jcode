@@ -249,6 +249,12 @@ pub(super) async fn handle_get_history(
     Ok(())
 }
 
+fn catalog_fallback_matches_session(session: &Session, provider_name: &str, model: &str) -> bool {
+    session.model.as_deref() == Some(model)
+        && history_provider_name_from_session(session)
+            .is_some_and(|name| name.eq_ignore_ascii_case(provider_name))
+}
+
 pub(super) async fn handle_get_model_catalog(
     id: u64,
     session_id: &str,
@@ -321,7 +327,10 @@ pub(super) async fn handle_get_model_catalog(
                     // is exactly the lock-contention case a client cannot
                     // correct, so `provider.name()` here reached the header and
                     // the spend ledger as `OpenRouter`.
-                    Some(provider.display_name()),
+                    persisted
+                        .as_ref()
+                        .map(|s| history_provider_name(s, provider.as_ref()))
+                        .unwrap_or_else(|| Some(provider.display_name())),
                     persisted_model.or_else(|| Some(provider.model())),
                     provider.available_models_display(),
                     model_routes,
@@ -337,8 +346,13 @@ pub(super) async fn handle_get_model_catalog(
                     provider.reasoning_effort(),
                     persisted
                         .as_ref()
-                        .and_then(|session| session.model.as_deref())
-                        .is_none_or(|model| model == provider.model())
+                        .is_some_and(|session| {
+                            catalog_fallback_matches_session(
+                                session,
+                                &provider.display_name(),
+                                &provider.model(),
+                            )
+                        })
                         .then(|| {
                             provider
                                 .available_efforts()
@@ -1246,6 +1260,33 @@ mod tests {
         );
         session.provider_key = key.map(str::to_string);
         session
+    }
+
+    #[test]
+    fn catalog_fallback_requires_provider_and_model_identity() {
+        let mut session = session_with_provider_key(Some("copilot"));
+        session.model = Some("claude-sonnet-5".into());
+        assert!(catalog_fallback_matches_session(
+            &session,
+            "GitHub Copilot",
+            "claude-sonnet-5"
+        ));
+        assert!(!catalog_fallback_matches_session(
+            &session,
+            "Anthropic",
+            "claude-sonnet-5"
+        ));
+        assert!(!catalog_fallback_matches_session(
+            &session,
+            "GitHub Copilot",
+            "other-model"
+        ));
+        session.provider_key = None;
+        assert!(!catalog_fallback_matches_session(
+            &session,
+            "GitHub Copilot",
+            "claude-sonnet-5"
+        ));
     }
 
     #[test]

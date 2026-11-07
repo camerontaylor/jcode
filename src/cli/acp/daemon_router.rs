@@ -226,14 +226,18 @@ impl RouterState {
     /// Route one daemon event. Prompt and reply delivery happen through the
     /// registered channels; the returned actions are what the adapter must
     /// render for other clients' activity.
+    pub(super) fn is_catalog_reply(&self, event: &ServerEvent) -> bool {
+        reply_request_id(event)
+            .and_then(|id| self.pending.get(&id))
+            .is_some_and(|pending| pending.kind == PendingKind::Catalog)
+    }
+
     pub(super) fn route(&mut self, event: ServerEvent) -> Vec<RouteAction> {
         let mut actions = Vec::new();
 
         // Session metadata first: a client attaching mid-turn needs the
         // running turn opened, and feature flags gate everything else.
-        let catalog_only = reply_request_id(&event)
-            .and_then(|id| self.pending.get(&id))
-            .is_some_and(|pending| pending.kind == PendingKind::Catalog);
+        let catalog_only = self.is_catalog_reply(&event);
         if let ServerEvent::History {
             session_id,
             server_features,

@@ -422,6 +422,10 @@ impl DaemonSession {
                 if matches!(&event, ServerEvent::AvailableModelsUpdated { .. }) {
                     catalog_tx.send_replace(());
                 }
+                let catalog_reply = router.lock().await.is_catalog_reply(&event);
+                if catalog_reply {
+                    apply_catalog_state(&mut *ui_state.lock().await, &event);
+                }
                 let actions = router.lock().await.route(event);
                 for action in actions {
                     if let Err(err) = acp
@@ -1470,25 +1474,10 @@ impl AcpRuntime {
                 Ok(format!("Switched model to `{selected}`."))
             }
             AcpSlashCommand::Models => {
-                let event = request_model_catalog(session).await?;
-                let ServerEvent::History {
-                    provider_name,
-                    provider_model,
-                    available_models,
-                    ..
-                } = event
-                else {
-                    unreachable!("request_model_catalog only returns history")
-                };
+                request_model_catalog(session).await?;
+                // The reader has already applied this snapshot in event order.
                 let (current, models) = {
-                    let mut state = session.ui_state.lock().await;
-                    if provider_name.is_some() {
-                        state.provider_name = provider_name;
-                    }
-                    if provider_model.is_some() {
-                        state.model = provider_model;
-                    }
-                    state.available_models = available_models;
+                    let state = session.ui_state.lock().await;
                     (state.model.clone(), state.available_models.clone())
                 };
                 self.write_config_option_update(session).await?;
@@ -2128,9 +2117,6 @@ async fn request_model_catalog(session: &Arc<DaemonSession>) -> Result<ServerEve
         }
     };
     session.unregister(id).await;
-    if let Ok(event) = &result {
-        apply_catalog_state(&mut *session.ui_state.lock().await, event);
-    }
     result
 }
 
