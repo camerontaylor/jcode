@@ -969,7 +969,10 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
     let _guard = lock_env();
     let _env_guard = crate::storage::lock_test_env();
     let dir = TempDir::new().expect("temp dir");
-    let saved: Vec<(String, Option<String>)> = [
+    // Auto detection scans every compatible profile, including token-based
+    // credentials such as HF_TOKEN. Keep this no-credentials case independent
+    // of the developer's configured providers.
+    let mut keys = vec![
         "JCODE_HOME",
         "JCODE_NON_INTERACTIVE",
         "JCODE_DEFERRED_AUTH_BOOTSTRAP",
@@ -982,26 +985,43 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
-    ]
-    .iter()
-    .map(|k| (k.to_string(), std::env::var(k).ok()))
-    .collect();
+        "ZAI_API_KEY",
+        "Z_AI_API_KEY",
+        "CEREBRAS_FREE_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_OPENAI_COMPAT_API_BASE",
+        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "JCODE_OPENAI_COMPAT_ENV_FILE",
+        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "JCODE_RELOAD_AUTH_STATUS",
+    ];
+    keys.extend(
+        crate::provider_catalog::openai_compatible_profiles()
+            .iter()
+            .map(|profile| profile.api_key_env),
+    );
+    keys.sort_unstable();
+    keys.dedup();
+    let saved: Vec<(String, Option<String>)> = keys
+        .iter()
+        .map(|key| (key.to_string(), std::env::var(key).ok()))
+        .collect();
 
     crate::env::set_var("JCODE_HOME", dir.path());
     crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
-    for key in [
-        "JCODE_DEFERRED_AUTH_BOOTSTRAP",
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENROUTER_API_KEY",
-        "GITHUB_TOKEN",
-        "GEMINI_API_KEY",
-        "CURSOR_API_KEY",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
-    ] {
-        crate::env::remove_var(key);
+    for key in keys {
+        if !matches!(key, "JCODE_HOME" | "JCODE_NON_INTERACTIVE") {
+            crate::env::remove_var(key);
+        }
     }
+    crate::config::invalidate_config_cache();
 
     let opencode_path = crate::auth::claude::ExternalClaudeAuthSource::OpenCode
         .path()
@@ -1071,6 +1091,7 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
             crate::env::remove_var(&key);
         }
     }
+    crate::config::invalidate_config_cache();
 }
 
 #[test]
