@@ -748,13 +748,14 @@ async fn send_history_from_persisted_session(
     let provider_name = history_provider_name(&session, provider.as_ref());
     let provider_model = session.model.clone().or_else(|| Some(provider.model()));
     let available_reasoning_efforts =
-        (provider_model.as_deref() == Some(provider.model().as_str())).then(|| {
-            provider
-                .available_efforts()
-                .into_iter()
-                .map(str::to_string)
-                .collect()
-        });
+        catalog_fallback_matches_session(&session, &provider.display_name(), &provider.model())
+            .then(|| {
+                provider
+                    .available_efforts()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            });
     let subagent_model = session.subagent_model.clone();
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
