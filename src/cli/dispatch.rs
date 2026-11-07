@@ -928,12 +928,9 @@ async fn run_default_command(args: Args) -> Result<()> {
         }
 
         maybe_prompt_server_bootstrap_login(&args.provider).await?;
-        spawn_server(
-            &args.provider,
-            args.model.as_deref(),
-            args.provider_profile.as_deref(),
-        )
-        .await?;
+        // The interactive client selects its model after Subscribe; allow
+        // credential-free daemon startup so onboarding can run first.
+        spawn_server(&args.provider, None, args.provider_profile.as_deref()).await?;
     }
 
     startup_profile::mark("pre_tui_client");
@@ -1228,13 +1225,10 @@ async fn detect_bootstrap_credentials() -> BootstrapCredentialState {
 
 pub(crate) async fn spawn_server(
     provider_choice: &ProviderChoice,
-    _model: Option<&str>,
+    model: Option<&str>,
     provider_profile: Option<&str>,
 ) -> Result<()> {
-    // A shared daemon must boot for onboarding without credentials. The TUI
-    // applies its explicit model after Subscribe; owned one-shot servers still
-    // receive their model through spawn_server_with_lifetime.
-    spawn_server_with_executable(provider_choice, None, provider_profile, None).await
+    spawn_server_with_executable(provider_choice, model, provider_profile, None).await
 }
 
 /// Lifecycle of a spawned `jcode serve` child.

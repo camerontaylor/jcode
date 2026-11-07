@@ -1333,3 +1333,20 @@ fn stale_credential_route_fallback_follows_runtime_pin_or_drops_to_auto() {
         assert!(stale_credential_route_fallback("openrouter:z-ai/glm-5.2@Novita").is_none());
     });
 }
+
+#[test]
+fn azure_startup_route_activates_runtime_and_strips_prefix() {
+    let provider = test_multi_provider_with_cursor();
+    let azure: Arc<dyn Provider> = Arc::new(StubExternalRuntime::new(
+        "azure-openai",
+        "Azure OpenAI",
+        "openai-compatible:azure-openai",
+        &["deployment-one", "deployment-two"],
+    ));
+    ProviderRegistry::new(&provider).install_compatible_profile("azure-openai", azure.clone());
+    provider.set_model("azure-openai:deployment-two").unwrap();
+    assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+    assert_eq!(azure.model(), "deployment-two");
+    assert_eq!(provider.model(), "deployment-two");
+    assert!(provider.set_model("azure-openai:").is_err());
+}
