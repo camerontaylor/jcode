@@ -1127,6 +1127,7 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            navigated: false,
         });
         if !preserve_input {
             self.input.clear();
@@ -1481,6 +1482,7 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            navigated: false,
         });
         self.set_status_notice("Updating model list…");
     }
@@ -2214,6 +2216,7 @@ impl App {
             if picker.kind == PickerKind::Model {
                 Some((
                     picker.preview,
+                    picker.navigated,
                     picker.filter.clone(),
                     picker.selected,
                     picker.column,
@@ -2250,9 +2253,11 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            navigated: false,
         });
 
-        if let Some((preview, filter, selected, column, subagent_model)) = previous_picker
+        if let Some((preview, navigated, filter, selected, column, subagent_model)) =
+            previous_picker
             && let Some(ref mut picker) = self.inline_interactive_state
         {
             if subagent_model {
@@ -2262,6 +2267,7 @@ impl App {
                 );
             }
             picker.preview = preview;
+            picker.navigated = navigated;
             picker.filter = filter;
             picker.selected = selected.min(picker.filtered.len().saturating_sub(1));
             picker.column = column.min(picker.max_navigable_column());
@@ -2509,6 +2515,7 @@ impl App {
         match code {
             KeyCode::Down => {
                 if let Some(picker) = self.inline_interactive_state.as_mut() {
+                    picker.navigated = true;
                     let max = picker.filtered.len().saturating_sub(1);
                     picker.selected = (picker.selected + 1).min(max);
                 }
@@ -2516,12 +2523,14 @@ impl App {
             }
             KeyCode::Up => {
                 if let Some(picker) = self.inline_interactive_state.as_mut() {
+                    picker.navigated = true;
                     picker.selected = picker.selected.saturating_sub(1);
                 }
                 Ok(true)
             }
             KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(picker) = self.inline_interactive_state.as_mut() {
+                    picker.navigated = true;
                     let max = picker.filtered.len().saturating_sub(1);
                     picker.selected = (picker.selected + 1).min(max);
                 }
@@ -2529,12 +2538,14 @@ impl App {
             }
             KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(picker) = self.inline_interactive_state.as_mut() {
+                    picker.navigated = true;
                     picker.selected = picker.selected.saturating_sub(1);
                 }
                 Ok(true)
             }
             KeyCode::PageDown => {
                 if let Some(picker) = self.inline_interactive_state.as_mut() {
+                    picker.navigated = true;
                     let max = picker.filtered.len().saturating_sub(1);
                     picker.selected = (picker.selected + 5).min(max);
                 }
@@ -2542,6 +2553,7 @@ impl App {
             }
             KeyCode::PageUp => {
                 if let Some(picker) = self.inline_interactive_state.as_mut() {
+                    picker.navigated = true;
                     picker.selected = picker.selected.saturating_sub(5);
                 }
                 Ok(true)

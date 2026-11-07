@@ -1,4 +1,21 @@
 #[test]
+fn test_model_preview_navigation_preserves_selection_for_partial_spec() {
+    let mut app = create_test_app();
+    configure_test_remote_models(&mut app);
+    app.remote_available_entries = vec!["claude-sonnet-5".into(), "claude-opus-4.6".into()];
+    for c in "/model claude-".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty()).unwrap();
+    }
+    app.handle_key(KeyCode::Down, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert!(app.inline_interactive_state.as_ref().unwrap().navigated);
+    assert!(!app.dismiss_model_preview_for_direct_command());
+    app.input.push('x');
+    app.sync_model_picker_preview_from_input();
+    assert!(!app.inline_interactive_state.as_ref().unwrap().navigated);
+}
+
+#[test]
 fn test_model_preview_enter_submits_typed_spec_unchanged() {
     for model in ["openai:gpt-6.1-sol", "not-a-model", "gpt-5.4"] {
         let mut app = create_test_app();
