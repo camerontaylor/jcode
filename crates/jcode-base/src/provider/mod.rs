@@ -444,6 +444,12 @@ pub struct MultiProvider {
 }
 
 impl MultiProvider {
+    /// Preserve an explicit startup selection when the daemon forks new sessions.
+    /// Later session-local model changes remain unrestricted.
+    pub fn preserve_initial_selection(&mut self) {
+        self.initial_provider = Some(self.active_provider());
+    }
+
     fn bound_session_id(&self) -> Option<String> {
         self.session_id
             .read()
@@ -2081,6 +2087,28 @@ impl Provider for MultiProvider {
             if let Some(runtime) = runtime {
                 runtime.set_oauth_account(None)?;
             }
+        }
+
+        if let Some(target_model) = requested_model
+            .strip_prefix("azure-openai:")
+            .or_else(|| requested_model.strip_prefix("azure:"))
+        {
+            let target_model = target_model.trim();
+            if target_model.is_empty() {
+                anyhow::bail!("Azure model cannot be empty");
+            }
+            let registry = ProviderRegistry::new(self);
+            let provider = if let Some(provider) = registry.compatible_profile("azure-openai") {
+                provider
+            } else {
+                activation::apply_azure_openai_runtime()?;
+                external::instantiate_openrouter_runtime(external::OpenRouterRuntimeSpec::Default)?
+            };
+            provider.set_model(target_model)?;
+            registry.install_compatible_profile("azure-openai", provider);
+            registry.set_active_compatible_profile("azure-openai");
+            self.set_active_provider(ActiveProvider::OpenRouter);
+            return Ok(());
         }
 
         if let Some(target_model) = requested_model.strip_prefix("grok-build:") {

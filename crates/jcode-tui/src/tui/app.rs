@@ -1599,6 +1599,10 @@ pub struct App {
     model_picker_load_request_id: u64,
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
+    /// Explicit client CLI selection, applied after attaching to its target session.
+    startup_model: Option<String>,
+    startup_model_request_id: Option<u64>,
+    startup_model_requested_at: Option<Instant>,
     pending_route_selection: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_route: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_request_id: Option<u64>,
