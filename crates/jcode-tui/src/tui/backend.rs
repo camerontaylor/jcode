@@ -517,7 +517,7 @@ impl RemoteConnection {
         };
 
         match request {
-            Request::Cancel { id } => Some(base("cancel", *id)),
+            Request::Cancel { id, .. } => Some(base("cancel", *id)),
             Request::SoftInterrupt {
                 id,
                 content,
@@ -1137,6 +1137,7 @@ impl RemoteConnection {
     pub async fn cancel_with_reason(&mut self, reason: &'static str) -> Result<()> {
         let request = Request::Cancel {
             id: self.next_request_id,
+            turn: None,
         };
         self.next_request_id += 1;
         self.send_request_with_interrupt_trigger(request, Some(reason))
