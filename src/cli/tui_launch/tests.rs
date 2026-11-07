@@ -254,6 +254,10 @@ fn startup_model_flags_preserve_provider_and_explicit_route() {
         Some("openai:gpt-5.4".into())
     );
     assert_eq!(
+        crate::cli::provider_init::startup_model_spec(&ProviderChoice::Azure, Some("gpt-5.4")),
+        Some("azure-openai:gpt-5.4".to_string())
+    );
+    assert_eq!(
         crate::cli::provider_init::startup_model_spec(&ProviderChoice::Auto, None),
         None
     );

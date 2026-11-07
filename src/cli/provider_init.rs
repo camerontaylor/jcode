@@ -229,7 +229,12 @@ pub(crate) fn startup_model_spec(provider: &ProviderChoice, model: Option<&str>)
         if matches!(provider, ProviderChoice::Auto | ProviderChoice::Google) || explicit_route {
             model.to_string()
         } else {
-            format!("{}:{model}", provider.as_arg_value())
+            let prefix = if matches!(provider, ProviderChoice::Azure) {
+                "azure-openai"
+            } else {
+                provider.as_arg_value()
+            };
+            format!("{prefix}:{model}")
         }
     })
 }
