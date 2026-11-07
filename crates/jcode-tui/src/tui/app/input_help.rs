@@ -29,7 +29,7 @@ impl App {
                 "/cls\nClear the rendered view only. The model keeps its full context; nothing is sent or forgotten. (Ctrl+L clears the screen but keeps history in scrollback.)"
             }
             "model" => {
-                "/model\nOpen model picker.\n\n/model <name>\nSwitch model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin)."
+                "/model\nOpen model picker.\n\n/model <name>\nSwitch model.\n\n/model <provider>:<model>\nSelect a provider explicitly, e.g. /model openai:gpt-6.1-sol or /model copilot:gpt-5.\nUnavailable providers report an error and keep the current model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin)."
             }
             "provider-test-coverage"
             | "provider test coverage"
