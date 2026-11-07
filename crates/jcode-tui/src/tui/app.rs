@@ -1602,6 +1602,7 @@ pub struct App {
     /// Explicit client CLI selection, applied after attaching to its target session.
     startup_model: Option<String>,
     startup_model_request_id: Option<u64>,
+    startup_model_requested_at: Option<Instant>,
     pending_route_selection: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_route: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_request_id: Option<u64>,

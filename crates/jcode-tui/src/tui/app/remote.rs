@@ -1089,6 +1089,7 @@ pub(super) fn handle_disconnect(
     // queued prompt for reconnect, but release the transient model-setup gate so
     // it cannot remain blocked forever waiting for an event that was lost.
     app.finish_auth_catalog_refresh();
+    app.startup_model_requested_at = None;
     if app.startup_model_request_id.take().is_some() {
         app.remote_model_switch_in_flight = false;
     }
@@ -1384,6 +1385,15 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     // Wait for its History, then await the matching model acknowledgment before
     // any staged prompt can use the daemon's previous/default model.
     if app.startup_model_request_id.is_some() {
+        if app
+            .startup_model_requested_at
+            .is_some_and(|at| at.elapsed() >= Duration::from_secs(30))
+        {
+            app.cancel_startup_model();
+            app.push_display_message(DisplayMessage::error(
+                "Startup model selection timed out; prompt restored without sending.".to_string(),
+            ));
+        }
         return;
     }
     if app.startup_model.is_some() {
@@ -1394,6 +1404,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         match remote.set_model(&model).await {
             Ok(id) => {
                 app.startup_model_request_id = Some(id);
+                app.startup_model_requested_at = Some(Instant::now());
                 app.remote_model_switch_in_flight = true;
             }
             Err(error) => {

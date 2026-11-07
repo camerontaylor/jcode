@@ -9,12 +9,12 @@ impl App {
     pub(super) fn cancel_startup_model(&mut self) {
         self.startup_model = None;
         self.startup_model_request_id = None;
+        self.startup_model_requested_at = None;
         self.remote_model_switch_in_flight = false;
         self.submit_input_on_startup = false;
-        let prepared = self
-            .pending_prompt_after_model_switch
-            .take()
-            .or_else(|| self.pending_prompt_before_history.take());
+        let after = self.pending_prompt_after_model_switch.take();
+        let before = self.pending_prompt_before_history.take();
+        let prepared = after.or(before);
         if let Some(prepared) = prepared {
             remote::restore_prepared_remote_input(self, prepared);
         }
@@ -653,6 +653,7 @@ impl App {
             pending_model_switch: None,
             startup_model: None,
             startup_model_request_id: None,
+            startup_model_requested_at: None,
             pending_route_selection: None,
             pending_automatic_failover_route: None,
             pending_automatic_failover_request_id: None,
@@ -1140,6 +1141,7 @@ impl App {
             pending_model_switch: None,
             startup_model: None,
             startup_model_request_id: None,
+            startup_model_requested_at: None,
             pending_route_selection: None,
             pending_automatic_failover_route: None,
             pending_automatic_failover_request_id: None,

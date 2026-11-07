@@ -2687,6 +2687,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     return false;
                 }
                 app.startup_model_request_id = None;
+                app.startup_model_requested_at = None;
                 app.startup_model = None;
                 if error.is_some() {
                     app.cancel_startup_model();

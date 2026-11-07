@@ -1535,3 +1535,32 @@ fn startup_model_is_retried_after_disconnect_before_ack() {
     rt.block_on(process_remote_followups(&mut app, &mut remote));
     assert!(app.startup_model_request_id.is_some());
 }
+
+#[test]
+fn startup_model_timeout_restores_prompt_and_clears_both_pending_slots() {
+    let mut app = create_test_app();
+    app.set_startup_model(Some("openai-api:gpt-5.4".into()));
+    let prepared = |text: &str| crate::tui::app::input::PreparedInput {
+        raw_input: text.into(),
+        expanded: text.into(),
+        images: vec![],
+    };
+    app.pending_prompt_after_model_switch = Some(prepared("first"));
+    app.pending_prompt_before_history = Some(prepared("second"));
+    app.startup_model_request_id = Some(99);
+    app.startup_model_requested_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert_eq!(app.input, "first");
+    assert!(app.pending_prompt_after_model_switch.is_none());
+    assert!(app.pending_prompt_before_history.is_none());
+    assert!(app.startup_model.is_none());
+    assert!(app.startup_model_request_id.is_none());
+    assert!(!app.remote_model_switch_in_flight);
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert!(!app.is_processing);
+}

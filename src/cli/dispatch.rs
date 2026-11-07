@@ -900,7 +900,7 @@ async fn run_default_command(args: Args) -> Result<()> {
 
     if server_running && explicit_provider_or_model && args.model.is_none() {
         output::stderr_info(
-            "Server already running; use --model with --provider to select this session's model.",
+            "Server already running with its current provider settings; use --model with --provider to select this session's model. Restart the server to change its default provider.",
         );
     }
 
@@ -940,7 +940,11 @@ async fn run_default_command(args: Args) -> Result<()> {
     if std::env::var("JCODE_RESUMING").is_err() && server_running {
         output::stderr_info("Connecting to server...");
     }
-    let startup_model = provider_init::startup_model_spec(&args.provider, args.model.as_deref());
+    let startup_model = provider_init::startup_model_spec_with_profile(
+        &args.provider,
+        args.model.as_deref(),
+        args.provider_profile.as_deref(),
+    );
     tui_launch::run_tui_client(
         args.resume,
         startup_hints,
@@ -1224,10 +1228,13 @@ async fn detect_bootstrap_credentials() -> BootstrapCredentialState {
 
 pub(crate) async fn spawn_server(
     provider_choice: &ProviderChoice,
-    model: Option<&str>,
+    _model: Option<&str>,
     provider_profile: Option<&str>,
 ) -> Result<()> {
-    spawn_server_with_executable(provider_choice, model, provider_profile, None).await
+    // A shared daemon must boot for onboarding without credentials. The TUI
+    // applies its explicit model after Subscribe; owned one-shot servers still
+    // receive their model through spawn_server_with_lifetime.
+    spawn_server_with_executable(provider_choice, None, provider_profile, None).await
 }
 
 /// Lifecycle of a spawned `jcode serve` child.
