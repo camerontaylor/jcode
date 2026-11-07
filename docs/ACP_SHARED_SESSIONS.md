@@ -1,6 +1,14 @@
 # ACP Shared Sessions
 
-Status: Proposed (2026-11-04)
+Status: Implemented (2026-11-07, ported onto upstream turn identity at
+`v1.0.0-preview.199`; see [Port onto upstream turn identity](#port-onto-upstream-turn-identity-2026-11-07))
+
+The ACP-facing contract (`_jcode/turn`, `session/list`, `messageId`s) is as
+designed below. The daemon wire contract is not: D1's fork-specific
+`turn_started { turn_id: String }`, `History.server_features` and
+`History.active_turn` were replaced by upstream's `TurnIdentity` envelopes plus
+an additive origin extension. Deviations 34–47 describe the contract as it now
+stands and take precedence over the design sections and earlier deviations.
 
 Let an ACP client (Paseo, Zed, …) and any number of jcode TUI windows attach to
 the same live daemon session at once. Every attached client sees every turn,
@@ -87,6 +95,9 @@ Relevant code:
 ## Design
 
 ### D1. Daemon: turn lifecycle events (protocol, additive)
+
+> Superseded by upstream turn identity; see Deviations 34–37. Kept for the
+> rationale.
 
 Add two variants to `ServerEvent` (`crates/jcode-protocol/src/wire/events.rs`):
 
@@ -539,3 +550,128 @@ extend the numbered list above where they overlap.
     still renumbered by a compaction that rewrites the transcript, so ids for
     messages older than the retained tail can still move across a compaction;
     every other shift (render skipping, delta bases) no longer affects them.
+
+### Port onto upstream turn identity (2026-11-07)
+
+The fork was rebuilt on upstream `v1.0.0-preview.199`, whose daemon already
+fences turns with `TurnIdentity { runtime_generation, turn_id }`. The fork's
+parallel lifecycle (`turn_lifecycle_registry`, `TurnLifecycle`, string turn
+ids, `History.server_features`, `History.active_turn`) was dropped in favour of
+upstream's model plus a small additive origin extension
+(`docs/ACP_UPSTREAM_PORT_PLAN.md`). The ACP-facing contract is unchanged except
+where noted. These entries supersede the design sections and Deviations 1–33
+wherever they overlap.
+
+34. **Daemon wire contract.** Turns are announced and scoped by upstream's
+    events, extended additively: `turn_started { identity, origin?,
+    user_content? }`, every event of the turn (including its terminal) inside
+    `turn_event { identity, event }`, and the new `turn_ended { identity,
+    status: completed|failed|cancelled, message? }`, published exactly once per
+    turn immediately before the scoped terminal, on every exit path (normal,
+    error, panic, abort). `turn_state` (sent before every `History`) carries
+    the running turn's `active_origin` and `active_user_content`; it replaces
+    `History.active_turn`. Readers that do not subscribe with
+    `supports_turn_identity` get unwrapped events and never see
+    `turn_started`/`turn_ended`/`turn_state`. Supersedes D1, Deviations 1–3,
+    13, 27–29.
+35. **Capability via `Pong`.** The daemon advertises `"turn_origin"` only in
+    `Pong::capabilities`; there is no `History.server_features`. The adapter
+    sends `Ping` on each fresh connection before `Subscribe` (the daemon keeps
+    the connection open after a pre-subscribe `Ping`) and waits up to 5 s for
+    the answer. With the capability it subscribes with
+    `supports_turn_identity: true`; without it (or without an answer) it
+    subscribes flat and uses the legacy routing of D2.5. This was the least
+    disruptive choice: no protocol change, one extra round trip per
+    connection. Supersedes the `server_features` parts of D1 and D2.4.
+36. **`turnId` is `"{runtime_generation}:{turn_id}"`.** `_jcode/turn.turnId`
+    and the turn-scoped `messageId`s use this canonical string. The runtime
+    generation is a fresh UUID per agent runtime, so ids are unique across
+    daemon restarts without a per-boot nonce; it also changes when a runtime
+    is replaced (clear, cold resume), which a client must treat as a new turn.
+    Turn ids are monotonic per runtime but may have gaps (debug paths claim
+    ids without publishing). Supersedes Deviation 30. The `_jcode/turn` shape
+    (`sessionId`, `turnId`, `state`, `origin { kind, clientInstanceId }`,
+    `error { message }`) is unchanged.
+37. **Own vs peer, and fencing.** A turn is this connection's own when
+    `origin.kind == client`, `origin.client_instance_id` is the connection's
+    `acp-{uuid}/{n}` and `origin.request_id` is a pending prompt id
+    (Deviation 18 unchanged). The router classifies `turn_started`,
+    `turn_event`, `turn_ended` and `turn_state` by identity before anything is
+    unwrapped. It ports the TUI's fence: ids at or below the completed
+    watermark and anything from a retired generation are dropped, and a scoped
+    event is accepted only for the open own or peer turn. Unlike the TUI, a
+    `turn_started` from a generation the connection has never seen is adopted
+    (retiring the old one) rather than dropped, because the adapter has no
+    other way to recover a prompt the daemon accepted. An active turn in
+    `turn_state` without an origin (claimed but never announced) is not
+    mirrored.
+38. **Peer terminals are told apart by identity.** A peer's scoped terminal
+    carries its turn's identity, so the request-id marker scheme of
+    Deviations 5, 15 and 25 is gone: a terminal for a turn that is not our open
+    own turn is never delivered to a prompt. Upstream fans a turn's terminal
+    out to every attachment, including a cancelled turn's (the canceller's
+    connection additionally gets the cancel path's own `interrupted` and
+    `done`, and after a forced abort a requester can see two scoped `done`s);
+    the router drops the duplicates of a closed turn. Unscoped `done`/`error`
+    still route by pending request id (Deviation 10): a rejected prompt and
+    slash-command replies have no turn.
+39. **No queueing: a prompt during another turn is rejected.** Upstream turn
+    ownership is a non-blocking lease, so the daemon answers a `Message` sent
+    while any turn of the session runs with an unscoped `error` ("Already
+    processing a message") instead of queueing it on the agent mutex. The
+    adapter returns that error for the `session/prompt`; the running peer turn
+    keeps mirroring. Supersedes D4's first rule; the "queued prompt behind a
+    peer turn" cases of the router tests and the e2e scenario became
+    "rejected prompt during a peer turn".
+40. **Scoped cancel.** `session/cancel` sends `Cancel { turn: Some(identity) }`
+    for the turn this view shows running: its own, or the mirrored peer turn
+    (a stop in Paseo during a TUI turn still cancels it for every client). The
+    daemon ignores a scoped cancel whose turn already ended, so a late stop
+    cannot hit the next turn. With no turn known (a flat connection, or a
+    prompt not yet accepted as a turn) it is session-wide as before.
+    `session/close` sends a cancel only for this connection's own running
+    turn, scoped to it (D4, Deviation 16); a peer's turn is never cancelled by
+    a close. A cancelled own turn answers its prompt with stopReason
+    `cancelled`: the router hands the prompt an `interrupted` when its turn
+    ends `cancelled`, because the cancel path's own `interrupted` reaches the
+    canceller only after the turn's terminal.
+41. **Mid-turn attach.** The peer turn opens from `turn_state` (Deviation 9's
+    `History.active_turn` is gone). The re-announce check of Deviation 32 runs
+    when the first `History` arrives: if the replayed tail already contains the
+    prompt of a peer turn opened before it, the router emits
+    `PeerPromptReplayed` and the adapter drops the user chunk from the
+    announcement still held in the attach gate (Deviations 19, 23, 24
+    unchanged).
+42. **`/subagent` runs as a turn.** `RunSubagent` claims a regular turn lease,
+    so ownership serialises it with model turns (a launch during another turn
+    is rejected like a prompt) instead of holding the agent mutex
+    (Deviation 26). It publishes `turn_started` (client origin with the
+    requester's instance and request id), its scoped tool events, `turn_ended`
+    and the scoped terminal on the requesting connection only, and is
+    withdrawn from the attach snapshot so a peer attaching mid-launch does not
+    open a turn it will never see end. Validation happens before the lease.
+    The agent mutex is held only around transcript updates, and the swarm
+    spawn claims its own lease on the worker's runtime, so the launch cannot
+    deadlock with the spawn path. Supersedes Deviations 14 and 26.
+43. **Prompt text for peers.** The daemon still sends upstream's unscoped
+    `peer_user_message` to legacy readers; the adapter ignores it in favour of
+    `turn_started.user_content`, which has no ordering race with the turn.
+44. **Abort ends the turn everywhere.** A turn whose task is aborted after the
+    cancel grace period is still closed by the daemon's turn channel with
+    `turn_ended(cancelled)` and a scoped `done` for every attachment, so a
+    mirrored peer turn ends as `canceled` instead of running forever
+    (Deviation 13's guarantee, now in `TurnEventChannel`).
+45. **Cancel then prompt.** A stop aimed at another connection's turn arms the
+    session's cancel signal and clears it 500 ms later (upstream behaviour). A
+    prompt sent inside that window can start already cancelled. The e2e test
+    waits that window out; clients that send a prompt immediately after a stop
+    of a peer's turn may see it end at once as cancelled.
+46. **Router tests.** The router's scripted-event tests live in
+    `src/cli/acp/daemon_router_tests.rs`; the adapter tests (gate, usage,
+    close, instance ids, message ids, session/list) are in
+    `src/cli/acp/tests.rs` next to upstream's ACP tests. Expected ids use the
+    new `turnId` format.
+47. **Update channel unchanged.** The fork's switch of `GITHUB_REPO` to
+    `camerontaylor/jcode` (part of the original `/subagent` commit) was not
+    carried into this port; `jcode update` still follows upstream releases.
+
