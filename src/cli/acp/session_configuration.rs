@@ -71,7 +71,7 @@ pub(super) fn available_efforts(state: &SessionUiState) -> Vec<&str> {
     };
     efforts
         .into_iter()
-        .filter(|effort| jcode_provider_core::canonical_reasoning_effort(effort).is_some())
+        .filter(|effort| crate::provider::canonical_reasoning_effort(effort).is_some())
         .collect()
 }
 
@@ -88,7 +88,7 @@ pub(super) fn normalize_effort(state: &SessionUiState, requested: &str) -> Resul
         eprintln!("Warning: {warning}");
         return Ok(None);
     }
-    let selected = jcode_provider_core::closest_reasoning_effort(requested, &efforts)
+    let selected = crate::provider::closest_reasoning_effort(requested, &efforts)
         .ok_or_else(|| anyhow::anyhow!("Unknown reasoning effort: {requested}"))?;
     if !selected.eq_ignore_ascii_case(requested.trim()) {
         eprintln!("Warning: reasoning effort '{requested}' is unavailable; using '{selected}'");
@@ -123,11 +123,11 @@ pub(super) fn session_config_options(state: &SessionUiState) -> Vec<Value> {
 
     let efforts = available_efforts(state);
     if !efforts.is_empty() {
-        let current = jcode_provider_core::closest_reasoning_effort(
+        let current = crate::provider::closest_reasoning_effort(
             state.reasoning_effort.as_deref().unwrap_or("medium"),
             &efforts,
         )
-        .or_else(|| jcode_provider_core::closest_reasoning_effort("medium", &efforts))
+        .or_else(|| crate::provider::closest_reasoning_effort("medium", &efforts))
         .unwrap_or(efforts[0]);
         let select_options: Vec<Value> = efforts
             .iter()
