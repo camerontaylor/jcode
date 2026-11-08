@@ -56,7 +56,7 @@ observe it, plus a wire-level test:
 | P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek `5365c86a` (atlas, `acp-p1-meta`) | accepted, awaiting integration | `d335f2e7d`: 5 unit + 1 e2e wire test pass; sharedControl derived from daemon Pong caps (`SharedControlSupport::from_router`) |
 | P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | accepted, awaiting integration | `26c296a09` (review fixes: Interrupted queued inside locked revalidation, failing-first test `db810004f`); D1 `26ff594f2` on pr/turn-scoped-cancel, D2 `86db359cf` on pr/stale-cancel-flag; evidence `docs/verification/p1-cancel-race.md` |
 | T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | accepted, awaiting integration (after P0-ci green) | `4759e51b3`: 5 pass + 2 ignored contract gaps; 5/5 stable runs on triton |
-| P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs`; branch `fork/r1-single-lifecycle` off stage `47a130e98`; gate = 4 fixtures replay unmodified | Sol `7be2f4d6` (triton, `acp-r1-lifecycle`) | accepted in substance; merging stage `7e4acbee2` | `13eccbd12`: `TurnEnded` removed, scoped terminal `end`/`end_message`, adapter-owned local ends; fixtures unmodified; core diff 4476/296 -> 4457/304 (simpler, not much smaller) |
+| P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs`; branch `fork/r1-single-lifecycle` off stage `47a130e98`; gate = 4 fixtures replay unmodified | Sol `7be2f4d6` (triton, `acp-r1-lifecycle`) | accepted; stage fast-forwarded to `38fa8f3ee` | `13eccbd12`: `TurnEnded` removed, scoped terminal `end`/`end_message`, adapter-owned local ends; fixtures unmodified; core diff 4476/296 -> 4457/304 (simpler, not much smaller) |
 | P2-R2 | 2 | catalog facade in `jcode-harness-api-server`; branch `fork/r2-catalog-facade` off `fork/acp-conformance` | DeepSeek `1334bb53` (triton, `acp-r2-catalog`) | accepted, awaiting integration | `8a9e9e499`: catalog-path diff vs base 1,242 -> 113 lines (`translate.rs` 5/1, `session_files.rs` 0); fixture 01 replays unmodified; 199 harness + 92 acp lib + 5 conformance pass |
 | P3-corr | 3 | turn correlation `_meta.jcode.turnId` + `role`; branch `fork/acp-turn-correlation-detach` off `fork/acp-stage` | Sol `05e7eb9f` (triton, `acp-p3-corr-detach`) | accepted; in stage | `104604e23`: 100 ACP unit/router + 2 shared-session + 12 conformance pass; new fixtures 03, 04; 5x stable |
 | P3-detach | 3 | `_jcode/detach`; also v1 observer close must end an open peer bracket with `canceled` (T-conf gap `acp_conformance_observer_close_bracket_contract`); same lane as P3-corr | Sol `05e7eb9f` | accepted; in stage | core hook: `PrepareDisconnect.preserve_work` + capability `detach_preserve_work` (additive) |
@@ -284,3 +284,15 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   split vs mappings changes), rerun the full equivalence set, preserve the
   cancellation fix's ordering, and state mixed-version `turn_ended` decode.
   Plan: submit the merged R1 head to the queued review.
+- 2026-11-08: R1 merged the stage (`38fa8f3ee`): 17 conformance (4
+  fixtures unmodified), 4 shared-session, 71 ACP, 45 router, 58 lifecycle,
+  14 channel, 3/44/4 ownership/session/SDK, 199 harness, 10 protocol.
+  Cancellation notices stay synchronous under `cancel_active`'s lock; drain
+  takes the same lock before terminal publication (explicit ordering
+  assertions). Old-daemon `turn_ended` line is skipped without failing the
+  connection; following scoped terminal still processed. `fork/acp-stage`
+  fast-forwarded to `38fa8f3ee` = every accepted lane.
+- 2026-11-08: Queued review #2 submitted: `jcode-acp-r1-stage-38fa8f3ee`,
+  item `lr-b26eef738617-g1`, reviewedHead `38fa8f3ee6f4…`, target custom
+  (full stage diff vs custom), cwd triton `~/.cache/jcode-review-38fa8f3ee`.
+  Polling in background.
