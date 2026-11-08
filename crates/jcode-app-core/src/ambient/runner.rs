@@ -116,6 +116,7 @@ impl AmbientRunnerHandle {
                 urgent: false,
                 source: SoftInterruptSource::User,
                 client_id: None,
+                transport_owner: None,
             });
             logging::info(&format!(
                 "{} message injected into active ambient cycle: {}",

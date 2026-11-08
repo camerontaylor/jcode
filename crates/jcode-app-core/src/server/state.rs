@@ -717,17 +717,30 @@ pub(super) fn enqueue_soft_interrupt_with_id(
     source: SoftInterruptSource,
     client_id: Option<String>,
 ) -> bool {
-    let content_bytes = content.len();
-    let content_chars = content.chars().count();
-    if let Ok(mut pending) = queue.lock() {
-        let pending_before = pending.len();
-        pending.push(SoftInterruptMessage {
+    enqueue_soft_interrupt_message(
+        queue,
+        SoftInterruptMessage {
             content,
             images,
             urgent,
             source,
             client_id,
-        });
+            transport_owner: None,
+        },
+    )
+}
+
+pub(super) fn enqueue_soft_interrupt_message(
+    queue: &SoftInterruptQueue,
+    message: SoftInterruptMessage,
+) -> bool {
+    let content_bytes = message.content.len();
+    let content_chars = message.content.chars().count();
+    let source = message.source;
+    let urgent = message.urgent;
+    if let Ok(mut pending) = queue.lock() {
+        let pending_before = pending.len();
+        pending.push(message);
         crate::logging::info(&format!(
             "SOFT_INTERRUPT_QUEUE_PUSH source={:?} urgent={} content_bytes={} content_chars={} pending_before={} pending_after={}",
             source,
@@ -842,6 +855,29 @@ impl SessionControlHandle {
             source,
             client_id,
         )
+    }
+
+    pub(super) fn queue_transport_input(&self, message: SoftInterruptMessage) -> bool {
+        enqueue_soft_interrupt_message(&self.soft_interrupt_queue, message)
+    }
+
+    pub(super) fn shares_pending_queue(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.soft_interrupt_queue, &other.soft_interrupt_queue)
+    }
+
+    /// Injection drains under this same lock. Already-inserted work is untouched.
+    pub(super) fn withdraw_transport_input(&self, owner: &str) {
+        if let Ok(mut pending) = self.soft_interrupt_queue.lock() {
+            pending.retain(|message| message.transport_owner.as_deref() != Some(owner));
+        }
+        if let Err(error) =
+            crate::soft_interrupt_store::remove_by_transport_owner(&self.session_id, owner)
+        {
+            crate::logging::warn(&format!(
+                "Failed to withdraw disconnected input for {}: {error}",
+                self.session_id
+            ));
+        }
     }
 
     /// Soft interrupts queued and not yet injected.
@@ -1077,6 +1113,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
                 urgent,
                 source,
                 client_id: None,
+                transport_owner: None,
             },
         )
         .map(|_| true)

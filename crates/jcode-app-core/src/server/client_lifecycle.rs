@@ -62,7 +62,9 @@ use crate::tool::Registry;
 use crate::transport::Stream;
 use anyhow::Result;
 use futures::FutureExt;
-use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource, StreamError};
+use jcode_agent_runtime::{
+    InterruptSignal, SoftInterruptMessage, SoftInterruptSource, StreamError,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{
@@ -386,6 +388,8 @@ pub(super) async fn handle_client(
     let mut processing_message_id: Option<u64> = None;
     let mut processing_session_id: Option<String> = None;
     let mut current_client_instance_id: Option<String> = None;
+    // Capture original queues: this transport can switch sessions before closing.
+    let mut admitted_input_controls: Vec<SessionControlHandle> = Vec::new();
     // App name from the API Hello, used to enable mobile push per session.
     let mut connection_client_name: Option<String> = None;
     let mut continue_on_disconnect = false;
@@ -1316,15 +1320,18 @@ pub(super) async fn handle_client(
                         }
                     }
                 } else {
-                    queue_soft_interrupt(
+                    let admitted = queue_soft_interrupt(
                         id,
-                        content,
-                        images,
-                        urgent,
-                        client_id,
+                        SoftInterruptMessage {
+                            content, images, urgent, source: SoftInterruptSource::User,
+                            client_id, transport_owner: Some(client_connection_id.clone()),
+                        },
                         &session_control,
                         &client_event_tx,
                     );
+                    if admitted && !admitted_input_controls.iter().any(|control| control.shares_pending_queue(&session_control)) {
+                        admitted_input_controls.push(session_control.clone());
+                    }
                 }
             }
 
@@ -3306,6 +3313,10 @@ pub(super) async fn handle_client(
 
     Ok(())
     }.await;
+
+    for control in admitted_input_controls {
+        control.withdraw_transport_input(&client_connection_id);
+    }
 
     drop(_sdk_connection_guard);
 

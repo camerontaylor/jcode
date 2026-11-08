@@ -183,3 +183,79 @@ async fn queue_soft_interrupt_for_session_persists_when_live_queue_is_unavailabl
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+#[test]
+fn transport_loss_withdraws_only_owned_queued_input() {
+    use super::state::SessionControlHandle;
+    use jcode_agent_runtime::{InterruptSignal, SoftInterruptMessage};
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only("owned", queue.clone(), InterruptSignal::new());
+    let input = |owner: &str, content: &str| SoftInterruptMessage {
+        content: content.into(),
+        images: vec![],
+        urgent: false,
+        source: SoftInterruptSource::User,
+        client_id: Some("reused-opaque-id".into()),
+        transport_owner: Some(owner.into()),
+    };
+    assert!(control.queue_transport_input(input("closed", "already injected")));
+    let injected = queue.lock().unwrap().remove(0);
+    assert!(control.queue_transport_input(input("closed", "withdraw")));
+    assert!(control.queue_transport_input(input("live", "preserve")));
+    crate::soft_interrupt_store::overwrite("owned", &queue.lock().unwrap()).unwrap();
+    let other_queue = Arc::new(std::sync::Mutex::new(vec![input(
+        "closed",
+        "other session",
+    )]));
+    let other =
+        SessionControlHandle::cancel_only("other", other_queue.clone(), InterruptSignal::new());
+    assert!(!control.shares_pending_queue(&other));
+    assert!(control.shares_pending_queue(&control.clone()));
+    // Captured control remains correct even if the connection now targets another session.
+    let captured = control.clone();
+    captured.withdraw_transport_input("closed");
+    assert_eq!(injected.content, "already injected");
+    assert_eq!(queue.lock().unwrap()[0].content, "preserve");
+    assert_eq!(queue.lock().unwrap().len(), 1);
+    assert_eq!(other_queue.lock().unwrap()[0].content, "other session");
+    let disk = crate::soft_interrupt_store::load("owned").unwrap();
+    assert_eq!(disk.len(), 1);
+    assert_eq!(disk[0].transport_owner.as_deref(), Some("live"));
+    // Reconnection has a new daemon-generated owner, even with identical caller IDs.
+    assert!(control.queue_transport_input(input("reconnected", "new transport")));
+    captured.withdraw_transport_input("closed");
+    assert_eq!(queue.lock().unwrap().len(), 2);
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn rejected_transport_input_is_not_admitted() {
+    use super::state::SessionControlHandle;
+    use jcode_agent_runtime::{InterruptSignal, SoftInterruptMessage};
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let poisoned = queue.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoned.lock().unwrap();
+        panic!("poison queue");
+    })
+    .join();
+    let control =
+        SessionControlHandle::cancel_only("rejected", queue.clone(), InterruptSignal::new());
+    assert!(!control.queue_transport_input(SoftInterruptMessage {
+        content: "rejected".into(),
+        images: vec![],
+        urgent: false,
+        source: SoftInterruptSource::User,
+        client_id: None,
+        transport_owner: Some("closed".into()),
+    }));
+    assert!(queue.lock().unwrap_err().into_inner().is_empty());
+}

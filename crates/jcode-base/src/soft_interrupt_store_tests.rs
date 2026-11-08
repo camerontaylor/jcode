@@ -16,6 +16,7 @@ fn append_take_and_clear_round_trip() {
             urgent: true,
             source: SoftInterruptSource::System,
             client_id: None,
+            transport_owner: None,
         },
     )
     .expect("append first interrupt");
@@ -27,6 +28,7 @@ fn append_take_and_clear_round_trip() {
             urgent: false,
             source: SoftInterruptSource::BackgroundTask,
             client_id: None,
+            transport_owner: None,
         },
     )
     .expect("append second interrupt");
@@ -49,6 +51,7 @@ fn append_take_and_clear_round_trip() {
             urgent: false,
             source: SoftInterruptSource::User,
             client_id: None,
+            transport_owner: None,
         },
     )
     .expect("append later interrupt");
@@ -64,6 +67,7 @@ fn append_take_and_clear_round_trip() {
                 urgent: false,
                 source: SoftInterruptSource::User,
                 client_id: client_id.map(str::to_string),
+                transport_owner: None,
             },
         )
         .expect("append id-bearing interrupt");
@@ -82,4 +86,16 @@ fn append_take_and_clear_round_trip() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[test]
+fn legacy_pending_input_has_no_transport_owner() {
+    let legacy: PersistedSoftInterrupt = serde_json::from_str(
+        r#"{"content":"keep","urgent":false,"source":"user","client_id":"same"}"#,
+    )
+    .unwrap();
+    let message = SoftInterruptMessage::from(legacy);
+    assert_eq!(message.transport_owner, None);
+    let serialized = serde_json::to_value(PersistedSoftInterrupt::from(message)).unwrap();
+    assert!(serialized.get("transport_owner").is_none());
 }

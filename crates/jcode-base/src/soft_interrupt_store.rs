@@ -12,6 +12,8 @@ struct PersistedSoftInterrupt {
     source: PersistedSoftInterruptSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transport_owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -50,6 +52,7 @@ impl From<SoftInterruptMessage> for PersistedSoftInterrupt {
             urgent: value.urgent,
             source: value.source.into(),
             client_id: value.client_id,
+            transport_owner: value.transport_owner,
         }
     }
 }
@@ -62,6 +65,7 @@ impl From<PersistedSoftInterrupt> for SoftInterruptMessage {
             urgent: value.urgent,
             source: value.source.into(),
             client_id: value.client_id,
+            transport_owner: value.transport_owner,
         }
     }
 }
@@ -140,6 +144,17 @@ pub fn remove_by_client_ids(session_id: &str, client_ids: &[String]) -> Result<V
         overwrite(session_id, &current)?;
     }
     Ok(removed)
+}
+
+/// Remove only input admitted by this daemon transport, regardless of caller IDs.
+pub fn remove_by_transport_owner(session_id: &str, owner: &str) -> Result<()> {
+    let mut current = load(session_id)?;
+    let before = current.len();
+    current.retain(|message| message.transport_owner.as_deref() != Some(owner));
+    if current.len() != before {
+        overwrite(session_id, &current)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
