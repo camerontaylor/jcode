@@ -59,3 +59,6 @@ No timer sleeps establish protocol ordering.
 
 Wire tests also exercise observer detach, queued-input withdrawal, adopted-steer detach,
 parameter errors and observer-close brackets. All contract-gap tests are enabled.
+
+Number 06 is intentionally absent: acceptance scenario 6 in the contract is
+the deferred v2 delivery track, not a missing v1 recording.

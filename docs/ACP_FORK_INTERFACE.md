@@ -108,11 +108,13 @@ advertised metadata below.
 
 ## Transport and feature discovery
 
+<!-- [C-TRANSPORT-1] -->
 Use the existing `jcode acp` stdio transport and ACP framing. Stdout contains
 protocol traffic; diagnostics go elsewhere. One connection negotiates one
 ACP version. Session IDs identify daemon conversations shared with TUI and
 other ACP connections; attaching does not take ownership away from peers.
 
+<!-- [C-PROFILE-1] -->
 Profiles `standard`, `extended` and `full` remain presentation choices.
 Essential shared control and feature discovery work in every profile.
 `extended` and `full` additionally expose raw diagnostic events.
@@ -177,6 +179,7 @@ in each successful new/load/resume response at `result._meta.jcode`:
 }
 ```
 
+<!-- [C-CAPS-1] -->
 All four fields are booleans. `implicitSteering` is v1-only and is false in
 v2. True means the whole behavior is usable on this attachment, including
 required daemon support. Missing/false means unavailable, not an invitation
@@ -218,6 +221,7 @@ unknown, false means not live at the snapshot. It is not a running/idle flag.
 Working-directory filters use canonical paths. Treat pagination cursors as
 opaque and do not assume a fixed page size or a transactional listing.
 
+<!-- [C-REPLAY-1] -->
 V1 replay preserves stored-message grouping but live and replay IDs are not
 guaranteed identical. On reload, rebuild the replayed transcript instead of
 merging it with a cached live transcript by guessed ID equivalence. In v2,
@@ -228,6 +232,7 @@ across a broken connection. Do not automatically resend an uncertain prompt.
 
 ## Shared control semantics
 
+<!-- [C-STOP-1] -->
 There is one execution authority and one authoritative insertion order per
 daemon session, including submissions from TUI and multiple ACP adapters.
 Observing or steering a peer turn does not transfer ownership of it.
@@ -242,6 +247,7 @@ active must not arm cancellation for future work.
 | Close | Withdraw this attachment's waiting steers; cancel only its owned turn; adopted/peer turn continues | Sole live attachment: standard close, stopping all session work. Peers present: withdraw this attachment's pending input, cancel only work it originated, finish its final updates, detach; adopted/peer-origin turns continue |
 | Transport loss | Withdraw this connection's pending input; preserve already-inserted shared work as the target policy | Same |
 
+<!-- [C-CLOSE-1] -->
 A client must not send `session/cancel` as a generic step before close or
 teardown. V1 close is already owner-aware: it cancels this attachment's own
 turn and leaves adopted and peer turns running. A cancel issued first turns
@@ -292,11 +298,13 @@ Request, in either version:
 {"jsonrpc":"2.0","id":30,"method":"_jcode/detach","params":{"sessionId":"s1"}}
 ```
 
+<!-- [C-DETACH-1] -->
 Success result is `{}`. Detach removes this connection's attachment only,
 withdraws its never-inserted input, and releases its subscriptions. It does
 not cancel already-inserted work, even work originally started here, and it
 does not remove stored history or other attachments.
 
+<!-- [C-DETACH-2] -->
 Before answering, settle this attachment's pending prompt requests. In v1,
 finish outstanding prompt waits with `stopReason: "cancelled"`; this means
 the local wait ended, not that shared execution stopped. Close any open
@@ -305,18 +313,21 @@ receive `-32800`; already-inserted ones retain a successful insertion result.
 Do not invent a session-wide idle transition for a detach. No session updates
 are sent on this attachment after the detach response. Resume to attach again.
 
+<!-- [C-DETACH-3] -->
 Repeated detach of an already-detached session returns `{}`. Invalid parameter
 shapes return `-32602`; an unadvertised extension returns `-32601`. The client
 must require effective `sharedControl.detach` before calling it.
 
 ## V1 steering and peer lifecycle
 
+<!-- [C-STEER-1] -->
 Preserve implicit steering when `sharedControl.implicitSteering` is true.
 A normal prompt sent during active work is inserted at a safe point in that
 turn. A prompt sent while idle starts work. Several outstanding requests may
 share a turn, but each receives its own final response. Usage/output must
 not be counted again for every request sharing that turn.
 
+<!-- [C-STEER-2] -->
 When steering joins a peer turn, the existing adoption behavior remains:
 the connection follows its remaining output and resolves the prompt at turn
 end. An already-open peer bracket still receives exactly one terminal;
@@ -327,6 +338,7 @@ own-echo change to v2 rather than creating another v1 behavior mode.
 
 ### Turn correlation on prompt responses
 
+<!-- [C-CORRELATION-1] -->
 With `turn_correlation` advertised, successful v1 `session/prompt` results
 carry, beside `stopReason`:
 
@@ -347,15 +359,18 @@ carry, beside `stopReason`:
   were following, with `stopReason: "cancelled"`; the shared turn may be
   continuing.
 
+<!-- [C-CORRELATION-2] -->
 When work runs without a daemon turn identity (including legacy daemons without
 `turn_origin`), omit `_meta.jcode` turn correlation: absence means unknown,
 whereas `role: "none"` means no turn ran.
 
+<!-- [C-BUSY-1] -->
 Busy rejections keep the legacy JSON-RPC error: there is no result, so no
 `_meta` turn correlation.
 
 This is informational. A client that ignores it gets today's behavior.
 
+<!-- [C-BUSY-2] -->
 Without effective implicit steering, do not offer it. Busy requests may fail
 as in the legacy implementation. Do not introduce `delivery` or
 `_meta.jcode.delivery` on v1. Queueing UI may hold unsent text locally, but
@@ -369,15 +384,20 @@ Existing agent-to-client notification, unchanged:
 {"jsonrpc":"2.0","method":"_jcode/turn","params":{"sessionId":"s1","turnId":"opaque-turn-id","state":"started","origin":{"kind":"client","clientInstanceId":"opaque-peer-id"}}}
 ```
 
+<!-- [C-PEER-1] -->
 - `state`: `started`, `completed`, `failed`, or `canceled` (one `l`).
+<!-- [C-PEER-2] -->
 - `origin` accompanies start. `kind` is currently `client`, `swarm`,
   `background`, `relay`, or `debug`; display unknown future values generically.
   `clientInstanceId` is optional. Do not infer TUI versus ACP from its spelling.
 - A failure can include `error: {"message":"..."}`.
+<!-- [C-PEER-3] -->
 - IDs are opaque. A start precedes its peer output and one terminal follows
   that output. Mid-turn attachment opens the observed active bracket.
+<!-- [C-PEER-4] -->
 - This is a peer-view bracket, not a lifecycle event for every own prompt.
   A local close/detach can end the bracket while the shared turn continues.
+<!-- [C-PEER-5] -->
 - Peer content arrives through ordinary `session/update`; the bracket carries
   attribution/lifecycle only. Continue reading notifications while no request
   is outstanding. Do not count adoption as a second turn.
@@ -441,6 +461,7 @@ needed. Historical items may omit origin and turn association when not stored.
 
 ## Configuration, commands and skills
 
+<!-- [C-CONFIG-1] -->
 Use config options as the primary structured model/effort interface:
 
 - Option identifiers remain `model` and `reasoning_effort`. Use the negotiated
@@ -488,6 +509,7 @@ Canonical explicit skill selection is prompt metadata:
 {"_meta":{"jcode":{"skill":"skill-name"}}}
 ```
 
+<!-- [C-SKILL-1] -->
 `skill_selection` advertises this field. It takes precedence over textual
 `/skill-name` or `$skill-name` recognition. Existing metadata aliases remain
 v1 compatibility only. Unknown/path-like slash text remains conversational
@@ -587,6 +609,7 @@ Both implementations should exercise the same observable scenarios. Scenarios
 
 ### Fixture corpus
 
+<!-- [C-CORPUS-1] -->
 The executable form of these scenarios is the corpus in `tests/fixtures/acp/`
 of the jcode repository, versioned with this file:
 
