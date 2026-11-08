@@ -1175,3 +1175,15 @@ pub enum ServerEvent {
         tool_call_id: String,
     },
 }
+
+impl ServerEvent {
+    /// Scope an event to a turn without marking it as the terminal event.
+    pub fn scoped(identity: TurnIdentity, event: ServerEvent) -> Self {
+        Self::TurnEvent {
+            end: None,
+            end_message: None,
+            identity,
+            event: Box::new(event),
+        }
+    }
+}

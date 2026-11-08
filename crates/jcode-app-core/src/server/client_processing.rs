@@ -503,12 +503,7 @@ pub(super) async fn cancel_processing_message_for_turn(
     // Revalidate and signal together, after publication awaits. Even an
     // unscoped Stop targets the turn observed at dispatch, never its successor.
     let scoped = |event| match &identity {
-        Some(identity) => ServerEvent::TurnEvent {
-            end_message: None,
-            end: None,
-            identity: identity.clone(),
-            event: Box::new(event),
-        },
+        Some(identity) => ServerEvent::scoped(identity.clone(), event),
         None => event,
     };
     let cancel_start = Instant::now();
