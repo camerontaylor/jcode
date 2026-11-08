@@ -99,7 +99,7 @@ pub(super) enum PendingKind {
 /// Adapter-local delivery, never serialized on the daemon wire.
 #[derive(Debug, Clone)]
 pub(super) enum RoutedEvent {
-    Event(ServerEvent),
+    Event(Box<ServerEvent>),
     LocalTurnEnd {
         identity: TurnIdentity,
         status: TurnEndStatus,
@@ -1188,7 +1188,7 @@ impl RouterState {
             ));
             return;
         };
-        if let Err(error) = pending.tx.send(RoutedEvent::Event(event)) {
+        if let Err(error) = pending.tx.send(RoutedEvent::Event(Box::new(event))) {
             crate::logging::debug(&format!("acp: prompt receiver disconnected: {error}"));
         }
     }

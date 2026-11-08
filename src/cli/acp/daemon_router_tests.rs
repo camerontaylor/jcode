@@ -146,7 +146,7 @@ fn drain_with_ends(
     let mut ends = Vec::new();
     while let Ok(event) = rx.try_recv() {
         match event {
-            RoutedEvent::Event(event) => events.push(event),
+            RoutedEvent::Event(event) => events.push(*event),
             RoutedEvent::LocalTurnEnd {
                 identity, status, ..
             } => ends.push((events.len(), identity, status)),
@@ -950,9 +950,6 @@ fn a_live_peer_turn_always_announces_its_prompt() {
             .is_empty()
     );
 }
-
-/// The in-flight prompt may not be the very last replayed message (a tool
-/// loop persists results after it), so the check looks at the tail.
 
 #[path = "daemon_router_tests/settlement.rs"]
 mod settlement;

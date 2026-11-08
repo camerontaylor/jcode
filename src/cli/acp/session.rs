@@ -922,7 +922,7 @@ pub(super) async fn probe_capabilities(session: &Arc<DaemonSession>) -> Result<D
 /// forever.
 pub(super) async fn next_routed(rx: &mut RoutedReceiver) -> Result<ServerEvent> {
     match rx.recv().await {
-        Some(RoutedEvent::Event(event)) => Ok(event),
+        Some(RoutedEvent::Event(event)) => Ok(*event),
         Some(RoutedEvent::LocalTurnEnd { .. }) => {
             anyhow::bail!("unexpected local turn end on a helper reply")
         }

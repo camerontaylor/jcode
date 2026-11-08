@@ -36,9 +36,6 @@ pub(super) fn turn_origin_kind(origin: &TurnOrigin) -> &'static str {
     }
 }
 
-/// Randomness without a new dependency: `RandomState` is seeded from OS
-/// entropy per instance, so hashing distinct inputs gives unrelated values.
-
 /// `session/update` for the prompt that started a mirrored peer turn.
 pub(super) fn peer_user_message_chunk(session_id: &str, turn_id: &str, content: &str) -> Value {
     user_message_chunk(session_id, format!("{session_id}:{turn_id}:user"), content)

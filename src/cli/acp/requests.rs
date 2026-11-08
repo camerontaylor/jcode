@@ -26,14 +26,6 @@ pub(super) fn compatibility_option_value(
         })
 }
 
-/// `agentCapabilities._meta.jcode`: the adapter-side capability metadata.
-///
-/// `interfaceVersion` versions the jcode extensions, not ACP or the daemon
-/// protocol. Only extensions this build actually honors are listed:
-/// every extension named in the contract's v1 profile is honored here.
-/// `sessionMcpServers` is false because client-supplied session MCP servers are
-/// accepted, declared unsupported here, and reported by one notice.
-
 /// `session/list` page size.
 pub(super) const SESSION_LIST_PAGE: usize = 50;
 

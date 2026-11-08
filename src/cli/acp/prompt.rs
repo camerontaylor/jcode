@@ -181,7 +181,7 @@ impl AcpRuntime {
                 }
             };
             let event = match delivery {
-                RoutedEvent::Event(event) => event,
+                RoutedEvent::Event(event) => *event,
                 RoutedEvent::LocalTurnEnd {
                     identity,
                     status,
