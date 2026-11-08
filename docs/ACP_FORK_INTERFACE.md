@@ -1,10 +1,12 @@
 # Jcode fork ACP interface contract
 
-Status: implementation target, 2026-11-08. This defines the interface after
-roadmap phases 1–5, before optional phase 6 features. It is a contract for the
-jcode fork and its consuming tool to implement independently, not a claim that
-the current binary implements the additions below. Baseline inspected:
-`f5e45624c`.
+Status: implementation target, 2026-11-08, revision 2 (amended the same day:
+`mcpServers` handling, v2 close on shared sessions, the v2 rollout switch,
+pinned reference copies and the named consumer). This defines the interface
+after roadmap phases 1–5, before optional phase 6 features. It is a contract
+for the jcode fork and its consuming tool, Paseo, to implement independently,
+not a claim that the current binary implements the additions below. Baseline
+inspected: `f5e45624c`.
 
 Preserve existing v1 clients and ACP/TUI shared control. Add negotiated v2
 alongside v1, with explicit delivery and standard lifecycle semantics. Keep
@@ -40,11 +42,19 @@ defines jcode choices and extensions rather than copying the specifications.
   Deviations 34–49; [gap research](ACP_V2_GAP_HANDOVER.md);
   [fork boundary strategy](FORK_BOUNDARY_STRATEGY.md).
 
+Verbatim copies of the pinned v2 documents, v2 schema, delivery RFD and
+their license are kept in [`docs/acp-pins/`](acp-pins/README.md) with
+SHA-256 hashes. The RFD is hosted on a personal fork of the spec repository
+and may disappear; the copies, not the URLs, are the durable target. The
+draft label `2.0.0-alpha.13` does not appear inside the pinned files; it was
+inferred from release dates, so the commit hashes and file hashes are the
+pin, not that label.
+
 For the target implementation, this document supersedes recommendations in
 the reports where they differ. The reports remain useful evidence. Official
 definitions govern standard operations; the named RFD governs explicit v2
 delivery. A future spec revision does not silently change the pinned target:
-update this contract and both implementations together.
+update this contract, the pinned copies and both implementations together.
 
 ## Delivery stages
 
@@ -55,7 +65,8 @@ update this contract and both implementations together.
 | Reasoning, plans, tool metadata | Incomplete mapping | Surface data the daemon already provides |
 | Capability metadata described below | Mostly absent | Added in every profile |
 | Detach without cancelling owned work | Not a distinct operation | `_jcode/detach` |
-| ACP v2 and explicit steer/queue | Not implemented | Negotiated, initially behind a flag |
+| ACP v2 and explicit steer/queue | Not implemented | Negotiated, initially behind the `[acp] v2` switch |
+| Client-supplied `mcpServers` | Accepted and silently ignored | Accepted, declared unsupported in metadata, reported by notice |
 | v2 turn attribution metadata | Not implemented | Added as specified below |
 
 The new client should implement v2 plus a v1 fallback. Full target support
@@ -73,6 +84,14 @@ Profiles `standard`, `extended` and `full` remain presentation choices.
 Essential shared control and feature discovery work in every profile.
 `extended` and `full` additionally expose raw diagnostic events.
 
+V2 negotiation is controlled by a rollout switch that follows the profile
+convention: configuration key `v2` in the `[acp]` table (boolean, default
+`false`) with environment override `JCODE_ACP_V2` (`1`/`true` enables). Off
+means the adapter negotiates v1 only, as today. On means v2 is offered and
+v1 remains available on the same executable. There is no CLI flag. Remove
+the switch, defaulting v2 on, only when the pinned draft is superseded by a
+stable v2 and this contract is re-pinned.
+
 ### Jcode capability metadata
 
 New target metadata lives at `agentCapabilities._meta.jcode` in the v1
@@ -82,12 +101,15 @@ initialize result and `capabilities._meta.jcode` in v2. Example for v1:
 {
   "interfaceVersion": 1,
   "profile": "standard",
-  "extensions": ["shared_control", "peer_turns", "skill_selection"]
+  "extensions": ["shared_control", "peer_turns", "skill_selection"],
+  "sessionMcpServers": false
 }
 ```
 
 `interfaceVersion` versions the jcode extensions defined here, not ACP or
-the daemon protocol. Unknown extension names and metadata keys are ignored.
+the daemon protocol. `sessionMcpServers` states whether client-supplied
+`mcpServers` are connected for the session; see the MCP section below. It
+exists because ACP v1 has no standard way to declare stdio MCP unsupported. Unknown extension names and metadata keys are ignored.
 Additive keys do not require a version bump; incompatible semantics do.
 The extensions array retains the existing `raw_server_event` name where
 that profile enables it. In v2, replace `peer_turns` with `turn_metadata`.
@@ -134,7 +156,7 @@ legacy behavior; new consumers must not send new extensions to those binaries.
 | Attach without replay | Advertised `session/resume` | `session/resume` without `replayFrom` |
 | Prompt | Response ends the prompt's work, with v1 stop reason | Standard insertion response; completion through state updates |
 | Cancel | Existing jcode Stop semantics below | Standard baseline cancellation; RFD exception for delivery prompts |
-| Close | Existing owner-aware close below | Standard v2 close, including its cancellation and final-update requirements |
+| Close | Existing owner-aware close below | Standard v2 close when this is the sole live attachment; attachment-scoped close when peers are present (see below) |
 | Config | `session/set_config_option` | Standard v2 config route and typed selectors |
 | Detach view | `_jcode/detach` | `_jcode/detach` |
 
@@ -164,13 +186,43 @@ active must not arm cancellation for future work.
 | --- | --- | --- |
 | Stop | Withdraw this attachment's waiting steers, then stop its observed turn | Stop the active turn; explicit delivery prompts follow the RFD, ordinary held prompts follow baseline v2 |
 | Leave without stopping | `_jcode/detach` | `_jcode/detach` |
-| Close | Withdraw this attachment's waiting steers; cancel only its owned turn; adopted/peer turn continues | Standard close stops session work, including peer-origin work; use detach to leave it running |
+| Close | Withdraw this attachment's waiting steers; cancel only its owned turn; adopted/peer turn continues | Sole live attachment: standard close, stopping all session work. Peers present: withdraw this attachment's pending input, cancel only work it originated, finish its final updates, detach; adopted/peer-origin turns continue |
 | Transport loss | Withdraw this connection's pending input; preserve already-inserted shared work as the target policy | Same |
 
-V2 close is intentionally different from the existing v1 close. The client
-must distinguish **leave view** from **stop and close session**. It must never
-implement ordinary window closure by blindly issuing v2 `session/close`.
-Standard close does not grant permission to delete stored history.
+### V2 close on a shared session
+
+The pinned v2 draft says closing "tells the Agent to cancel any ongoing work
+for a session", and separately that "whether a session can be active on more
+than one connection at once is up to the Agent". Jcode sessions are shared
+with the TUI and other ACP connections, so a literal reading would let any
+standard v2 client stop a TUI user's turn by closing a window. Revision 1 of
+this contract accepted that and required clients to call `_jcode/detach`
+instead; a third-party client cannot know to. The rule is now:
+
+- **Sole live attachment.** Standard v2 close applies in full: cancel
+  foreground work as `session/cancel` would, send its final updates and the
+  idle `state_update` with `stopReason: "cancelled"`, answer never-inserted
+  prompts with `-32800`, stop background work, respond `{}`, then send
+  nothing further for the session on this connection.
+- **Other live attachments exist.** Close is attachment-scoped. Cancel only
+  turns this attachment originated and still owns, withdraw its pending
+  input (`-32800` for never-inserted prompts), send the final updates and
+  idle state for anything it cancelled, release its subscriptions and
+  respond `{}`. Adopted and peer-origin turns continue. The session stays
+  active for the peers; the standard "ends it on the connection but doesn't
+  discard it" wording still holds for this connection.
+- In both cases close is idempotent and a missing or inactive session
+  returns the same empty result.
+
+This is a documented deviation from the literal draft, consistent with the
+owner-aware v1 close and with the shared-session authority rules above.
+`_jcode/detach` remains the operation for leaving without stopping anything,
+including work this attachment started. Paseo still distinguishes **leave
+view** from **stop and close session**; the deviation protects clients that
+do not. Standard close never grants permission to delete stored history.
+If a client needs "stop everything regardless of peers", that is
+`session/cancel` on the shared turn followed by close, and it is a product
+decision in the client, not a default.
 
 ### Detach extension
 
@@ -396,10 +448,30 @@ must not present a nonfunctional Approve button or infer consent from a prompt.
 If work requires an unavailable approval interaction, report the condition
 clearly; implementing a new ACP approval flow is separate scope.
 
-Client-supplied session MCP servers remain unsupported. Empty `mcpServers`
-works; nonempty unsupported input is rejected before session creation/attach,
-with `-32602`, rather than silently ignored. Daemon-configured MCP tools remain
-usable. Treat this as a deliberate correction to the current v1 leniency.
+Client-supplied session MCP servers remain unconnected before phase 6, but
+the field stays **accepted**. Revision 1 required rejecting nonempty input
+with `-32602`; that reverses upstream commit `0517f01f2` (issue 887, where
+Zed could not create a session once it had any context server configured)
+and would also break Paseo, which sends the session's configured servers on
+every `session/new` and `session/load`. ACP v1 makes stdio MCP support
+mandatory and `mcpCapabilities` only covers HTTP and SSE, so there is no
+standard field for declining the servers. The target behavior is:
+
+- Accept a missing, null or array `mcpServers`; reject a non-array shape
+  with `-32602`, as today. Continue to advertise `mcpCapabilities` with
+  `http` and `sse` false.
+- Declare the limitation with `sessionMcpServers: false` in the capability
+  metadata, so Paseo and other jcode-aware clients can show the user that
+  session-scoped servers are not in effect, and send them or not as they
+  prefer.
+- When a nonempty array is ignored, send one informational session update on
+  that connection after the new/load/resume response, naming the ignored
+  server names and pointing at the daemon-side MCP configuration. It is a
+  notice, not an error, and it must not change the response.
+- Daemon-configured MCP tools remain usable. Connecting client-supplied
+  stdio servers for the session is a phase 6 item, to be taken up when a
+  consumer needs it; flipping `sessionMcpServers` to true is how it is
+  announced.
 
 V2 follows standard error codes and insertion-boundary semantics. In v1,
 preserve existing error behavior except explicitly documented corrections;
@@ -420,7 +492,9 @@ Both implementations should exercise the same observable scenarios:
    successor. Producer failure/abort always yields a correctly classified end.
 4. Detach the originator and an observer independently; inserted work continues,
    only the departing attachment's pending input is withdrawn.
-5. Verify v1 close remains owner-aware and v2 close follows standard semantics.
+5. Verify v1 close remains owner-aware; v2 close follows standard semantics
+   as the sole attachment and attachment-scoped semantics with a live peer,
+   so a TUI turn survives a v2 client's window close.
 6. V2 steer, queue and ordinary held prompts: test their distinct cancellation
    behavior, concurrent producers, insertion/withdrawal races and disconnect.
 7. Model/effort changes from either interface propagate; skills, commands,
@@ -429,10 +503,19 @@ Both implementations should exercise the same observable scenarios:
    unsupported actions are not silently executed under another meaning.
 
 Use existing ACP JSON-shape/router tests and
-`tests/e2e/acp_shared_session.rs` as the jcode foundation. Add consumer-side
-fixtures for this contract; do not require both implementations to land at
-once. Runtime checks use a dedicated daemon socket and the intended binary.
-Existing exact-head CI remains authoritative; this document adds no new
+`tests/e2e/acp_shared_session.rs` as the jcode foundation. On the Paseo side
+(`camerontaylor/paseo`, branch `custom`), the generic ACP client lives in
+`packages/plugin/src/server/acp-internal/connection.ts` with tests in
+`packages/plugin/src/server/acp.test.ts` and
+`packages/server/src/server/agent/providers/generic-acp-agent*.test.ts`; the
+e2e ACP fixtures are `packages/app/e2e/support/fixtures/catalog-acp.cjs` and
+`packages/app/e2e/support/fixtures/acp-chunks-plugin/`. The jcode-specific
+provider plugin and its `_jcode/turn` transformer test are on the unmerged
+branch `ct/jcode-provider-plugin` under `plugins/jcode-provider/`. Add the
+consumer-side fixtures for this contract there; do not require both
+implementations to land at once. Runtime checks use a dedicated daemon socket and the intended binary.
+The fork CI workflow established in strategy Phase 0, run on the exact
+`custom` head, is the validation authority; this document adds no new
 approval process.
 
 ## SDK trial and build impact

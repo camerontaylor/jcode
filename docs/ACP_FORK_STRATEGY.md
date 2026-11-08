@@ -1,7 +1,41 @@
 # Maintainable fork and ACP development strategy
 
-Prepared 2026-11-08 against documentation commit `5e235215d`.
+Prepared 2026-11-08 against documentation commit `5e235215d`; amended the
+same day after a review of its process assumptions (revision 2).
 Status: implementation plan; the phases below are not claims of completed work.
+
+### Preconditions verified on 2026-11-08
+
+This strategy delegates verification to CI, the Desvio manifest and the
+consumer. Those were checked rather than assumed, with these results. Re-check
+this block whenever the document is revised; stale preconditions were the main
+defect of revision 1.
+
+- **CI does not run on the fork's product branches.** Upstream `ci.yml`
+  triggers only on pushes and pull requests to `main`/`master` and has never
+  run on `custom` or `mine` at `camerontaylor/jcode`. The only fork workflow
+  that has run is `fork-release.yml`, which builds release artifacts and runs
+  no tests, fmt, clippy or budgets. Phase 0 below fixes this.
+- **The size-budget ratchets fail on the base tag itself.** At
+  `v1.0.0-preview.199`, `scripts/check_code_size_budget.py` reports ten
+  failures and `scripts/check_test_size_budget.py` seven, before any fork
+  change. The fork adds more (see Phase 0). Upstream's `quality` job cannot
+  be adopted unchanged.
+- **The manifest is `custom` plus appended carries.** The `pr/*` stack and the
+  `fork/*` feature branches are already merged into `custom`; the layered
+  front/middle/back manifest described in the boundary report is archived at
+  `~/.jcode-fork/state/manifest.pre-custom-baseline.txt`. The integration
+  section below describes the current model.
+- **Most planning documents are not in the assembled fork.** `custom` and
+  `mine` contain only `ACP_SHARED_SESSIONS.md` and `ACP_UPSTREAM_PORT_PLAN.md`.
+  This strategy, the interface contract, the gap handover and the boundary
+  report live on `report-acp-gaps-v2-steering` and `fork/docs-boundary`.
+- **Upstream base drift is currently small**: four commits past the tag. It
+  will not stay small; upstream averaged about fifty commits a day and touched
+  the ACP adapter files fourteen times in the thirty days before the tag.
+- **Upstream deliberately tolerates client-supplied `mcpServers`** (commit
+  `0517f01f2`, fixing issue 887). Revision 1 proposed reversing that; see
+  Phase 3.
 
 Build a compatibility-first fork: one daemon-owned execution model, a
 fork-owned ACP adapter, and v1/v2 presentations of the same shared session.
@@ -25,12 +59,30 @@ then extend ACP. The consumer and jcode can develop independently against the
   superseded daemon machinery.
 - [Upstream port plan](ACP_UPSTREAM_PORT_PLAN.md) explains the move to upstream
   turn identity. Do not reintroduce its now-obsolete duplicate lifecycle.
+- [Pinned ACP references](acp-pins/README.md) are verbatim copies of the v2
+  draft documents, v2 schema and delivery RFD at the pinned commits, with
+  hashes. The delivery RFD is hosted on a personal fork of the spec repository
+  and can disappear; the copies make the contract target durable. Do not edit
+  them; re-pin deliberately and update the contract in the same change.
+
+All of these documents must be present on `custom` before Phase 1 is
+assigned, so a worker starting from the product assembly finds the primary
+document. Carry them on one docs topic branch and integrate it into `custom`;
+do not leave planning documents only on report branches.
 
 The interface contract links the official v1 specification, pinned v2 draft
 and delivery RFD. Workers should use those references for standard details,
 not infer wire shapes from this strategic summary. If implementation evidence
 requires a contract change, update that document explicitly so the consumer
 does not build to a different interpretation.
+
+The consuming tool is Paseo (`camerontaylor/paseo`, branch `custom`, checkout
+at `~/repos/paseo`). Today it drives jcode through its generic ACP client in
+`packages/plugin/src/server/acp-internal/connection.ts` and calls no
+`_jcode/*` extension. The dedicated provider plugin that consumes
+`_jcode/turn` is on the unmerged branch `ct/jcode-provider-plugin`
+(`plugins/jcode-provider/`). The contract lists the fixture locations; the
+consumer fixtures track in this strategy means extending those.
 
 ## Architectural direction
 
@@ -63,7 +115,8 @@ a new service or a large crate reorganization merely to enforce this boundary.
 
 | Phase | Deliverable | Dependency | Completion evidence |
 | --- | --- | --- | --- |
-| 1 | Reliable existing shared control | Existing fork baseline | Race regressions and current ACP/TUI scenarios pass |
+| 0 | Verification baseline: CI on `custom`, budget decision, documents integrated | None | Quality and e2e jobs green on the `custom` head; planning documents present on `custom` |
+| 1 | Reliable existing shared control | Phase 0 | Race regressions and current ACP/TUI scenarios pass in CI on `custom` |
 | 2 | Reduced lifecycle/catalog core carry | Phase 1 for lifecycle removal | Same external behavior with less upstream-owned code changed |
 | 3 | Useful v1 mappings and discovery | Stable affected paths; low-risk mapping work can overlap 1–2 | Existing clients remain compatible; new data is usable |
 | 4 | Shared adapter with version-specific presentation; SDK decision | Repaired v1 baseline; SDK experiment can start immediately | v1 compatibility preserved with a measured dependency decision |
@@ -75,6 +128,50 @@ experiments and consumer fixtures can proceed alongside it. R2's catalog facade
 does not depend on R1's lifecycle removal. Minor R3–R6 cleanups need not block
 v2 if they are behaviorally independent. Upstream acceptance is never a
 dependency for local progress.
+
+## Phase 0 Establish the verification baseline
+
+Every later phase cites "CI on the exact head" as its authority. That
+authority does not exist yet, so this phase creates it before any behavior
+change is assigned. It is small, mechanical and fork-owned.
+
+1. **Run the quality and e2e jobs on `custom`.** Upstream `ci.yml` has no
+   `workflow_call` entry point and `custom` carries no diff to it, so the
+   choice is between a one-line trigger change (`push.branches` gains
+   `custom`) carried as a fork hunk, or a fork-owned workflow that copies the
+   `quality` job and the ubuntu leg of the `build` job, which contains the
+   `provider_matrix` and `e2e` steps. Prefer the fork-owned workflow: it keeps
+   `ci.yml` identical to upstream and lets the fork drop jobs it does not
+   need (Windows, macOS, TypeScript SDK, installer evaluation). The jobs use
+   no repository secrets. Expect roughly fifteen to thirty minutes warm.
+2. **Decide the size-budget policy.** The base tag already fails both
+   ratchets, so the fork cannot simply pass upstream's check. Fork-caused
+   code failures today are `src/cli/acp.rs` (2319 to 3444 lines), the new
+   `src/cli/acp/daemon_router.rs` (1617), and growth in
+   `server/client_actions.rs`, `server/client_state.rs`, TUI `remote.rs`,
+   `remote/server_events.rs` and `src/cli/provider_init.rs`; test failures are
+   the new ACP and `client_actions` test files plus growth in three TUI and
+   provider test files. The policy is:
+   - The fork workflow runs the budget scripts against a fork-owned baseline
+     file so pre-existing upstream debt does not block the fork. Carry that
+     baseline on the CI topic branch, not in upstream's `code_size_budget.json`.
+   - Fork-owned oversized files are debt the fork pays itself: split
+     `src/cli/acp.rs` into transport, session and presentation modules as the
+     first step of Phase 4's version boundary, and split `daemon_router.rs`
+     when R1 lands. Do not ratchet those files upward again.
+   - Core files that grew only slightly under fork hunks are tolerated in the
+     fork baseline until the corresponding reshaping item (R1 to R6) or
+     upstream acceptance removes the hunk.
+3. **Integrate the planning documents into `custom`** as described in the
+   document map, including the pinned references.
+4. **Record the baseline.** The first green run on `custom` is the reference
+   for every later "scenarios still pass" claim. Until it exists, workers may
+   only claim named local test results.
+
+Completion means the fork workflow is green on the `custom` head, with the
+budget baseline committed and the documents present. Nothing else in this
+strategy starts before that, except the SDK trial and consumer fixtures,
+which do not depend on it.
 
 ## Phase 1 Preserve and repair shared control
 
@@ -113,6 +210,13 @@ not merely that a cancellation predicate is unit-tested. Exercise cancellation
 during replacement, stop followed by prompt, two steering producers and
 disconnect on either side of insertion. Do not alter v1 Stop semantics here.
 
+Those races need a deterministic interleaving, not timing. A small test-only
+seam in core is an authorized core change for this phase: for example a
+`cfg(test)` or test-feature yield point between the cancellation predicate
+and its signal, or a hook the mock-provider harness can block on at the turn
+claim. Prefer one seam reused by several tests over per-test sleeps. A test
+that passes only because of a sleep does not count as completion evidence.
+
 ## Phase 2 Reduce expensive core changes
 
 ### R1 Remove the competing lifecycle safely
@@ -149,7 +253,14 @@ adapter, and move subagent translation/audience policy outside core where
 practical. Execution leases and shared ordering remain in core.
 
 Prioritize changes by actual conflict burden and implementation simplicity,
-not estimated lines saved alone. Do not drop TUI picker behavior merely because
+not estimated lines saved alone. Conflict burden is measured, not estimated:
+the per-file conflict counts recorded at each base bump (see the maintenance
+section) decide whether an R3 to R6 item is worth doing now. Until a bump
+shows recurring conflicts in a file, its reshaping item is opportunistic
+work for whoever is already changing that file, not a scheduled phase
+deliverable. R1 and R2 are scheduled regardless, because R1 removes a
+competing lifecycle and R2 removes a 1,200-line relocation of upstream code.
+Do not drop TUI picker behavior merely because
 the report lists removal as an alternative. Do not bundle contentious model
 resolution policy changes into an ACP maintenance refactor.
 
@@ -164,9 +275,21 @@ tool names and reliable locations/diffs. Do not synthesize structured metadata
 by guessing from display strings. Preserve existing usage and config updates.
 
 Add the interface contract's capability discovery in every profile, using
-effective daemon support rather than executable version. Make unsupported
-client-supplied MCP configuration fail clearly instead of silently ignoring it.
-Retain daemon-configured MCP tools.
+effective daemon support rather than executable version.
+
+Keep tolerating client-supplied `mcpServers`. Revision 1 proposed rejecting
+nonempty input; that reverses upstream commit `0517f01f2`, which made session
+creation tolerate the field because real clients send their configured
+servers to every agent (issue 887, reported from Zed), and it would break
+those clients at `session/new`. Paseo is one of them: it sends the session's
+configured servers on every new/load. There is no standard field that lets
+an agent opt out, because ACP v1 makes stdio MCP support mandatory and the
+`mcpCapabilities` booleans only cover HTTP and SSE. So: keep accepting the
+field, state the limitation in the jcode capability metadata, and report
+ignored entries through a session notice rather than an error. Retain
+daemon-configured MCP tools. Actually honoring session-scoped stdio servers
+is a Phase 6 candidate with a real consumer need, not a Phase 3 mapping.
+The contract specifies the metadata and notice shape.
 
 Implement `_jcode/detach` as the distinct operation for leaving inserted work
 running. Keep existing v1 close owner-aware and keep its Stop behavior intact.
@@ -227,24 +350,51 @@ single clean-build timing. If the dependency cost or compatibility work is
 disproportionate, defer adoption and continue with the hand-written transport.
 Do not create a sidecar merely to accommodate the SDK.
 
+The trial is time-boxed. Its adopt/defer recommendation is due before the
+Phase 4 module split begins, so the split is designed for the transport that
+will actually be used. If the evidence is not complete by then, the default
+is **defer**: Phase 4 proceeds on the hand-written transport and the trial
+either closes or continues as research with no claim on the schedule. Fix
+the benchmark host and toolchain at the start of the trial and keep them for
+every measurement; a comparison across hosts is not a result.
+
 ## Phase 5 Add v2 and then explicit delivery
 
 ### First deliver the complete advertised baseline
 
 Implement per-connection negotiation, insertion responses, own-user echoes,
 standard state updates, replay/upserts, correct replacement semantics and
-version-specific errors/config shapes. Use a rollout flag while the draft is
+version-specific errors/config shapes. Use a rollout switch while the draft is
 unstable. Do not advertise a baseline method set whose mandatory behavior is
 only partly implemented.
+
+The switch follows the existing ACP profile convention rather than adding a
+CLI flag: a new `[acp]` configuration key with a `JCODE_ACP_*` environment
+override, appended to the end of the `AcpConfig` struct so the core hunk is
+additive. Off means the adapter negotiates v1 only, exactly as today. On means
+v2 is offered during negotiation and v1 remains available. The contract names
+the key.
 
 Keep v1 operating alongside v2. V1 `_jcode/turn` remains its peer-view contract;
 v2 uses standard state updates plus the interface contract's informational
 origin/turn metadata. Do not run two competing busy/idle authorities in v2.
 
-Preserve safe detachment explicitly. V2 `session/close` follows standard close
-semantics, while `_jcode/detach` leaves shared work running. The consumer must
-distinguish leaving a view from stopping and closing the session. Do not hide
-this difference behind a version-independent close button.
+Preserve safe detachment explicitly. Revision 1 made v2 `session/close` stop
+all session work, including a peer's turn, and relied on every client calling
+`_jcode/detach` instead. Paseo can learn that; a third-party v2 client cannot,
+and it will issue close on ordinary window closure. That would let any
+standard client stop a TUI user's turn, which contradicts the Phase 1
+journey "close an observing view without stopping the peer's turn".
+
+The amended rule, specified in the contract: v2 close is **attachment-scoped
+when peers are present**. If other live attachments exist, close cancels only
+work this attachment originated, withdraws its pending input, sends its final
+updates and idle state, and detaches; adopted or peer-origin turns continue.
+If this is the sole live attachment, close applies the standard v2 semantics
+in full. This is a deliberate, documented deviation, consistent with the
+owner-aware v1 close. `_jcode/detach` remains the explicit "leave without
+stopping anything" operation. Paseo still distinguishes leaving a view from
+stopping and closing the session; the deviation protects clients that do not.
 
 ### Then deliver steer and queue
 
@@ -285,15 +435,30 @@ supported.
 
 ## Integration and verification practice
 
-Use the existing Desvio topic/assembly model. Inspect the current manifest
-and `~/.jcode-fork/README.md` before changing carries; the report branch itself
-is not the product assembly. Do not casually rewrite the frozen manifest
-front or develop in the disposable assembly tree. Preserve unrelated work.
+Use the existing Desvio assembly model as it is now, not as the boundary
+report describes it. Inspect `~/.jcode-fork/manifest.txt` and
+`~/.jcode-fork/README.md` before changing carries; the report branch itself
+is not the product assembly. The current model:
 
-Keep fixes, structural refactors, protocol behavior and dependency migration
-in separate reviewable changes. Existing authorizations and branch ownership
-rules govern publishing. Reassemble affected carries using the established
-Desvio workflow; a clean merge or successful build is not runtime proof.
+- `custom` is the retained fork baseline. It already contains the former
+  `pr/*` stack and the `fork/*` feature branches. New work is a topic branch
+  appended to the manifest after `custom`; once deliberately integrated into
+  `custom`, its manifest line is removed.
+- `mine` is the disposable generated assembly. Do not develop in its tree.
+- The `pr/*` branches still exist as upstream candidates. Maintain them as
+  **merge-forward branches**: fix D1 and D2 as new commits on the relevant
+  `pr/*` branch, then merge that branch into `custom` (or append it as a carry
+  and integrate). Never rebase a `pr/*` branch that `custom` has merged; a
+  rebase turns the next integration into a full conflict replay. When a
+  branch is submitted upstream, make a separately named rebased copy for the
+  pull request and keep the merge-forward branch as the fork's record.
+- Each reshaping item (R1 to R6) and each phase slice is its own topic
+  branch, gated with `jcode-desvio build --bisect-gate` and then integrated.
+
+Preserve unrelated work. Keep fixes, structural refactors, protocol behavior
+and dependency migration in separate reviewable changes. Existing
+authorizations and branch ownership rules govern publishing. A clean merge or
+successful build is not runtime proof.
 
 Build on existing verification rather than adding a new approval system:
 
@@ -307,7 +472,9 @@ Build on existing verification rather than adding a new approval system:
 
 Workers select named tests for their changed behavior, follow host memory and
 `nice` guidance, and leave full suites/heavy builds to appropriate hosts or CI.
-Use exact-head CI as the full validation authority. For runtime checks use the
+The fork workflow from Phase 0, run on the exact `custom` head, is the full
+validation authority; until it is green there is no authority and claims are
+limited to named local tests. For runtime checks use the
 intended binary and a dedicated socket: the shared daemon otherwise silently
 tests installed code rather than the new build.
 
@@ -328,13 +495,38 @@ Remove a carry after its behavior is actually present in the selected upstream
 base, not merely because a PR has been accepted elsewhere. Revalidate the
 assembled fork and preserve external ACP behavior through upstream changes.
 
+### Moving the base
+
+The pinned base will fall behind quickly. Move it deliberately rather than
+continuously:
+
+- **Triggers.** Bump at a phase boundary, or earlier when upstream lands a
+  turn-lifecycle or ACP change the fork needs (a fix, or a change that would
+  otherwise be duplicated by the next phase). Do not bump in the middle of a
+  phase slice.
+- **Procedure.** A bump is its own change: update `desvio.conf`, retrain
+  rerere, reassemble with the bisect gate, run the fork workflow, and smoke
+  the ACP shared-session scenarios on a dedicated socket. No behavior change
+  rides along with a bump.
+- **Measure the cost.** Keep the per-file conflict counts from each bump's
+  assembly log under `~/.jcode-fork/state/`. This is the evidence the
+  reshaping items and the freeze decision below depend on; without it, both
+  are guesswork. It is a measurement, not a gate.
+- **ACP is fork-owned, not upstream-frozen.** Upstream still fixes ACP bugs in
+  `src/cli/acp.rs`, and the fork's copy diverges from the base by roughly
+  1,700 added lines, so each such fix is a conflict. Reduce that surface by
+  keeping fork-only logic in fork-only files (the Phase 4 split does this)
+  and by reviewing upstream ACP commits at every bump for behavior the fork
+  should port.
+
 Judge maintainability by recurring conflicts in core hotspots, duplicated
 state, testability and client compatibility. Raw changed-line counts are a
 secondary measure. If upstream lifecycle drift makes following it uneconomic,
 freeze the base temporarily and select upstream changes deliberately; do not
-create another competing turn model to keep rebasing at any cost.
+create another competing turn model to keep rebasing at any cost. Make that
+call from the recorded conflict counts, not from a single painful bump.
 
-The first implementation assignment is phase 1, with the SDK experiment and
+The first implementation assignment is phase 0, then phase 1, with the SDK experiment and
 consumer contract fixtures available as independent tracks. Finish each useful
 slice before expanding scope; SDK adoption, upstream acceptance and optional
 features must not hold existing ACP/TUI reliability hostage.
