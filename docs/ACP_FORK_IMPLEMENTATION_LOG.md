@@ -66,6 +66,7 @@ observe it, plus a wire-level test:
 | P3-corpus | 3 | record scenarios 05 close owner-aware, 07 config/commands, 08 negotiation/legacy; branch `fork/acp-corpus-v1` off stage `76045f863` | Sol `e66fe5f0` (triton, `acp-corpus-v1`) | accepted (05/07/08 recorded; `25604eeaa`, `5dcce24f8`, `adfe0f4c7`); gap fixed `9bf7aaf25` (accepted) | conformance 20 pass + 1 ignored gap; shared 4; ACP unit 71; 5x replays each |
 | P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | done; in stage | `57bc78ce9`: budgets green, no ceiling raised; `ServerEvent::scoped` constructor; acp.rs 4182 -> 940; new modules transport/session/presentation/requests/prompt all < 1200; test names 71/45 unchanged; 123 ACP unit + 17 conformance + 4 shared pass |
 | R2-fix | 3 | queued review #2 fixes (F1 F2 F3 F6 F7); branch `fork/acp-review2-fixes` off stage `76045f863` | Sol `aa00969c` (triton, `acp-review2-fixes`) | accepted; merged into `fork/acp-stage-next` `e87becb75` | F1 `9f5c97299`, F2 `8ae2d0834`, F3 `af56fa992`, F6 `82965e1f0`, F7 `415e31f2c`; 126 ACP unit + 17 conformance + 4 shared pass |
+| CI-guard | 0 | clear clippy/warning/panic/swallowed-error ratchet failures; branch `fork/acp-ci-guardrails` off `fork/acp-stage-next` `e87becb75` | Sol `ae3f6bd4` (triton, `acp-ci-guardrails`) | running | |
 
 Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 
@@ -423,4 +424,19 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 - **Plan:**
   1. Fast-forward `custom` to `76045f863` on green 42461964356.
   2. Then fast-forward `fork/acp-stage` and `custom` to `e87becb75` on green 42463885362.
+
+### 2026-11-08 — candidate CI red (run 42461964356 @ `76045f863`); `custom` NOT moved
+
+- **Test jobs:** there was no test-result failure. Build & Test failed only at the warning budget, and Quality Guardrails failed at clippy, the warning budget, the panic ratchet and the swallowed-error ratchet.
+- **Causes:** debt from lanes integrated after the last green run (P1-race, R1, the module split).
+  - Dead `cancel_processing_message` and its import.
+  - Test-only `TurnOwnership::claim`.
+  - `too_many_arguments` on `cancel_processing_message_for_turn`.
+  - Per-file panic and swallowed-error ratchets flag code moved by the split into new files, plus a genuine growth in `client_processing.rs` (21 -> 22).
+- **Fix:** sent to Sol `ae3f6bd4` as `CI-guard`:
+  - Moved allowances are relocated, with per-file totals shown not to increase.
+  - Genuinely new usages are removed.
+  - No blanket `--update` and no raise for any upstream-owned file.
+- **Lesson:** my local pre-push gates (fmt, module, size budgets) did not include clippy or the panic/swallowed ratchets. From now on, run those on stage merges too, or rely on topic-branch CI before staging.
+- **New plan:** `custom` fast-forwards straight to the first green stage head, `fork/acp-stage-next` + CI-guard. `76045f863` is superseded.
 
