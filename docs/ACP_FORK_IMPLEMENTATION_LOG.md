@@ -303,3 +303,13 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   move verification, identical test names, full equivalence gate, budgets
   checked against `origin/fork/ci-baseline` JSON. Review #2 findings (if any)
   will be applied on top of the split.
+- 2026-11-08: Queued review #2 `jcode-acp-r1-stage-38fa8f3ee` FAILED before
+  upload: server secret scan, 2 denylist hits (rule
+  `class:token-ssh-plumbing`), 0 gitleaks. Both are the upstream doc comment
+  "`../../.ssh/id_rsa`" (path-traversal example) in
+  `jcode-harness-api-server` session-id validation, appearing as - (deleted
+  relocation `session_catalog.rs`) and + (restored upstream `translate.rs`).
+  False positive; not bypassed; comment not edited (would re-carry an
+  upstream file R2 restored). Allowlist decision handed to `1f8a9aff`
+  (server policy owner); resubmit with `--supersedes` when resolved.
+  Integration proceeds on independent acceptance + fork CI.
