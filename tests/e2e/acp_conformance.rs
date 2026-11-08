@@ -956,3 +956,5 @@ async fn acp_conformance_detach_prepare_error_preserves_attachment() -> Result<(
     daemon.abort();
     result
 }
+
+mod close_v1;

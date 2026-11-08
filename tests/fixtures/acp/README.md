@@ -51,5 +51,7 @@ No timer sleeps establish protocol ordering.
 - `03-stop-then-prompt-v1.jsonl`: origin connection through shared work, observer close, then Stop immediately followed by a successor prompt. The successor ends normally.
 - `04-detach-v1.jsonl`: originator leaves while work is gated; its prompt response precedes detach success, repeated detach succeeds, and an initialize barrier carries no further session notifications. A second connection verifies shared completion.
 
+- `05-close-owner-aware-v1.jsonl`: observer view of owner cancellation and observer close; Rust checks correlated origin cancellation, surviving peer completion and idempotence.
+
 Wire tests also exercise observer detach, queued-input withdrawal, adopted-steer detach,
 parameter errors and observer-close brackets. All contract-gap tests are enabled.
