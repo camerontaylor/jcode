@@ -455,19 +455,34 @@ pub(super) async fn cancel_processing_message(
     request_decoded_at: Option<Instant>,
     sessions: Option<&SessionAgents>,
 ) {
-    // Capture before cancellation releases the reservation. Modern clients
-    // reject unscoped terminal events to protect newer turns from stale ones.
-    let identity = sessions
-        .and_then(|sessions| sessions.turn_observer(&session_control.session_id))
-        .and_then(|observer| {
-            let (latest, active) = observer.snapshot();
-            active.or_else(|| {
-                (latest > 0).then(|| crate::protocol::TurnIdentity {
-                    runtime_generation: observer.runtime_generation().to_owned(),
-                    turn_id: latest,
-                })
-            })
-        });
+    cancel_processing_message_for_turn(state, session_control, client_event_tx, swarm,
+        request_id, request_decoded_at, sessions, None).await;
+}
+
+pub(super) async fn cancel_processing_message_for_turn(
+    state: &mut ProcessingState<'_>,
+    session_control: &SessionControlHandle,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm: &SwarmStatusRefs<'_>,
+    request_id: Option<u64>,
+    request_decoded_at: Option<Instant>,
+    sessions: Option<&SessionAgents>,
+    expected: Option<&crate::protocol::TurnIdentity>,
+) {
+    let observer = sessions.and_then(|sessions| sessions.turn_observer(&session_control.session_id));
+    let identity = observer.as_ref().and_then(|observer| observer.snapshot().1);
+    if expected.is_some_and(|expected| identity.as_ref() != Some(expected)) {
+        return;
+    }
+    // Revalidate and signal together, after publication awaits. Even an
+    // unscoped Stop targets the turn observed at dispatch, never its successor.
+    let signal_target = || match &observer {
+        Some(observer) => identity.as_ref().and_then(|identity| {
+            observer.cancel_active(Some(identity), || session_control.request_cancel())
+                .map(|(_, epoch)| epoch)
+        }),
+        None => Some(session_control.request_cancel()),
+    };
     let scoped = |event| match &identity {
         Some(identity) => ServerEvent::TurnEvent {
             identity: identity.clone(),
@@ -493,6 +508,11 @@ pub(super) async fn cancel_processing_message(
         Some(swarm.event_tx),
     )
     .await;
+    // The idle snapshot cannot acquire a target after an await.
+    if observer.is_some() && identity.is_none() {
+        let _ = client_event_tx.send(ServerEvent::Interrupted);
+        return;
+    }
     crate::logging::info(&format!(
         "SERVER_INTERRUPT_CANCEL_RECEIVED request_id={:?} session={} control_session={} client_processing={} message_id={:?} has_task={} decoded_age_ms={:?}",
         request_id,
@@ -531,7 +551,10 @@ pub(super) async fn cancel_processing_message(
         {
             let _ = client_event_tx.send(stopped);
         }
-        let cancel_epoch = session_control.request_cancel();
+        let cancel_epoch = match signal_target() {
+            Some(epoch) => epoch,
+            None => return,
+        };
         crate::logging::info(&format!(
             "SERVER_INTERRUPT_CANCEL_SIGNALLED request_id={:?} session={} message_id={:?} wait_ms=500",
             request_id, session_label, *state.message_id
@@ -645,7 +668,10 @@ pub(super) async fn cancel_processing_message(
         {
             let _ = client_event_tx.send(stopped);
         }
-        let cancel_epoch = session_control.request_cancel();
+        let cancel_epoch = match signal_target() {
+            Some(epoch) => epoch,
+            None => return,
+        };
         let reset_control = session_control.clone();
         tokio::spawn(async move {
             // The running turn is not owned by this connection (post-reload
@@ -821,18 +847,4 @@ pub(super) fn move_tool_to_background(
         "SERVER_BACKGROUND_TOOL_RESULT id={} session={} signalled={} ack_queued={}",
         id, session_control.session_id, signalled, ack_queued
     ));
-}
-
-pub(super) async fn cancel_processing_message_for_turn(
-    state: &mut ProcessingState<'_>,
-    session_control: &SessionControlHandle,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-    swarm: &SwarmStatusRefs<'_>,
-    request_id: Option<u64>,
-    request_decoded_at: Option<Instant>,
-    sessions: Option<&SessionAgents>,
-    _expected: Option<&crate::protocol::TurnIdentity>,
-) {
-    cancel_processing_message(state, session_control, client_event_tx, swarm,
-        request_id, request_decoded_at, sessions).await;
 }
