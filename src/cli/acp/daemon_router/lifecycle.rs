@@ -28,14 +28,11 @@ impl RouterState {
                 origin,
                 user_content,
             } => self.on_turn_started(identity, origin, user_content),
-            ServerEvent::TurnEnded {
-                identity,
-                status,
-                message,
-            } => self.on_turn_ended(identity, status, message),
             ServerEvent::TurnEvent {
-                identity, event, ..
-            } => self.on_scoped(identity, *event),
+                identity,
+                event,
+                end,
+            } => self.on_scoped(identity, *event, end),
             event => self.on_flat(event),
         }
     }
@@ -196,7 +193,12 @@ impl RouterState {
     /// else: the own prompt, the mirrored peer turn, or (for a turn this
     /// connection does not have open, such as a peer's second terminal after a
     /// forced abort) nobody.
-    fn on_scoped(&mut self, identity: TurnIdentity, event: ServerEvent) -> Vec<RouteAction> {
+    fn on_scoped(
+        &mut self,
+        identity: TurnIdentity,
+        event: ServerEvent,
+        end: Option<TurnEndStatus>,
+    ) -> Vec<RouteAction> {
         let event = match flatten_scope(event) {
             Some(event) => event,
             None => {
@@ -214,6 +216,14 @@ impl RouterState {
             return self.on_injected(identity, event, content, &client_ids);
         }
         let terminal = matches!(event, ServerEvent::Done { .. } | ServerEvent::Error { .. });
+        if terminal {
+            let (fallback, message) = terminal_status(&event);
+            let actions = self.on_turn_ended(identity.clone(), end.unwrap_or(fallback), message);
+            if !self.is_open(&identity) {
+                return actions;
+            }
+        }
+
         if let Some(own) = self
             .own_turn
             .as_ref()
@@ -223,19 +233,6 @@ impl RouterState {
             if terminal {
                 let own = self.own_turn.take().expect("matched above");
                 self.fence.complete(&identity);
-                // Without a `turn_ended` (an older daemon build) the adopted
-                // turn's bracket is still open.
-                if own.bracket_open {
-                    let (status, message) = terminal_status(&event);
-                    self.deliver(
-                        own.request_id,
-                        ServerEvent::TurnEnded {
-                            identity,
-                            status,
-                            message,
-                        },
-                    );
-                }
                 // Every prompt the turn answers resolves with it; a terminal
                 // carries the id of the request that started the turn.
                 for member in own.members() {
@@ -379,9 +376,9 @@ impl RouterState {
             return;
         };
         own.bracket_open = false;
-        self.deliver(
+        self.deliver_local_end(
             request_id,
-            ServerEvent::TurnEnded {
+            RoutedEvent::LocalTurnEnd {
                 identity,
                 status,
                 message,

@@ -96,9 +96,22 @@ pub(super) enum PendingKind {
     Catalog,
 }
 
+/// Adapter-local delivery, never serialized on the daemon wire.
+#[derive(Debug, Clone)]
+pub(super) enum RoutedEvent {
+    Event(ServerEvent),
+    LocalTurnEnd {
+        identity: TurnIdentity,
+        status: TurnEndStatus,
+        message: Option<String>,
+    },
+}
+
+pub(super) type RoutedReceiver = mpsc::UnboundedReceiver<RoutedEvent>;
+
 pub(super) struct PendingRequest {
     kind: PendingKind,
-    tx: mpsc::UnboundedSender<ServerEvent>,
+    tx: mpsc::UnboundedSender<RoutedEvent>,
 }
 
 /// A turn that answers this adapter's prompts.
@@ -482,11 +495,7 @@ impl RouterState {
             .or_else(|| self.peer_turn.as_ref().map(|turn| turn.identity.clone()))
     }
 
-    pub(super) fn register(
-        &mut self,
-        request_id: u64,
-        kind: PendingKind,
-    ) -> mpsc::UnboundedReceiver<ServerEvent> {
+    pub(super) fn register(&mut self, request_id: u64, kind: PendingKind) -> RoutedReceiver {
         let (tx, rx) = mpsc::unbounded_channel();
         if self.closed {
             // The connection is gone; drop the sender so the caller fails
@@ -631,9 +640,9 @@ impl RouterState {
         // prompts with it. Its remaining events are dropped as not open.
         let own = self.own_turn.take().expect("checked above");
         if own.bracket_open {
-            self.deliver(
+            self.deliver_local_end(
                 own.request_id,
-                ServerEvent::TurnEnded {
+                RoutedEvent::LocalTurnEnd {
                     identity: own.identity.clone(),
                     status: TurnEndStatus::Cancelled,
                     message: Some(
@@ -1154,6 +1163,12 @@ impl RouterState {
         }]
     }
 
+    fn deliver_local_end(&mut self, request_id: u64, event: RoutedEvent) {
+        if let Some(pending) = self.pending.get(&request_id) {
+            let _ = pending.tx.send(event);
+        }
+    }
+
     fn deliver(&mut self, request_id: u64, event: ServerEvent) {
         let Some(pending) = self.pending.get(&request_id) else {
             crate::logging::debug(&format!(
@@ -1161,7 +1176,7 @@ impl RouterState {
             ));
             return;
         };
-        let _ = pending.tx.send(event);
+        let _ = pending.tx.send(RoutedEvent::Event(event));
     }
 }
 

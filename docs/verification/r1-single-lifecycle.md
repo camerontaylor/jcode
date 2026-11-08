@@ -412,3 +412,20 @@ failed because roundtrip discarded `end`. After refinement:
   authoritative cancelled classification on both attachments after abort.
 
 All commands used `CARGO_BUILD_RUSTC_WRAPPER= nice -n 10 cargo test -j 3`.
+
+## Adapter switch checkpoint
+
+The adapter derives lifecycle presentation from scoped terminals and sends
+local bracket ends through `RoutedEvent::LocalTurnEnd`, an adapter-owned FIFO
+alongside ordinary daemon payloads. The old daemon end event is ignored by the
+router. Router tests now drive classification with scoped terminals.
+
+With `CARGO_BUILD_RUSTC_WRAPPER= nice -n 10 cargo test -j 3`:
+
+- `--lib cli::acp::daemon_router::tests`: 41 passed.
+- `--lib cli::acp::tests`: 58 passed.
+- `--test e2e acp_conformance`: 12 passed; all four fixtures replay unmodified.
+
+This demonstrates equivalent adapter behavior before removing the competing
+core publication. Test observations temporarily project local deliveries onto
+the old enum and will be migrated when that enum variant is deleted.

@@ -92,10 +92,18 @@ fn turn_started(turn_id: u64, origin: TurnOrigin, content: Option<&str>) -> Serv
 }
 
 fn turn_ended(turn_id: u64, status: TurnEndStatus) -> ServerEvent {
-    ServerEvent::TurnEnded {
+    ServerEvent::TurnEvent {
         identity: identity(turn_id),
-        status,
-        message: None,
+        end: Some(status),
+        event: Box::new(if status == TurnEndStatus::Failed {
+            ServerEvent::Error {
+                id: 0,
+                message: "provider failed".into(),
+                retry_after_secs: None,
+            }
+        } else {
+            ServerEvent::Done { id: 0 }
+        }),
     }
 }
 
@@ -129,10 +137,21 @@ fn peer(request_id: u64) -> TurnOrigin {
     TurnOrigin::client(Some(PEER.to_string()), request_id)
 }
 
-fn drain(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> Vec<ServerEvent> {
+fn drain(rx: &mut RoutedReceiver) -> Vec<ServerEvent> {
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        events.push(event);
+        events.push(match event {
+            RoutedEvent::Event(event) => event,
+            RoutedEvent::LocalTurnEnd {
+                identity,
+                status,
+                message,
+            } => ServerEvent::TurnEnded {
+                identity,
+                status,
+                message,
+            },
+        });
     }
     events
 }
@@ -1017,7 +1036,7 @@ fn cid(prompt_id: u64) -> String {
 }
 
 /// Register and track prompt `prompt_id` the way `run_prompt` does.
-fn steer(router: &mut RouterState, prompt_id: u64) -> mpsc::UnboundedReceiver<ServerEvent> {
+fn steer(router: &mut RouterState, prompt_id: u64) -> RoutedReceiver {
     let rx = router.register(prompt_id, PendingKind::Prompt);
     router.track_prompt(
         prompt_id,

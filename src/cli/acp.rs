@@ -529,11 +529,7 @@ impl DaemonSession {
         Ok(())
     }
 
-    async fn register(
-        &self,
-        request_id: u64,
-        kind: PendingKind,
-    ) -> mpsc::UnboundedReceiver<ServerEvent> {
+    async fn register(&self, request_id: u64, kind: PendingKind) -> RoutedReceiver {
         self.router.lock().await.register(request_id, kind)
     }
 
@@ -1552,9 +1548,7 @@ impl AcpRuntime {
 
         let mut ui_state = SessionUiState::default();
         loop {
-            let Some(event) = resume_rx.recv().await else {
-                anyhow::bail!("Jcode daemon disconnected during session attach");
-            };
+            let event = next_routed(&mut resume_rx).await?;
             match event {
                 ServerEvent::Ack { .. } => {}
                 ServerEvent::History {
@@ -1762,7 +1756,7 @@ impl AcpRuntime {
         rpc_id: Value,
         session: &Arc<DaemonSession>,
         prompt_id: u64,
-        prompt_rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
+        prompt_rx: &mut RoutedReceiver,
         ticket: &mut PromptTicket,
     ) -> Result<()> {
         let session_id = session.session_id().await;
@@ -1772,11 +1766,29 @@ impl AcpRuntime {
         let mut turn_usage = TurnUsage::default();
         let mut steers = 0u32;
         loop {
-            let event = match next_routed(prompt_rx).await {
-                Ok(event) => event,
-                Err(err) => {
+            let delivery = match prompt_rx.recv().await {
+                Some(delivery) => delivery,
+                None => {
                     ticket.release().await;
-                    return Err(err);
+                    anyhow::bail!("Jcode daemon disconnected");
+                }
+            };
+            let event = match delivery {
+                RoutedEvent::Event(event) => event,
+                RoutedEvent::LocalTurnEnd {
+                    identity,
+                    status,
+                    message,
+                } => {
+                    self.write_turn_notification(
+                        &session_id,
+                        &turn_id_string(&identity),
+                        turn_end_state(status),
+                        None,
+                        message.as_deref(),
+                    )
+                    .await?;
+                    continue;
                 }
             };
             if self.profile.is_extended() {
@@ -1794,23 +1806,6 @@ impl AcpRuntime {
                     self.write_error_value(rpc_id, JSONRPC_SERVER_ERROR, message)
                         .await?;
                     return Ok(());
-                }
-                // This prompt adopted a peer turn announced by `_jcode/turn`
-                // "started": close that bracket after the turn's output and
-                // before the answer.
-                ServerEvent::TurnEnded {
-                    identity,
-                    status,
-                    message,
-                } => {
-                    self.write_turn_notification(
-                        &session_id,
-                        &turn_id_string(&identity),
-                        turn_end_state(status),
-                        None,
-                        message.as_deref(),
-                    )
-                    .await?;
                 }
                 // Another client steered the turn answering this prompt.
                 ServerEvent::SoftInterruptInjected { content, .. } => {
@@ -2618,17 +2613,17 @@ async fn probe_capabilities(session: &Arc<DaemonSession>) -> Result<DaemonCapabi
 /// Next routed event for a waiter. A closed channel means the daemon
 /// connection ended, which callers must surface as an error instead of waiting
 /// forever.
-async fn next_routed(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> Result<ServerEvent> {
+async fn next_routed(rx: &mut RoutedReceiver) -> Result<ServerEvent> {
     match rx.recv().await {
-        Some(event) => Ok(event),
+        Some(RoutedEvent::Event(event)) => Ok(event),
+        Some(RoutedEvent::LocalTurnEnd { .. }) => {
+            anyhow::bail!("unexpected local turn end on a helper reply")
+        }
         None => anyhow::bail!("Jcode daemon disconnected"),
     }
 }
 
-async fn wait_for_done(
-    rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
-    request_id: u64,
-) -> Result<()> {
+async fn wait_for_done(rx: &mut RoutedReceiver, request_id: u64) -> Result<()> {
     loop {
         match next_routed(rx).await? {
             ServerEvent::Ack { .. } => {}
@@ -2687,7 +2682,7 @@ use session_configuration::*;
 
 async fn wait_for_model_changed(
     session: &DaemonSession,
-    rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
+    rx: &mut RoutedReceiver,
     request_id: u64,
 ) -> Result<()> {
     loop {
@@ -2724,10 +2719,7 @@ async fn wait_for_model_changed(
 
 /// Manual compaction only starts a background summary; the daemon applies it
 /// at the start of the next turn, so the result message is the whole reply.
-async fn wait_for_compact_result(
-    rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
-    request_id: u64,
-) -> Result<String> {
+async fn wait_for_compact_result(rx: &mut RoutedReceiver, request_id: u64) -> Result<String> {
     loop {
         match next_routed(rx).await? {
             ServerEvent::CompactResult {
@@ -2750,7 +2742,7 @@ async fn wait_for_compact_result(
 
 async fn wait_for_effort_changed(
     session: &DaemonSession,
-    rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
+    rx: &mut RoutedReceiver,
     request_id: u64,
 ) -> Result<()> {
     loop {
