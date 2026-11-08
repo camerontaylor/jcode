@@ -52,7 +52,7 @@ observe it, plus a wire-level test:
 | P0-docs | 0 | planning docs on `custom` | n/a | done | `docs/ACP_FORK_*`, `docs/acp-pins/` present at `a047a0c07` |
 | P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek `9a617f29` (atlas, `acp-p0-ci`) | done (green) | run 42458512159 @ `a7a3c29d0` | revert `ee4f9f6a7` (reformatted 6 upstream-only files); port `fmt-check.sh` into `scripts/fork/`; keep `a47408ec1` |
 | P0-budget | 0 | same branch: fork budget baseline files + `JCODE_*_BUDGET` env overrides | DeepSeek `9a617f29` | done | ceilings = upstream's, current size only where failing; ratchet teeth verified |
-| P0-record | 0 | first green run on `custom` recorded here | orchestrator | done: `custom` fast-forwarded `a047a0c07` -> `bf9f0b22f` (2026-11-08) on green run 42465256663 (exact SHA); confirmation run on `custom`: 42467221310 | user authorized merges |
+| P0-record | 0 | first green run on `custom` recorded here | orchestrator | done: `custom` fast-forwarded `a047a0c07` -> `bf9f0b22f` (2026-11-08) on green run 42465256663 (exact SHA); confirmation run on `custom`: 42467221310 green | user authorized merges |
 | P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek `5365c86a` (atlas, `acp-p1-meta`) | accepted, awaiting integration | `d335f2e7d`: 5 unit + 1 e2e wire test pass; sharedControl derived from daemon Pong caps (`SharedControlSupport::from_router`) |
 | P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | accepted, awaiting integration | `26c296a09` (review fixes: Interrupted queued inside locked revalidation, failing-first test `db810004f`); D1 `26ff594f2` on pr/turn-scoped-cancel, D2 `86db359cf` on pr/stale-cancel-flag; evidence `docs/verification/p1-cancel-race.md` |
 | T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | accepted, awaiting integration (after P0-ci green) | `4759e51b3`: 5 pass + 2 ignored contract gaps; 5/5 stable runs on triton |
@@ -484,3 +484,8 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   - Upstream candidates: `a7a3c29d0` (stdin wchan), `a47408ec1`, D1/D2 on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag`, and the config peer fanout.
   - Phases 4–5 (v2) stay gated, per the strategy.
 
+
+### 2026-11-08 — `custom` confirmation run green
+
+- Run 42467221310 (push to `custom` @ `bf9f0b22f`) passed both jobs: Quality Guardrails and Build & Test (ubuntu-latest). This is the recorded fork CI baseline.
+- Phase 0–3 scope is complete. Phases 4–5 (v2) remain gated.
