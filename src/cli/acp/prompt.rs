@@ -18,7 +18,7 @@ impl AcpRuntime {
         }
 
         let mut subagent = None;
-        if let Some(command) = parse_acp_slash_command(&text) {
+        if let Some(command) = selected_slash_command(&text, &selection) {
             if let Ok(AcpSlashCommand::Subagent(spec)) = command {
                 // A subagent launch is a streamed tool call, so it runs through
                 // the prompt event loop below instead of returning one message.
@@ -84,7 +84,14 @@ impl AcpRuntime {
         }
 
         let prompt_id = session.next_id();
-        let mut prompt_rx = session.register(prompt_id, PendingKind::Prompt).await;
+        let mut router = session.router.lock().await;
+        let Some(mut prompt_rx) = router.register_open_prompt(prompt_id) else {
+            drop(router);
+            ticket.release().await;
+            return self
+                .write_result(rpc_id, prompt_response("cancelled", &TurnUsage::default()))
+                .await;
+        };
         ticket.prompt_id = Some(prompt_id);
 
         let request = match subagent {
@@ -95,20 +102,19 @@ impl AcpRuntime {
                 model: spec.model,
                 session_id: None,
             },
-            None => prompt_request(
-                &mut *session.router.lock().await,
-                prompt_id,
-                plan.text,
-                images,
-                plan.skill,
-            ),
+            None => prompt_request(&mut router, prompt_id, plan.text, images, plan.skill),
         };
         let send_result = session.send(&request).await;
+        let follow_up = if send_result.is_ok() {
+            router.prompt_sent(prompt_id)
+        } else {
+            Vec::new()
+        };
+        drop(router);
         if let Err(err) = send_result {
             ticket.release().await;
             return Err(err);
         }
-        let follow_up = session.router.lock().await.prompt_sent(prompt_id);
         session.sink(self.clone()).apply(follow_up).await;
         self.stream_prompt_events(rpc_id, &session, prompt_id, &mut prompt_rx, ticket)
             .await

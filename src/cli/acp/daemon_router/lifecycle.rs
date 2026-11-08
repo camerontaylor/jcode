@@ -1,5 +1,21 @@
 // Turn lifecycle routing. Included in daemon_router to preserve its private scope.
 impl RouterState {
+    /// `session/cancel`: withdraw every prompt still waiting for a turn. The
+    /// caller still cancels the running turn.
+    pub(super) fn stop(&mut self) -> Vec<RouteAction> {
+        self.withdraw(Withdrawal::Stop)
+    }
+
+    /// Called with the router lock held through the daemon send, so closure
+    /// cannot slip between admission and submission.
+    pub(super) fn register_open_prompt(&mut self, id: u64) -> Option<RoutedReceiver> {
+        if self.view_closed {
+            None
+        } else {
+            Some(self.register(id, PendingKind::Prompt))
+        }
+    }
+
     /// Route one daemon event. Prompt and reply delivery happen through the
     /// registered channels; the returned actions are what the adapter must
     /// render for other clients' activity.
@@ -8,7 +24,11 @@ impl RouterState {
         // the reply on the connection's event channel, which can drain after
         // the turn that produced it ended. Render it whenever it arrives.
         if let ServerEvent::Todos { payload, .. } = event {
-            return vec![RouteAction::Plan { payload }];
+            return if self.view_closed {
+                Vec::new()
+            } else {
+                vec![RouteAction::Plan { payload }]
+            };
         }
         // A completed todo write invalidates the session's plan snapshot. The
         // todo tool's own output is a rendered card, so the adapter asks the
@@ -22,7 +42,7 @@ impl RouterState {
         } else {
             self.route_attributed(event)
         };
-        if refresh_plan {
+        if refresh_plan && !self.view_closed {
             actions.push(RouteAction::Send(Request::GetTodos {
                 id: self.next_request_id(),
             }));

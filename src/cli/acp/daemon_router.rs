@@ -615,15 +615,9 @@ impl RouterState {
         }
     }
 
-    /// `session/cancel`: withdraw every prompt still waiting for a turn. The
-    /// caller still cancels the running turn.
-    pub(super) fn stop(&mut self) -> Vec<RouteAction> {
-        self.withdraw(Withdrawal::Stop)
-    }
-
-    /// `session/close`: withdraw waiting prompts, cancel this view's own
-    /// running turn, and release an adopted peer turn without cancelling it.
-    /// From now on nothing starts or adopts a turn for this view.
+    /// Release this view's own turn without cancelling it by marking it adopted,
+    /// so the daemon keeps running the work. Otherwise follow `close_view`'s
+    /// prompt-withdrawal and peer-bracket behaviour.
     pub(super) fn detach_view(&mut self) -> Vec<RouteAction> {
         self.detached = true;
         if let Some(own) = self.own_turn.as_mut() {
@@ -632,6 +626,9 @@ impl RouterState {
         self.close_view()
     }
 
+    /// `session/close`: withdraw waiting prompts, cancel this view's own
+    /// running turn, and release an adopted peer turn without cancelling it.
+    /// From now on nothing starts or adopts a turn for this view.
     pub(super) fn close_view(&mut self) -> Vec<RouteAction> {
         self.view_closed = true;
         let mut actions = self.withdraw(Withdrawal::Close);

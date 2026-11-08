@@ -886,3 +886,51 @@ fn a_todo_snapshot_during_a_turn_is_not_delivered_as_turn_output() {
             .any(|event| matches!(event, ServerEvent::Todos { .. }))
     );
 }
+
+#[test]
+fn closed_views_drop_todo_snapshots_and_refreshes() {
+    for detach in [false, true] {
+        let mut router = attached_router();
+        if detach {
+            router.detach_view();
+        } else {
+            router.close_view();
+        }
+        assert!(
+            router
+                .route(ServerEvent::Todos {
+                    session_id: "session-1".into(),
+                    payload: "[]".into(),
+                })
+                .is_empty()
+        );
+        assert!(
+            router
+                .route(scoped(
+                    1,
+                    ServerEvent::ToolDone {
+                        id: "todo".into(),
+                        name: "todo".into(),
+                        output: "[]".into(),
+                        error: None,
+                    }
+                ))
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn late_prompt_registration_after_detach_or_close_is_rejected() {
+    for detach in [false, true] {
+        let mut router = attached_router();
+        // Deterministic late-task interleaving: closure wins the admission lock.
+        if detach {
+            router.detach_view();
+        } else {
+            router.close_view();
+        }
+        assert!(router.register_open_prompt(99).is_none());
+        assert!(!router.pending.contains_key(&99));
+    }
+}
