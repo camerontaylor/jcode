@@ -92,7 +92,7 @@ update this contract, the pinned copies and both implementations together.
 | Reasoning, plans, tool metadata | Incomplete mapping | Surface data the daemon already provides |
 | Capability metadata described below | Mostly absent | Added in every profile |
 | Detach without cancelling owned work | Not a distinct operation | `_jcode/detach` |
-| v1 prompt-response turn correlation | Not present | `_meta.jcode.turnId` and `role` on every v1 prompt response |
+| v1 prompt-response turn correlation | Not present | `_meta.jcode.turnId` and `role` on every successful v1 prompt response |
 | Skill clear | No operation | `skill: null` in prompt metadata |
 | Shared fixture corpus | None | `tests/fixtures/acp/`, replayed by both sides |
 | Client-supplied `mcpServers` | Accepted and silently ignored | Accepted, declared unsupported in metadata, reported by notice |
@@ -149,7 +149,7 @@ Extension names and what each promises:
 | --- | --- |
 | `shared_control` | `result._meta.jcode.sharedControl` is present on new/load/resume and `_jcode/detach` exists when its field is true |
 | `peer_turns` | `_jcode/turn` notifications (v1 only) |
-| `turn_correlation` | `_meta.jcode.turnId` and `role` on every v1 prompt response |
+| `turn_correlation` | `_meta.jcode.turnId` and `role` on every successful v1 prompt response |
 | `skill_selection` | `_meta.jcode.skill` on prompts, including `null` to clear |
 | `raw_server_event` | `_jcode/server_event` diagnostics (extended/full profiles) |
 | `turn_metadata` | v2 track only; replaces `peer_turns` on v2 connections |
@@ -327,7 +327,7 @@ own-echo change to v2 rather than creating another v1 behavior mode.
 
 ### Turn correlation on prompt responses
 
-With `turn_correlation` advertised, every v1 `session/prompt` response
+With `turn_correlation` advertised, every successful v1 `session/prompt` result
 carries, beside `stopReason`:
 
 ```json
@@ -337,7 +337,8 @@ carries, beside `stopReason`:
 - `turnId` is the same opaque identity used in `_jcode/turn`.
 - `role` is `origin` when this request started the turn, `steer` when it was
   inserted into a turn already running, or `none` when no turn ran (for
-  example a selection-only command or a rejected busy request).
+  example a selection-only command, bare skill invocation, or skill clear).
+  When `role` is `none`, `turnId` is null.
 - Several responses with the same `turnId` describe one execution. The
   consumer settles completion, usage and terminal display once per `turnId`;
   the `origin` response is the natural place, and a `steer` response that
@@ -345,6 +346,9 @@ carries, beside `stopReason`:
 - Responses finished by detach or local close still carry the `turnId` they
   were following, with `stopReason: "cancelled"`; the shared turn may be
   continuing.
+
+Busy rejections keep the legacy JSON-RPC error: there is no result, so no
+`_meta` turn correlation.
 
 This is informational. A client that ignores it gets today's behavior.
 
