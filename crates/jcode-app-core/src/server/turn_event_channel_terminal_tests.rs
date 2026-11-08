@@ -89,7 +89,7 @@ async fn duplicate_producer_terminals_are_published_once() {
     let (fallback, mut fallback_rx) = mpsc::unbounded_channel();
     let lease = agent.claim_server_turn().unwrap();
     let identity = lease.identity().clone();
-    let events = super::super::state::TurnEventChannel::new(
+    let events = super::super::super::state::TurnEventChannel::new(
         agent.session_id().into(),
         Arc::clone(&members),
         fallback,
@@ -161,7 +161,7 @@ async fn failed_producer_terminal_is_published_once_after_output() {
     let (fallback, mut fallback_rx) = mpsc::unbounded_channel();
     let lease = agent.claim_server_turn().unwrap();
     let identity = lease.identity().clone();
-    let events = super::super::state::TurnEventChannel::new(
+    let events = super::super::super::state::TurnEventChannel::new(
         agent.session_id().into(),
         Arc::clone(&members),
         fallback,
@@ -342,7 +342,7 @@ async fn assert_completed_turn_survives_late_stop(check_handle_first: bool) {
     let identity = lease.identity().clone();
     let signal = guard.graceful_shutdown_signal();
     drop(guard);
-    let events = super::super::state::TurnEventChannel::new(
+    let events = super::super::super::state::TurnEventChannel::new(
         harness.session_id.clone(),
         Arc::clone(&harness.swarm_members),
         harness.senders[0].clone(),
