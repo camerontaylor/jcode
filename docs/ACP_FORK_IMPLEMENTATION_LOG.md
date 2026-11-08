@@ -507,3 +507,24 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 - **Deploy path:** fork release tag `v0.99.1003` on `bf9f0b22f` -> `fork-release.yml` (4 targets, published as Latest) -> per-host `scripts/harness-update.py --only jcode` (agents repo).
   - The tag create/push was **denied by the auto-mode permission classifier**. No tag exists locally or on origin, and nothing was deployed.
   - Waiting on the user.
+
+### 2026-11-08 — release v0.99.1003 deployed (user: "push and test the deployed instances")
+
+- **Release:**
+  - Tag `v0.99.1003` (annotated) on `bf9f0b22f`.
+  - `fork-release.yml` run 42472288600: 4 builds + publish succeeded, published as Latest.
+  - Assets: linux x86_64/aarch64, macOS aarch64/x86_64, SHA256SUMS.
+- **Deploy order:** `jcode update` force-reloads the host daemon (`server reload --force`), so hosts without a running daemon went first.
+  - **pluto, ceres, saturn, neptune:** `harness-update.py --only jcode` -> `jcode v0.99.1003 (bf9f0b22f)`. Channels current/stable/shared-server -> `versions/0.99.1003`.
+  - **uranus:** api.github.com returned 502/503/504 transiently from uranus (asset downloads fine); updated on retry.
+  - **atlas:** ran a self-dev build (`0.99.38-dev`, 4e9a54972), which `jcode update` treats as current. I installed the release by hand in the same layout:
+    - SHA256-verified `jcode-linux-aarch64.tar.gz` -> `versions/0.99.1003/{jcode,jcode-linux-aarch64.bin}`
+    - current/stable/shared-server repointed
+    - previous links and version files saved in `~/.jcode/builds/state-backup-20261108/`
+  - **triton: DEFERRED.** Its daemon serves live 0.99.1002 ACP adapters for other workstreams' jcode Paseo agents (5 running cq-toolkit reviews). Waiting for an idle window (watcher) before `harness-update` and the reload.
+- **Testing:** `~/.cache/acp-deploy-smoke.py <bin> --prompt` runs an isolated daemon on a private socket with ACP initialize / session/new / one-line prompt / session/close, and checks the v1 fields: `_meta.jcode` extensions, interfaceVersion, clientInstanceId, `sharedControl.detach`, configOptions, `end_turn`, turnId correlation and the reply text.
+  - **Full pass (13/13), protocol and prompt:** atlas, neptune, uranus.
+  - **Protocol checks 10/10, prompt failed:**
+    - pluto and saturn: auto provider -> OpenRouter, `OPENROUTER_API_KEY` 401 "User not found"
+    - ceres: "No tokens/providers left" (Copilot unauthenticated, usage exhausted)
+  - **Pre-existing, not a regression:** the same prompt test with pluto's previous 0.99.1002 binary fails identically. These are host credential issues and were not changed (no credential changes).
