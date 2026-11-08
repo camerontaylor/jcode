@@ -589,7 +589,7 @@ pub(super) fn parse_acp_slash_command(text: &str) -> Option<Result<AcpSlashComma
     let trimmed = text.trim_end();
     let body = trimmed.strip_prefix('/')?;
     let mut parts = body.splitn(2, char::is_whitespace);
-    let name = parts.next().unwrap_or_default();
+    let name = parts.next()?;
     let argument = parts
         .next()
         .map(str::trim)
