@@ -215,7 +215,9 @@ pub(in crate::tui::app) fn handle_server_event(
             app.status = ProcessingStatus::Streaming;
             return true;
         }
-        ServerEvent::TurnEvent { identity, event } => {
+        ServerEvent::TurnEvent {
+            identity, event, ..
+        } => {
             let paced_replay = matches!(&*event, ServerEvent::Done { .. })
                 && app.deferred_stream_done_identity.as_ref() == Some(&identity)
                 && app.remote_turn_fence.is_latest(&identity);

@@ -33,7 +33,9 @@ impl RouterState {
                 status,
                 message,
             } => self.on_turn_ended(identity, status, message),
-            ServerEvent::TurnEvent { identity, event } => self.on_scoped(identity, *event),
+            ServerEvent::TurnEvent {
+                identity, event, ..
+            } => self.on_scoped(identity, *event),
             event => self.on_flat(event),
         }
     }

@@ -101,6 +101,7 @@ fn turn_ended(turn_id: u64, status: TurnEndStatus) -> ServerEvent {
 
 fn scoped(turn_id: u64, event: ServerEvent) -> ServerEvent {
     ServerEvent::TurnEvent {
+        end: None,
         identity: identity(turn_id),
         event: Box::new(event),
     }

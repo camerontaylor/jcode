@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn scoped_terminal_roundtrips_without_changing_legacy_done_shape() {
     let event = ServerEvent::TurnEvent {
+        end: None,
         identity: crate::TurnIdentity {
             runtime_generation: "runtime-uuid".into(),
             turn_id: 7,
@@ -11,7 +12,10 @@ fn scoped_terminal_roundtrips_without_changing_legacy_done_shape() {
     };
     let wire = encode_event(&event);
     let decoded: ServerEvent = serde_json::from_str(&wire).unwrap();
-    let ServerEvent::TurnEvent { identity, event } = decoded else {
+    let ServerEvent::TurnEvent {
+        identity, event, ..
+    } = decoded
+    else {
         panic!("missing scope");
     };
     assert_eq!(identity.runtime_generation, "runtime-uuid");
@@ -258,4 +262,16 @@ fn turn_origin_capability_is_advertised() {
         !capabilities.iter().any(|c| c == "turn_lifecycle"),
         "the fork's incompatible lifecycle capability must not be advertised"
     );
+}
+
+#[test]
+fn scoped_terminal_preserves_authoritative_end_classification() {
+    for status in ["completed", "failed", "cancelled"] {
+        let wire = serde_json::json!({
+            "type": "turn_event", "identity": {"runtime_generation": "runtime", "turn_id": 1},
+            "event": {"type": "done", "id": 42}, "end": status
+        });
+        let decoded: ServerEvent = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+    }
 }

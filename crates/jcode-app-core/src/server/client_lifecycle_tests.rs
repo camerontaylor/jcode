@@ -14,6 +14,7 @@ fn identity_transport_negotiation_preserves_legacy_payload_shape() {
         turn_id: 7,
     };
     let wrapped = ServerEvent::TurnEvent {
+        end: None,
         identity: identity.clone(),
         event: Box::new(ServerEvent::Done { id: 99 }),
     };

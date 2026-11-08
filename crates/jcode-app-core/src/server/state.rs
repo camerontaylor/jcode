@@ -538,6 +538,21 @@ impl TurnEventDrain {
     /// Forward one producer event in the turn's scope. The first terminal is
     /// preceded by `turn_ended`.
     async fn forward(&mut self, event: ServerEvent) {
+        self.forward_with_end(event, None).await;
+    }
+
+    async fn forward_with_end(
+        &mut self,
+        event: ServerEvent,
+        forced_end: Option<crate::protocol::TurnEndStatus>,
+    ) {
+        let end = is_turn_terminal(&event).then(|| {
+            forced_end.unwrap_or_else(|| match &event {
+                ServerEvent::Error { .. } => crate::protocol::TurnEndStatus::Failed,
+                _ if self.cancel.cancelled() => crate::protocol::TurnEndStatus::Cancelled,
+                _ => crate::protocol::TurnEndStatus::Completed,
+            })
+        });
         if is_turn_terminal(&event) {
             if self.terminal_published {
                 return;
@@ -545,17 +560,15 @@ impl TurnEventDrain {
             self.terminal_published = true;
         }
         if !self.ended && is_turn_terminal(&event) {
-            let (status, message) = match &event {
-                ServerEvent::Error { message, .. } => (
-                    crate::protocol::TurnEndStatus::Failed,
-                    Some(message.clone()),
-                ),
-                _ if self.cancel.cancelled() => (crate::protocol::TurnEndStatus::Cancelled, None),
-                _ => (crate::protocol::TurnEndStatus::Completed, None),
+            let message = match &event {
+                ServerEvent::Error { message, .. } => Some(message.clone()),
+                _ => None,
             };
+            let status = end.expect("terminal classification");
             self.end(status, message).await;
         }
         self.publish(ServerEvent::TurnEvent {
+            end,
             identity: self.identity.clone(),
             event: Box::new(event),
         })
@@ -580,6 +593,8 @@ impl TurnEventDrain {
         if self.ended {
             return;
         }
+        let forced_end = matches!(exit, TurnEventExit::Dropped { panicking: false })
+            .then_some(crate::protocol::TurnEndStatus::Cancelled);
         let terminal = match exit {
             TurnEventExit::Dropped { panicking: true } => ServerEvent::Error {
                 id: self.terminal_id,
@@ -600,7 +615,7 @@ impl TurnEventDrain {
                 id: self.terminal_id,
             },
         };
-        self.forward(terminal).await;
+        self.forward_with_end(terminal, forced_end).await;
     }
 }
 

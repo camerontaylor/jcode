@@ -247,7 +247,9 @@ async fn read_until(
 
 fn scoped_payload(event: &ServerEvent) -> Option<(&crate::protocol::TurnIdentity, &ServerEvent)> {
     match event {
-        ServerEvent::TurnEvent { identity, event } => Some((identity, event)),
+        ServerEvent::TurnEvent {
+            identity, event, ..
+        } => Some((identity, event)),
         _ => None,
     }
 }
@@ -310,6 +312,16 @@ async fn aborted_turn_publishes_a_scoped_terminal_to_every_attachment() {
 
     for (rx, identity) in receivers.iter_mut().zip(&identities) {
         let events = read_until(rx, |event| is_scoped_done(event, 21)).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(ServerEvent::TurnEvent {
+                    end: Some(crate::protocol::TurnEndStatus::Cancelled),
+                    ..
+                })
+            ),
+            "producer abort classification must survive on the terminal"
+        );
         let (scope, _) = scoped_payload(events.last().unwrap()).unwrap();
         assert_eq!(
             scope, identity,

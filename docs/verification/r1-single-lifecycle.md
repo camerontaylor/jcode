@@ -393,3 +393,22 @@ scoped terminal refinement; adapter-owned local bracket delivery; adapter
 switch; removal of competing protocol lifecycle and redundant bookkeeping;
 coverage migration and all requested equivalence commands. This document
 records preparatory work, not acceptance of R1.
+
+## Additive terminal refinement checkpoint
+
+`ServerEvent::TurnEvent` now has optional `end: Option<TurnEndStatus>`, omitted
+when absent. The drain sets it only on its one scoped terminal. Producer Error
+and panic classify failed; the cancellation epoch classifies cancelled;
+producer drop forces cancelled even without a Stop; normal completion remains
+completed. The old event is temporarily retained until the adapter switch.
+
+Failing-first command:
+`CARGO_BUILD_RUSTC_WRAPPER= nice -n 10 cargo test -j 3 -p jcode-protocol --lib scoped_terminal_preserves_authoritative_end_classification`
+failed because roundtrip discarded `end`. After refinement:
+
+- `... -p jcode-protocol --lib turn_identity`: 9 passed.
+- `... --lib cli::acp::daemon_router::tests`: 41 passed.
+- `... -p jcode-app-core --lib turn_event_channel_tests`: 13 passed, including
+  authoritative cancelled classification on both attachments after abort.
+
+All commands used `CARGO_BUILD_RUSTC_WRAPPER= nice -n 10 cargo test -j 3`.

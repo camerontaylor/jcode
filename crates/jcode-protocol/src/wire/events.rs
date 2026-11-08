@@ -205,6 +205,9 @@ pub enum ServerEvent {
     /// All events owned by a turn, including its terminal, share this scope.
     #[serde(rename = "turn_event")]
     TurnEvent {
+        /// Authoritative classification, present only on the scoped terminal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<TurnEndStatus>,
         identity: TurnIdentity,
         event: Box<ServerEvent>,
     },
