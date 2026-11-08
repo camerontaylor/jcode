@@ -1,0 +1,78 @@
+# ACP fork implementation record
+
+Living task list and record for executing [the strategy](ACP_FORK_STRATEGY.md)
+against [the interface contract](ACP_FORK_INTERFACE.md). It is the
+orchestrator's durable state: if context is lost, resume from here. Update it
+in the same push as any lane state change. Status claims cite a commit, a CI
+run or a named test; "done" without evidence is not done.
+
+Orchestrator branch: `orchestrate-acp-fork-plan` (worktree
+`~/.paseo/worktrees/0wvdg91s/naughty-chicken` on atlas), based on `custom`
+at `a047a0c07`.
+
+## Delegation policy
+
+- **Sol** = Paseo `codex/gpt-6.1-sol`, thinking `medium`: critical work, i.e.
+  daemon concurrency/cancellation, lifecycle (R1), protocol test
+  infrastructure and anything the consumer gates on.
+- **DeepSeek** = Paseo `dsh` (DeepSeek V4.1 Flash), thinking `high`: additive,
+  mechanical or well-specified work such as the CI workflow, metadata fields,
+  docs and fixture plumbing that already has a design.
+- Every lane gets its own Paseo worktree on a topic branch off `origin/custom`
+  and pushes that branch. The orchestrator reviews, then integrates into
+  `custom` (merge, no rebase of merged branches); D1/D2 fixes go on their
+  `pr/*` branch as new commits (merge-forward).
+- Labels: `cq.role` = `fixer`/`researcher`/`critic`, `cq.task` = lane id.
+- Builds: `nice`, `-j 2`, named tests only, `systemd-run --user --scope -p
+  MemoryMax=…` where available; check `free -m` first. Runtime checks use
+  `./target/selfdev/jcode … --socket /run/user/$UID/jcode-<lane>.sock`.
+
+## Test quality bar (core protocol)
+
+Every lane that changes wire behavior adds tests at the lowest layer that can
+observe it, plus a wire-level test:
+
+1. Adapter JSON-shape tests (`src/cli/acp/tests.rs`) for every field the
+   contract names, including absence/`null` cases and error codes
+   (`-32601` unknown method, `-32602` bad params).
+2. Router/lifecycle tests (`src/cli/acp/daemon_router_tests.rs`) for ordering:
+   start precedes output precedes exactly one terminal.
+3. Wire-level conformance (`tests/e2e/acp_*.rs`) driving `jcode acp` over
+   stdio against the mock provider on a private socket, asserting framed
+   JSON-RPC, not internal structs.
+4. Races use a deterministic seam (test-only yield/barrier), never sleeps.
+5. Fixture corpus (`tests/fixtures/acp/*.jsonl`) replays in CI and fails on
+   drift (opaque IDs matched structurally).
+
+## Task list
+
+| Id | Phase | Lane / branch | Worker | Status | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| P0-docs | 0 | planning docs on `custom` | n/a | done | `docs/ACP_FORK_*`, `docs/acp-pins/` present at `a047a0c07` |
+| P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek | pending | |
+| P0-budget | 0 | same branch: fork budget baseline files + script flag | DeepSeek | pending | |
+| P0-record | 0 | first green run on `custom` recorded here | orchestrator | blocked on P0-ci | |
+| P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek | pending | |
+| P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward | Sol | pending | |
+| T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol | pending | |
+| P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs` | Sol | not started (after P1-race) | |
+| P2-R2 | 2 | catalog facade in `jcode-harness-api-server` | DeepSeek | not started | |
+| P3-corr | 3 | turn correlation `_meta.jcode.turnId` + `role` on prompt responses | Sol | not started | |
+| P3-detach | 3 | `_jcode/detach` | Sol | not started | |
+| P3-skill | 3 | `skill: null` clear | DeepSeek | not started | |
+| P3-mcp | 3 | ignored `mcpServers` notice | DeepSeek | not started | |
+| P3-map | 3 | reasoning/plans/tool metadata mappings | DeepSeek | not started | |
+| P3-corpus | 3 | record scenarios 1–5, 7, 8 (v1) into corpus; CI replay | Sol | not started (needs T-conf) | |
+| P0-split | 0/4 | split `src/cli/acp.rs` into transport/session/presentation | Sol | not started (after P3 adapter churn settles) | |
+
+Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
+
+## Log
+
+- 2026-11-08: Record created. Preconditions re-checked: HEAD = `custom` =
+  `origin/custom` = `a047a0c07`; docs and pins present on `custom`; no fork CI
+  workflow exists (`.github/workflows/` has only upstream plus
+  `fork-release.yml`). Decision: start P0-ci, P1-meta, P1-race and T-conf
+  concurrently on separate topic branches. Phase 1 lanes may develop before
+  P0 is green but are not integrated into `custom` until the fork workflow
+  runs on their head (strategy: until then claims are named local tests).
