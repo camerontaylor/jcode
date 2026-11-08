@@ -1,8 +1,14 @@
 name: Fork release
 
 # Builds and publishes camerontaylor/jcode releases for the hosts that run it:
-# Linux x86_64 (portable glibc 2.17 baseline), Linux arm64 (native Ubuntu 24.04,
-# glibc 2.39 baseline; atlas), macOS arm64, macOS x86_64.
+# Linux x86_64 and arm64 (native Ubuntu 24.04, glibc 2.39 baseline), macOS
+# arm64, macOS x86_64. The portable glibc 2.17 Linux x86_64 build is manual
+# only (workflow_dispatch with linux_compat) and never a release asset.
+#
+# Caching: GitHub caches saved under a tag are invisible to the next tag, so
+# release builds only restore. Pushes to custom (the default branch) run the
+# same build matrix without publishing, purely to save warm caches that the
+# next tag build can read.
 # `jcode update`, auto-update and the agents repo's harness-update all read
 # this fork's latest release (GITHUB_REPO in crates/jcode-app-core/src/update.rs).
 #
@@ -14,6 +20,8 @@ name: Fork release
 env:
   JCODE_CI: "1"
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  # "true" for a tag push or a dispatch naming a tag; "false" for cache warming.
+  IS_RELEASE: ${{ (inputs.tag || github.ref_type == 'tag') && 'true' || 'false' }}
   CARGO_BUILD_RUSTC_WRAPPER: ""
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
@@ -26,16 +34,27 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - custom
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing fork tag (vMAJOR.MINOR.PATCH+fork.pN)
-        required: true
+        description: Existing fork tag to release (vMAJOR.MINOR.PATCH+fork.pN); empty = warm caches only
+        required: false
         type: string
+      linux_compat:
+        description: Also build the portable glibc 2.17 Linux x86_64 binary (workflow artifact only)
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: fork-release-${{ inputs.tag || github.ref_name }}
-  cancel-in-progress: false
+  # Never cancel a release; a newer custom push supersedes a cache-warm run.
+  cancel-in-progress: ${{ !(inputs.tag || github.ref_type == 'tag') }}
 
 permissions:
   contents: write
@@ -43,7 +62,7 @@ permissions:
 jobs:
   preflight:
     name: Validate release provenance
-    if: github.repository == 'camerontaylor/jcode'
+    if: github.repository == 'camerontaylor/jcode' && (inputs.tag || github.ref_type == 'tag')
     runs-on: ubuntu-latest
     outputs:
       tagged_sha: ${{ steps.provenance.outputs.tagged_sha }}
@@ -94,17 +113,17 @@ jobs:
   build:
     name: Build (${{ matrix.artifact }})
     needs: preflight
-    if: github.repository == 'camerontaylor/jcode'
+    # preflight is skipped on cache-warm runs; build must still run then.
+    if: github.repository == 'camerontaylor/jcode' && !failure() && !cancelled()
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact: jcode-linux-x86_64
-            compat_container: true
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: jcode-linux-aarch64
@@ -117,7 +136,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ env.IS_RELEASE == 'true' && env.RELEASE_TAG || github.sha }}
           # build-meta and build_linux_compat.sh embed git log -700 for /changelog.
           fetch-depth: 0
 
@@ -129,29 +148,20 @@ jobs:
         with:
           key: ${{ matrix.target }}
           cache-all-crates: "true"
-
-      - name: Build portable Linux x86_64 binary
-        if: matrix.compat_container == true
-        run: scripts/build_linux_compat.sh dist
-        env:
-          JCODE_RELEASE_BUILD: "1"
-          JCODE_CI_BUILD: "1"
-          JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
-          JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
+          # Tag-scoped caches can't be read by the next tag; only custom saves.
+          save-if: ${{ github.ref == 'refs/heads/custom' }}
 
       - name: Build native binary
-        if: matrix.compat_container != true
         run: cargo build --locked --release --target ${{ matrix.target }}
         env:
           JCODE_RELEASE_BUILD: "1"
           JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
 
-      - name: Package Linux arm64 binary
-        if: runner.os == 'Linux' && matrix.compat_container != true
+      - name: Package Linux binary
+        if: runner.os == 'Linux'
         run: |
-          # Same layout as the portable x86_64 artifact: a launcher plus the
-          # .bin. jcode's updater installs the launcher (the non-.bin entry)
+          # Launcher plus .bin, the layout build_linux_compat.sh also produces. jcode's updater installs the launcher (the non-.bin entry)
           # and the files beside it; harness-update extracts the .bin.
           mkdir -p dist
           cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}.bin
@@ -182,6 +192,7 @@ jobs:
           cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
 
       - name: Check embedded version
+        if: env.IS_RELEASE == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -195,18 +206,44 @@ jobs:
           esac
 
       - uses: actions/upload-artifact@v4
+        if: env.IS_RELEASE == 'true'
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}.tar.gz
 
+  build-linux-compat:
+    name: Build (portable Linux x86_64, manual)
+    if: github.repository == 'camerontaylor/jcode' && github.event_name == 'workflow_dispatch' && inputs.linux_compat
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.IS_RELEASE == 'true' && env.RELEASE_TAG || github.sha }}
+          fetch-depth: 0
+      - name: Build portable Linux x86_64 binary (glibc 2.17)
+        run: scripts/build_linux_compat.sh dist
+        env:
+          JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
+          JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
+          JCODE_COMPAT_ARTIFACT: jcode-linux-x86_64
+      # Not named jcode-*: the release job only publishes jcode-* artifacts.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compat-jcode-linux-x86_64
+          path: dist/jcode-linux-x86_64.tar.gz
+
   release:
     name: Publish release
     needs: [preflight, build]
+    if: (inputs.tag || github.ref_type == 'tag') && needs.preflight.result == 'success' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: jcode-*
           merge-multiple: true
       - name: Publish
         env:
