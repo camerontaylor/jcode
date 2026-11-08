@@ -1329,3 +1329,72 @@ async fn two_steering_producers_withdraw_on_either_side_of_insertion() {
     task.take().unwrap().await.unwrap();
     assert!(observer.try_recv().is_err(), "one terminal, after all inserted output");
 }
+
+/// Reuse the dispatch lock seam, with independent publication so normal
+/// completion can retire T while cancellation is paused before revalidation.
+#[tokio::test]
+async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let mut harness = TurnHarness::new("completed_before_stop", 1, Arc::new(HangingStreamProvider)).await;
+    let mut observer = harness.take_receiver(0);
+    let guard = harness.agent.lock().await;
+    let lease = guard.claim_server_turn().unwrap();
+    let identity = lease.identity().clone();
+    let signal = guard.graceful_shutdown_signal();
+    drop(guard);
+    let events = super::super::state::TurnEventChannel::new(
+        harness.session_id.clone(), Arc::clone(&harness.swarm_members), harness.senders[0].clone(),
+        &lease, 77, crate::protocol::TurnOrigin::client(None, 77), Some("normal turn".into()));
+    let (complete, completed) = tokio::sync::oneshot::channel();
+    let (retired, retirement) = tokio::sync::oneshot::channel();
+    let (finish, finishing) = tokio::sync::oneshot::channel();
+    let (exited, exit) = tokio::sync::oneshot::channel();
+    // Publication can complete before the producer's final bookkeeping exits.
+    let mut task = Some(tokio::spawn(async move {
+        completed.await.unwrap();
+        events.sender().send(ServerEvent::TextDelta { text: "normal output".into() }).unwrap();
+        events.sender().send(ServerEvent::Done { id: 77 }).unwrap();
+        events.finish().await;
+        drop(lease);
+        retired.send(()).unwrap();
+        finishing.await.unwrap();
+        exited.send(()).unwrap();
+    }));
+    let control = SessionControlHandle::cancel_only(harness.session_id.clone(),
+        Arc::new(std::sync::Mutex::new(Vec::new())), signal.clone());
+    let (requester, mut replies) = mpsc::unbounded_channel();
+    let mut processing = true;
+    let mut message = Some(77);
+    let mut session = Some(harness.session_id.clone());
+    let mut state = ProcessingState { client_is_processing: &mut processing,
+        message_id: &mut message, session_id: &mut session, task: &mut task };
+    // A separate outbound registry blocks dispatch without blocking T's drain.
+    let dispatch_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarm = SwarmStatusRefs { members: &dispatch_members, ..harness.swarm() };
+    let blocked = dispatch_members.write().await;
+    let cancel = super::client_processing::cancel_processing_message_for_turn(
+        &mut state, &control, &requester, &swarm, Some(78), None, Some(&harness.sessions), None);
+    tokio::pin!(cancel);
+    assert!(futures::poll!(cancel.as_mut()).is_pending());
+    complete.send(()).unwrap();
+    let normal = read_until(&mut observer, |event| is_scoped_done(event, 77)).await;
+    retirement.await.unwrap();
+    assert!(normal.iter().any(|event| matches!(event, ServerEvent::TurnEnded {
+        identity: ended, status: crate::protocol::TurnEndStatus::Completed, .. } if ended == &identity)));
+    assert_eq!(normal.iter().filter(|event| is_scoped_done(event, 77)).count(), 1);
+    assert!(!normal.iter().any(|event| scoped_payload(event).is_some_and(|(_, event)| matches!(event, ServerEvent::Interrupted))));
+    let epoch = signal.epoch();
+    let successor = harness.agent.lock().await.claim_server_turn().unwrap();
+    drop(blocked);
+    cancel.await;
+    finish.send(()).unwrap();
+    exit.await.unwrap();
+    let replies: Vec<_> = std::iter::from_fn(|| replies.try_recv().ok()).collect();
+    assert!(!replies.iter().any(|event| scoped_payload(event).is_some_and(|(scope, event)|
+        scope == &identity && matches!(event, ServerEvent::Interrupted))),
+        "a naturally completed turn must not be reported interrupted: {replies:?}");
+    assert_eq!(signal.epoch(), epoch, "late Stop must not fire the successor signal");
+    assert!(!signal.is_set());
+    drop(successor);
+}
