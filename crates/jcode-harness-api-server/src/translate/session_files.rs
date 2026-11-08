@@ -27,7 +27,7 @@ impl BridgeState {
     pub(super) fn session_root(
         session_id: &str,
     ) -> Result<std::path::PathBuf, (ErrorCode, String)> {
-        let root = crate::session_catalog::resolve_working_dir(session_id).ok_or((
+        let root = Self::resolve_working_dir(session_id).ok_or((
             ErrorCode::UnknownSession,
             "session has no working directory".into(),
         ))?;
