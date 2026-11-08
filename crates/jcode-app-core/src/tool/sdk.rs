@@ -26,23 +26,28 @@ static NEXT_CALL: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct ConnectionGuard(pub String);
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
-        // Unlike general SDK restrictions, this temporary bridge has no
-        // built-in override to protect after disconnect. Keeping it would
-        // permanently block reload if its grant expires before reconnect.
-        state.overlays.retain(|_, overlay| {
-            !(overlay.owner == self.0
-                && overlay.config.enabled.is_none()
-                && overlay.config.disabled.is_empty()
-                && overlay.config.custom.len() == 1
-                && overlay.config.custom[0].name == "cloud_environment")
-        });
-        for overlay in state.overlays.values_mut().filter(|o| o.owner == self.0) {
-            // Retain definitions and denies, but never fall back to a built-in override.
-            overlay.sender = None;
-        }
-        state.pending.retain(|_, pending| pending.owner != self.0);
+        release_connection(&self.0);
     }
+}
+
+/// Release callback ownership while retaining session tool definitions.
+pub(crate) fn release_connection(owner: &str) {
+    let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
+    // Unlike general SDK restrictions, this temporary bridge has no
+    // built-in override to protect after disconnect. Keeping it would
+    // permanently block reload if its grant expires before reconnect.
+    state.overlays.retain(|_, overlay| {
+        !(overlay.owner == owner
+            && overlay.config.enabled.is_none()
+            && overlay.config.disabled.is_empty()
+            && overlay.config.custom.len() == 1
+            && overlay.config.custom[0].name == "cloud_environment")
+    });
+    for overlay in state.overlays.values_mut().filter(|o| o.owner == owner) {
+        // Retain definitions and denies, but never fall back to a built-in override.
+        overlay.sender = None;
+    }
+    state.pending.retain(|_, pending| pending.owner != owner);
 }
 
 pub(crate) fn remove_session(session: &str) {

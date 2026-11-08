@@ -1496,7 +1496,7 @@ pub(super) async fn handle_resume_session(
         }
 
         if *client_session_id != session_id {
-            drop(crate::tool::sdk::ConnectionGuard(client_connection_id.to_string()));
+            crate::tool::sdk::release_connection(client_connection_id);
         }
         *client_session_id = session_id.clone();
 
@@ -1768,7 +1768,7 @@ pub(super) async fn handle_resume_session(
             };
             let old_session_id = client_session_id.clone();
             if *client_session_id != session_id {
-                drop(crate::tool::sdk::ConnectionGuard(client_connection_id.to_string()));
+                crate::tool::sdk::release_connection(client_connection_id);
             }
             *client_session_id = session_id.clone();
             let attach_start = Instant::now();

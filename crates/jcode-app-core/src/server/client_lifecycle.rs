@@ -1530,7 +1530,7 @@ pub(super) async fn handle_client(
             }
 
             Request::PrepareDisconnect { id } => {
-                drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));
+                crate::tool::sdk::release_connection(&client_connection_id);
                 let json = encode_event(&ServerEvent::Done { id });
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
@@ -3258,7 +3258,7 @@ pub(super) async fn handle_client(
             crate::mobile_push::note_client_attached(&client_session_id, name);
         }
         if sdk_session_before_request != client_session_id {
-            drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));
+            crate::tool::sdk::release_connection(&client_connection_id);
         }
         if request_lifecycle_logged {
             log_request_lifecycle_handled(
