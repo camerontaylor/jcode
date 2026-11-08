@@ -338,7 +338,13 @@ impl EventMapper {
 }
 
 pub(super) fn parse_json_object(input: &str) -> Option<Value> {
-    let value: Value = serde_json::from_str(input).ok()?;
+    let value: Value = match serde_json::from_str(input) {
+        Ok(value) => value,
+        Err(error) => {
+            crate::logging::debug(&format!("acp: invalid tool JSON: {error}"));
+            return None;
+        }
+    };
     value.as_object()?;
     Some(value)
 }
@@ -397,7 +403,13 @@ pub(super) fn tool_locations(name: &str, input: &Value, working_dir: Option<&Pat
             .and_then(|field| input.get(field))
             .and_then(Value::as_u64)
             .filter(|line| *line > 0)
-            .and_then(|line| u32::try_from(line).ok());
+            .and_then(|line| match u32::try_from(line) {
+                Ok(line) => Some(line),
+                Err(error) => {
+                    crate::logging::debug(&format!("acp: invalid tool line: {error}"));
+                    None
+                }
+            });
         locations.push(match line {
             Some(line) => json!({ "path": path, "line": line }),
             None => json!({ "path": path }),
@@ -610,10 +622,9 @@ pub(super) fn insert_jcode_session_meta(
     }
 }
 
-pub(super) fn initialize_result(params: &Value, profile: AcpProfile) -> Value {
+pub(super) fn initialize_result(_params: &Value, profile: AcpProfile) -> Value {
     // We only speak exactly ACP_PROTOCOL_VERSION; the response pins to our
     // version regardless of the `protocolVersion` the client requested.
-    let _ = params;
     let protocol_version = ACP_PROTOCOL_VERSION;
     let mut agent_capabilities = json!({
         "loadSession": true,

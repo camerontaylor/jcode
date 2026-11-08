@@ -1188,7 +1188,9 @@ impl RouterState {
             ));
             return;
         };
-        let _ = pending.tx.send(RoutedEvent::Event(event));
+        if let Err(error) = pending.tx.send(RoutedEvent::Event(event)) {
+            crate::logging::debug(&format!("acp: prompt receiver disconnected: {error}"));
+        }
     }
 }
 

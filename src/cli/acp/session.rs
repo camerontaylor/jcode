@@ -352,11 +352,8 @@ pub(super) fn streamed_prompt_response(
     let mut response = prompt_response(stop_reason, usage);
     if let Some((turn_id, role)) = correlation {
         response["_meta"]["jcode"] = json!({"turnId":turn_id,"role":role});
-    } else if !turnless {
-        response
-            .as_object_mut()
-            .expect("prompt response is an object")
-            .remove("_meta");
+    } else if !turnless && let Some(object) = response.as_object_mut() {
+        object.remove("_meta");
     }
     response
 }
