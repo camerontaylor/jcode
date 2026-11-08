@@ -1,5 +1,4 @@
 use super::*;
-use std::path::Path;
 
 #[cfg(unix)]
 #[tokio::test]
@@ -749,7 +748,7 @@ fn event_mapper_reports_no_diff_for_a_failed_edit() {
     assert_eq!(done[0]["content"][0]["type"], "content");
 }
 
-fn todo_snapshot(todos: Value) -> String {
+pub(super) fn todo_snapshot(todos: Value) -> String {
     json!({"todos": todos, "plan": {}, "goals": []}).to_string()
 }
 

@@ -1,5 +1,5 @@
-use super::dispatch;
 use super::provider_init::ProviderChoice;
+use super::{commands, dispatch};
 use crate::protocol::{Request, ServerEvent, TurnEndStatus, TurnOrigin};
 use crate::transport::{ReadHalf, WriteHalf};
 use anyhow::Result;
@@ -938,4 +938,3 @@ use presentation::*;
 mod requests;
 use requests::*;
 mod prompt;
-use prompt::*;
