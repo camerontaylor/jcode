@@ -51,7 +51,7 @@ behavior of the clause, not a browser/client UI promise.
 | C-DISCOVERY-P08 | acp_conformance_negotiation_legacy_v1; acp_capability_metadata_identifies_each_attachment; unit: initialize_advertises_jcode_capability_meta_in_every_profile |
 | C-OPERATIONS-P01 | acp_conformance_create_list_load; acp_conformance_list_metadata_and_pagination; acp_conformance_close_owner_aware_v1; acp_conformance_config_commands_v1; UI/pagination cursor handling is consumer-side |
 | C-OPERATIONS-P02 | acp_conformance_create_list_load; acp_conformance_list_metadata_and_pagination; acp_conformance_close_owner_aware_v1; acp_conformance_config_commands_v1; UI/pagination cursor handling is consumer-side |
-| C-SHARED-P01 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; transport loss target: unit router settlement tests |
+| C-SHARED-P01 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; known-fail: acp_conformance_transport_loss_withdraws_waiting_steer |
 | C-V2CLOSE-P01 | Deferred v2/SDK track; no v1 wire requirement |
 | C-V2CLOSE-P02 | Deferred v2/SDK track; no v1 wire requirement |
 | C-V2CLOSE-P03 | Deferred v2/SDK track; no v1 wire requirement |
@@ -66,11 +66,11 @@ behavior of the clause, not a browser/client UI promise.
 | C-V2META-P01 | Deferred v2/SDK track; no v1 wire requirement |
 | C-V2META-P02 | Deferred v2/SDK track; no v1 wire requirement |
 | C-V2META-P03 | Deferred v2/SDK track; no v1 wire requirement |
-| C-CONFIG-P01 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
-| C-CONFIG-P02 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
-| C-CONFIG-P03 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
-| C-CONFIG-P04 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
-| C-CONFIG-P05 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P01 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P02 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P03 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P04 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P05 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
 | C-CONFIG-P06 | Deferred v2 command insertion/echo |
 | C-CONFIG-P07 | acp_skill_clear_round_trip; unit: skill_selection_reads_the_canonical_metadata_field |
 | C-CONTENT-P01 | acp_conformance_maps_reasoning_tool_calls_and_plan; unit: prompt_from_params_accepts_text_images_and_resources, event_mapper_reports_no_diff_for_a_failed_edit; diagnostics: initialize_advertises_jcode_capability_meta_in_every_profile; client rendering is consumer-side |
@@ -128,19 +128,19 @@ behavior of the clause, not a browser/client UI promise.
 | C-OPERATIONS-P01-R8 | acp_conformance_create_list_load; acp_conformance_list_metadata_and_pagination; acp_conformance_close_owner_aware_v1; acp_conformance_config_commands_v1; UI/pagination cursor handling is consumer-side |
 | C-OPERATIONS-P01-R9 | acp_conformance_create_list_load; acp_conformance_list_metadata_and_pagination; acp_conformance_close_owner_aware_v1; acp_conformance_config_commands_v1; UI/pagination cursor handling is consumer-side |
 | C-OPERATIONS-P01-R10 | acp_conformance_create_list_load; acp_conformance_list_metadata_and_pagination; acp_conformance_close_owner_aware_v1; acp_conformance_config_commands_v1; UI/pagination cursor handling is consumer-side |
-| C-SHARED-P01-R1 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; transport loss target: unit router settlement tests |
-| C-SHARED-P01-R2 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; transport loss target: unit router settlement tests |
-| C-SHARED-P01-R3 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; transport loss target: unit router settlement tests |
-| C-SHARED-P01-R4 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; transport loss target: unit router settlement tests |
+| C-SHARED-P01-R1 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; known-fail: acp_conformance_transport_loss_withdraws_waiting_steer |
+| C-SHARED-P01-R2 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; known-fail: acp_conformance_transport_loss_withdraws_waiting_steer |
+| C-SHARED-P01-R3 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; known-fail: acp_conformance_transport_loss_withdraws_waiting_steer |
+| C-SHARED-P01-R4 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; known-fail: acp_conformance_transport_loss_withdraws_waiting_steer |
 | C-CORRELATION-P01-I1 | acp_conformance_shared_observe_steer; acp_conformance_config_commands_v1; consumer completion deduplication is consumer-side |
 | C-CORRELATION-P01-I2 | acp_conformance_shared_observe_steer; acp_conformance_config_commands_v1; consumer completion deduplication is consumer-side |
 | C-CORRELATION-P01-I3 | acp_conformance_shared_observe_steer; acp_conformance_config_commands_v1; consumer completion deduplication is consumer-side |
 | C-CORRELATION-P01-I4 | acp_conformance_shared_observe_steer; acp_conformance_config_commands_v1; consumer completion deduplication is consumer-side |
-| C-CONFIG-P01-I1 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
-| C-CONFIG-P01-I2 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
-| C-CONFIG-P01-I3 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
-| C-CONFIG-P01-I4 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
-| C-CONFIG-P01-I5 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P01-I1 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P01-I2 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P01-I3 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P01-I4 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P01-I5 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
 | C-ERRORS-P04-I1 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
 | C-ERRORS-P04-I2 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
 | C-ERRORS-P04-I3 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
@@ -243,3 +243,51 @@ The original atlas report was observational and its hypotheses are superseded.
 - Corpus files 01–05 and 07–11: ten files. 06 is the deferred v2 delivery scenario.
   New 09 is active-turn attach, 10 reverse steer, 11 clean imported repeated user
   rows. All are live recorded and structurally replayed via the existing helper.
+
+## Additional retirement probes and precise coverage limits
+
+- `acp_conformance_busy_config_errors_are_atomic`: an owner with a gated active
+  prompt rejects model/config/effort changes; after retirement, a fresh load
+  shows the original complete options and effective model.
+- `acp_conformance_peer_config_serializes_after_active_turn`: a peer's valid
+  model setter is deferred until the authoritative active agent lock is released;
+  it succeeds with full effective options, and the active provider call retains
+  the old model. This is observed behavior, not a new requirement that all busy
+  setters must serialize. **Proposed wording for owner approval:** “Busy config
+  may be rejected or serialized; a rejected request has no side effects, and a
+  serialized request applies only after active turn retirement.” Existing prose
+  tells consumers to submit while idle and handle busy responses, but does not
+  explicitly require busy rejection. We therefore do not classify serialization
+  itself as a defect or assert an arbitrary response deadline.
+- `acp_conformance_transport_loss_preserves_inserted_work`: abrupt origin ACP
+  child loss closes the daemon socket; a surviving witness receives normal
+  completion of the same inserted turn.
+- **ACP-LOST-STEER**, new known defect:
+  `acp_conformance_transport_loss_withdraws_waiting_steer` confirms queue admission
+  before killing the steering ACP child, while the provider remains gated before
+  its insertion safe point. After allowing cleanup and releasing the gate, the
+  baseline makes a second provider call for the disconnected attachment's input.
+  This execution assertion (2 calls instead of 1), not the cleanup timeout,
+  demonstrates the failed pending-input withdrawal. The assertion is ignored on
+  this baseline and assigned to the separate fix lane. Already-inserted steers
+  are intentionally outside this withdrawal expectation.
+
+Indexed does not mean independently tested end to end. Remaining limits:
+
+- C-CONFIG-P04: compact/subagent discovery and parsing are pinned; full daemon
+  compaction scheduling and spawned-worker lifetime are not exercised by this
+  ACP suite. Those mechanisms are outside the new boundary harness; no claim
+  that launch completion equals worker completion is tested here.
+- C-CONTENT-P04 and the client-side halves of list/config/capability clauses:
+  consumer rendering, own-echo suppression, diagnostic deduplication, reconnect
+  UI and capability gating belong to the Paseo consumer tests.
+- `stopObservedTurn=false` implies `observe=false` in the current capability
+  matrix. Legacy wire tests and the unit matrix pin that state; no unsupported
+  observable-but-forbidden-Stop daemon capability combination is invented.
+- The generator covers short, valid bounded schedules, not all arbitrary
+  unbounded histories. Abrupt transport loss is tested separately; repeated load
+  without detach is retained as a known-fail schedule. Provider faults and many
+  queued steers remain in existing focused tests rather than randomized here.
+- Source/version governance, deferred v2/SDK and consumer-only clauses have
+  explicit non-wire dispositions in the inventory. Wording proposals above
+  remain proposals; none changes the authoritative contract's meaning.
