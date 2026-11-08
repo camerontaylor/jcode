@@ -219,3 +219,101 @@ unchanged (`git diff b471b419b 436e2489b --stat` is empty).
 
 All requested review corrections are addressed. D3 remains pending R1 as
 previously agreed. No shared daemon, installation or `custom` branch was changed.
+
+## F1 and sibling stopped-event review correction
+
+Review request `jcode-acp-p3-corr-detach-104604e23` identified **F1 (major)**:
+`cancel_processing_message_for_turn` took the local `JoinHandle`, but dropped it
+when `signal_target` rejected a retired/replaced target. The related finished
+handle path restored it correctly. The orchestrator also identified that both
+owning and non-owning dispatch published `TurnStopped` before revalidation.
+That event and its live-status update could falsely classify normal completion.
+
+### Failing-first evidence
+
+Tests were committed before the fix (`f40ec8838`, with receiver mutability
+corrected in `3c112e4aa`). Production cancellation code was unchanged from
+`26c296a09` for this run. The reused dispatch lock and oneshot gates contain
+no sleeps. The extended normal-completion helper now checks both notification
+variants, the exact retained producer task ID, and acceptance of the producer's
+successful completion by `reconcile_processing_completions`. Acceptance clears
+`client_is_processing`, `message_id`, `session_id` and the retained handle.
+The existing non-owning replacement test now also rejects false stopped events.
+
+Using the environment exports above:
+
+```sh
+nice -n 10 cargo test -j 2 -p jcode-app-core turn_event_channel_tests --lib
+```
+
+Recorded pre-fix result:
+
+```text
+cancellation_dispatch_cannot_signal_a_successor ... FAILED
+  a non-owning stale Stop must not publish stopped events
+  received TurnStopped { reason: Interrupted, ... } for the old turn
+
+completed_turn_is_not_reported_interrupted_by_a_late_stop ... FAILED
+  a naturally completed turn must not be reported stopped
+  received TurnStopped { reason: Interrupted, ... } for the completed turn
+
+late_stop_preserves_task_for_completion_reconciliation ... FAILED
+  stale cancellation must retain the task for completion reconciliation
+  left: None
+  right: Some(Id(19))
+
+11 passed; 3 failed; 1910 filtered out
+```
+
+The initial test-only build caught a missing mutable receiver binding; that
+compile failure is not counted as regression evidence. The output above is
+from the corrected executable test run.
+
+### Repair and ordering guarantee
+
+- `server/client_processing.rs:597` restores the taken handle on rejected
+  revalidation. Both early returns in the owning branch now preserve it.
+  The second `signal_target` call is non-owning and never takes a handle.
+- `server/state.rs:413` factors out `session_event_targets`, preserving the
+  existing sender pruning and fallback rules. Cancellation snapshots those
+  senders asynchronously before taking the task handle or the turn-state lock.
+- `server/client_processing.rs:554` sends `TurnStopped` and updates live status
+  only inside the successful `cancel_active` effect. Sender sends are synchronous;
+  the effect has no await and holds no async registry guard. It sends all stopped
+  notifications before firing cancellation and releasing the state lock.
+  Retirement needs that same state lock before publishing the terminal, so the
+  drain cannot enqueue its terminal before those notifications. Failed
+  revalidation sends neither `TurnStopped` nor `Interrupted` and changes no
+  local completion bookkeeping.
+- The non-owning registry-only idle fallback now applies only to controls without
+  an identity observer. Identity-backed requests always revalidate their captured
+  identity, preventing that fallback from emitting a false scoped `Interrupted`
+  after normal completion.
+
+Fix `e25ef4005` lives on `pr/turn-scoped-cancel` and was merged forward in
+`ff3d13747` on `fork/p1-cancel-race`. No rebase or force push was used.
+
+### Rerun results
+
+Same memory hygiene: checked available memory before builds, disk-backed target
+cache, mold, disabled compiler wrapper, `nice -n 10`, two jobs. No full suite.
+
+| Command after the environment exports above | Result |
+| --- | --- |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core server::client_lifecycle --lib` | 58 passed |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core turn_event_channel_tests --lib` | 14 passed, including all three formerly failing assertions |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core agent::turn_ownership::tests --lib` | 3 passed |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core server::client_session::tests --lib` | 44 passed |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core tool::sdk::tests --lib` | 4 passed |
+| `nice -n 10 cargo test -j 2 -p jcode daemon_router::tests --lib` | 37 passed |
+| `nice -n 10 cargo test -j 2 -p jcode --test e2e acp_shared_session` | 1 passed, 7.21 seconds |
+
+The turn-event tests overlap the lifecycle count. The scoped formatting check
+exits 0 on both the candidate and topic branches:
+
+```sh
+bash ~/.jcode-fork/fmt-check.sh 7fd42339c907de223021bd63e5bb5df778c43a01
+```
+
+Both findings are fixed and all named reruns pass. D3 remains pending R1;
+no installation, shared daemon or `custom` branch was changed.
