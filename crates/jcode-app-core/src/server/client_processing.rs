@@ -462,28 +462,7 @@ pub(super) fn cancel_targets_active_turn(
         .is_some_and(|active| &active == expected)
 }
 
-pub(super) async fn cancel_processing_message(
-    state: &mut ProcessingState<'_>,
-    session_control: &SessionControlHandle,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-    swarm: &SwarmStatusRefs<'_>,
-    request_id: Option<u64>,
-    request_decoded_at: Option<Instant>,
-    sessions: Option<&SessionAgents>,
-) {
-    cancel_processing_message_for_turn(
-        state,
-        session_control,
-        client_event_tx,
-        swarm,
-        request_id,
-        request_decoded_at,
-        sessions,
-        None,
-    )
-    .await;
-}
-
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn cancel_processing_message_for_turn(
     state: &mut ProcessingState<'_>,
     session_control: &SessionControlHandle,
@@ -526,7 +505,9 @@ pub(super) async fn cancel_processing_message_for_turn(
     .await;
     // The idle snapshot cannot acquire a target after an await.
     if observer.is_some() && identity.is_none() {
-        let _ = client_event_tx.send(ServerEvent::Interrupted);
+        if let Err(error) = client_event_tx.send(ServerEvent::Interrupted) {
+            crate::logging::debug(&format!("Cancel recipient disconnected: {error}"));
+        }
         return;
     }
     crate::logging::info(&format!(

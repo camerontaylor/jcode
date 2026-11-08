@@ -334,7 +334,7 @@ async fn cancel_without_local_task_still_signals_session_control() {
     let mut session_id = Some("session_detached_cancel".to_string());
     let mut task = None;
 
-    cancel_processing_message(
+    cancel_processing_message_for_turn(
         &mut ProcessingState {
             client_is_processing: &mut client_is_processing,
             message_id: &mut message_id,
@@ -351,6 +351,7 @@ async fn cancel_without_local_task_still_signals_session_control() {
             event_tx: &swarm_event_tx,
         },
         Some(99),
+        None,
         None,
         None,
     )
@@ -409,7 +410,7 @@ async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
         let mut message_id = Some(request_id);
         let mut session_id = Some("session_detached_cancel_race".to_string());
         let mut task = None;
-        cancel_processing_message(
+        cancel_processing_message_for_turn(
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut message_id,
@@ -426,6 +427,7 @@ async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
                 event_tx: &swarm_event_tx,
             },
             Some(request_id),
+            None,
             None,
             None,
         )

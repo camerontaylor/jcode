@@ -3462,7 +3462,7 @@ pub(super) async fn handle_client(
 #[path = "client_processing.rs"]
 mod client_processing;
 use client_processing::{
-    append_context_message, cancel_processing_message, cancel_processing_message_for_turn,
+    append_context_message, cancel_processing_message_for_turn,
     cancel_soft_interrupts_by_id, cancel_targets_active_turn, clear_soft_interrupts,
     move_tool_to_background, queue_soft_interrupt, reconcile_processing_completions,
     record_processing_completion, start_processing_message, try_available_models_snapshot,

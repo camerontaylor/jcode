@@ -210,7 +210,7 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
         let mut cancel_session_id = None;
         let mut task = None;
 
-        cancel_processing_message(
+        cancel_processing_message_for_turn(
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut message_id,
@@ -227,6 +227,7 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
                 event_tx: &swarm_event_tx,
             },
             Some(1),
+            None,
             None,
             None,
         )
@@ -298,7 +299,7 @@ fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()>
             "test precondition: the session must be idle"
         );
 
-        cancel_processing_message(
+        cancel_processing_message_for_turn(
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut message_id,
@@ -315,6 +316,7 @@ fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()>
                 event_tx: &swarm_event_tx,
             },
             Some(1),
+            None,
             None,
             None,
         )
@@ -391,7 +393,7 @@ fn message_after_peer_turn_cancel_is_not_killed_by_the_stale_signal() -> anyhow:
         let mut processing_session_id = None;
         let mut task = None;
 
-        cancel_processing_message(
+        cancel_processing_message_for_turn(
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut message_id,
@@ -402,6 +404,7 @@ fn message_after_peer_turn_cancel_is_not_killed_by_the_stale_signal() -> anyhow:
             &client_event_tx,
             &swarm,
             Some(1),
+            None,
             None,
             None,
         )

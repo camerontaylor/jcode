@@ -33,7 +33,9 @@ pub(super) fn config_reply_channel(
                 }
                 _ => false,
             };
-            let _ = requester.send(event);
+            if let Err(error) = requester.send(event) {
+                crate::logging::debug(&format!("Configuration requester disconnected: {error}"));
+            }
             if publish {
                 super::state::fanout_peer_client_event(&members, &session_id, &connection_id, peer)
                     .await;

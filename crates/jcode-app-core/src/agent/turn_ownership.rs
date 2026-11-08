@@ -242,6 +242,7 @@ impl TurnOwnership {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn claim(&self) -> anyhow::Result<TurnLease> {
         self.claim_after(|| {})
     }

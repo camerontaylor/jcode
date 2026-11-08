@@ -55,7 +55,7 @@ fn cancel_after_turn_claim_is_preserved() -> anyhow::Result<()> {
         let mut processing_session_id = None;
         let mut task = None;
 
-        cancel_processing_message(
+        cancel_processing_message_for_turn(
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut message_id,
@@ -66,6 +66,7 @@ fn cancel_after_turn_claim_is_preserved() -> anyhow::Result<()> {
             &client_event_tx,
             &swarm,
             Some(1),
+            None,
             None,
             None,
         )

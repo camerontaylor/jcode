@@ -471,7 +471,7 @@ async fn cancel_turn_stopped_is_scoped_to_the_active_turn_for_every_attachment()
         InterruptSignal::new(),
     );
     let requester = harness.senders[0].clone();
-    cancel_processing_message(
+    cancel_processing_message_for_turn(
         &mut ProcessingState {
             client_is_processing: &mut client_is_processing,
             message_id: &mut message_id,
@@ -484,6 +484,7 @@ async fn cancel_turn_stopped_is_scoped_to_the_active_turn_for_every_attachment()
         Some(32),
         None,
         Some(&harness.sessions),
+        None,
     )
     .await;
 
