@@ -55,7 +55,8 @@ turn even without a daemon terminal. Separately,
 `packages/server/src/server/agent/agent-manager.ts:3536`
 (`cancelAgentRunNow`) can force-settle its manager-owned run on timeout.
 These explain how idle can be displayed without proving the daemon stopped;
-they do not prove which dispatch/session error occurred in the original run.
+the reproduced core timing race can produce the observed divergence without
+any dispatch or session error.
 
 ## Reverse steer
 
@@ -88,24 +89,29 @@ replay the user twice. Existing adapter regressions include
 `replay_ids_prefer_the_stored_message_index`, and
 `a_replayed_prompt_is_dropped_from_the_held_announcement`.
 
-The original duplicate is downstream of this clean load reproduction;
-a precise Paseo root cause remains unconfirmed. Trace identities through
-`packages/plugin/src/server/acp-internal/connection.ts:1352`
-(`reduceUserMessageChunk`),
-`packages/server/src/server/agent/plugin-provider.ts:1063` (`importSession`)
-and :1454 (`timelineHistory`), and
-`packages/server/src/server/agent/agent-manager.ts:1728` (import timeline
-seeding). Import already uses `historyPrimed: true`; do not assume it
-unconditionally replays history again. The required Paseo regression should
-import a one-prompt session and assert one user item through registration,
-durable persistence and readback, retaining its message identity. Do not
-deduplicate arbitrary equal text: repeated legitimate prompts are valid.
+The original session is different from the clean fixture: its persisted
+`~/.jcode/sessions/session_zebra_1794172790785_cac24fab2efe6de1.json`
+already contains two separate user messages with that text, at stored indexes
+2 and 3, timestamped `21:19:58.129909145Z` and `21:20:01.461207327Z`.
+`evidence/tui-history.txt` also records the Copilot 403 and switch to OpenAI
+before the answer. A separate private-daemon ACP load of this original
+session emitted both messages once, with distinct IDs ending `:msg:2` and
+`:msg:3` (capture: `~/.cache/acpfix-evidence/original-replay.json`).
+
+Thus the original duplicate predates import. `history_replay_updates` in
+`src/cli/acp/presentation.rs:74` faithfully maps each stored history row;
+Paseo need not synthesize a duplicate to produce the observed display. The
+clean fixture does not reproduce a replay duplication defect. Whether the
+two original stored prompts arose from a deliberate resubmission or an
+automatic TUI retry is not established by the retained evidence. Investigate
+that provider-failure/retry interaction separately if desired. Suppressing
+adjacent equal text in the adapter would hide legitimate repeated prompts.
 
 ## Disposition
 
 Stop has a confirmed jcode core timing cause and a scoped core fix. Reverse
-steer has a confirmed consumer-side cause. Duplicate requires additional
-Paseo-side capture before naming a definitive cause or choosing a fix.
+steer has a confirmed consumer-side cause. The original duplicate was already
+persisted before import; clean session replay does not duplicate messages.
 The private raw-client reproduction is narrower than a full Paseo/TUI rerun.
 
 ## Verification
@@ -121,3 +127,11 @@ The fork formatter and module, code-size, test-size, panic, swallowed-error,
 dependency-boundary and wildcard-reexport checks passed with the fork budget
 overrides. No budgets were raised. Full raw traffic and local verification
 logs remain in the atlas evidence directory named above.
+
+On the fixed binary, the private smoke capture
+`~/.cache/acpfix-evidence/fixed/wire.json` records the matching scoped cancel
+at t+28.022 s and cancelled terminal at t+28.031 s. A subsequent ACP-owned
+turn starts at t+32.035 s, emits the reverse steer user chunk at t+38.268 s,
+and completes normally at t+40.160 s. Clean load again replays the initial
+user message once. All 127 ACP adapter tests pass after the fix. Clippy with
+`-D warnings` passes for the `jcode` and `jcode-app-core` libraries.
