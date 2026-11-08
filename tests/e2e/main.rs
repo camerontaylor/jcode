@@ -6,8 +6,8 @@
 mod mock_provider;
 mod test_support;
 
-mod acp_shared_session;
 mod acp_conformance;
+mod acp_shared_session;
 mod ambient;
 mod binary_integration;
 mod burst_spawn;

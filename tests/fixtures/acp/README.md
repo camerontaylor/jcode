@@ -13,7 +13,9 @@ array and notification ordering is significant. JSON-RPC request IDs remain
 literal to verify request correlation. Opaque string fields `sessionId`,
 `turnId`, `clientInstanceId`, `messageId`, `updatedAt`, `createdAt`,
 `cursor`, and `nextCursor` receive placeholders consistently across a file.
-The same emitted value always receives the same placeholder. The cwd supplied
+The same emitted value always receives the same placeholder.
+Only `result.agentInfo.version` is normalized to `<agent-version>` on both
+sides, so releases do not churn the corpus; other version fields stay literal. The cwd supplied
 by the scenario is normalized to a fixed marker when echoed; a different
 returned cwd still fails. Non-opaque fields remain literal, including prose
 that resembles a placeholder. Missing fields, changed content, identity splits

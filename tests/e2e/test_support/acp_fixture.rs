@@ -50,6 +50,12 @@ fn normalized(tape: &[Value]) -> Vec<Value> {
         .filter(|v| v["dir"] == "a2c")
         .map(|v| {
             let mut msg = v["msg"].clone();
+            // Only the initialize result's agent version is release-volatile.
+            if let Some(version) = msg.pointer_mut("/result/agentInfo/version") {
+                if version.is_string() {
+                    *version = json!("<agent-version>");
+                }
+            }
             visit(&mut msg, "", &mut ids, cwd);
             msg
         })
@@ -110,4 +116,24 @@ fn acp_conformance_comparator_identity_drift_and_order() {
     assert!(compare(&tape("a", "a"), &reversed).is_err());
     reversed[0]["msg"]["state"] = json!("failed");
     assert!(compare(&tape("a", "a"), &reversed).is_err());
+}
+
+#[test]
+fn acp_conformance_comparator_normalizes_only_agent_info_version() {
+    let tape = |version: Value| {
+        vec![
+            json!({"dir":"a2c","msg":{"result":{"agentInfo":{"version":version},"version":"stable"}}}),
+        ]
+    };
+    assert!(compare(&tape(json!("1.0")), &tape(json!("2.0"))).is_ok());
+    let mut other = tape(json!("2.0"));
+    other[0]["msg"]["result"]["version"] = json!("changed");
+    assert!(compare(&tape(json!("1.0")), &other).is_err());
+    assert!(compare(&tape(json!("1.0")), &tape(json!(null))).is_err());
+    let mut missing = tape(json!("1.0"));
+    missing[0]["msg"]["result"]["agentInfo"]
+        .as_object_mut()
+        .unwrap()
+        .remove("version");
+    assert!(compare(&tape(json!("1.0")), &missing).is_err());
 }

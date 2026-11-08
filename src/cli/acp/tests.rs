@@ -102,7 +102,14 @@ fn acp_tool_kind_maps_core_tools() {
     assert_eq!(tool_kind("bash"), "execute");
     assert_eq!(tool_kind("agentgrep"), "search");
     assert_eq!(tool_kind("webfetch"), "fetch");
+    assert_eq!(tool_kind("todo"), "think");
     assert_eq!(tool_kind("swarm"), "other");
+    // Names are matched against the table, never inferred from their spelling:
+    // a tool this build does not know stays `other` even when its name sounds
+    // like a known kind.
+    assert_eq!(tool_kind("delete_file"), "other");
+    assert_eq!(tool_kind("move_file"), "other");
+    assert_eq!(tool_kind("read_file"), "other");
 }
 
 #[test]
@@ -526,6 +533,324 @@ fn event_mapper_suppresses_incomplete_legacy_tool_input() {
             "rawInput": {"command": "true"},
         })]
     );
+}
+
+#[test]
+fn event_mapper_streams_reasoning_as_thought_chunks() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let first = mapper.map_event(ServerEvent::ReasoningDelta {
+        text: "checking the adapter".to_string(),
+    });
+    assert_eq!(first[0]["sessionUpdate"], "agent_thought_chunk");
+    assert_eq!(
+        first[0]["content"],
+        json!({"type": "text", "text": "checking the adapter"})
+    );
+    let second = mapper.map_event(ServerEvent::ReasoningDelta {
+        text: " before answering".to_string(),
+    });
+    // Chunks of one reasoning block group under one message id.
+    assert_eq!(first[0]["messageId"], second[0]["messageId"]);
+    // The block boundary itself carries no content.
+    assert!(
+        mapper
+            .map_event(ServerEvent::ReasoningDone {
+                duration_secs: Some(1.5)
+            })
+            .is_empty()
+    );
+    let next = mapper.map_event(ServerEvent::ReasoningDelta {
+        text: "a new step".to_string(),
+    });
+    assert_ne!(next[0]["messageId"], first[0]["messageId"]);
+    // Reasoning and assistant text never share an id, even in one step.
+    let answer = mapper.map_event(ServerEvent::TextDelta {
+        text: "answer".to_string(),
+    });
+    assert_eq!(answer[0]["sessionUpdate"], "agent_message_chunk");
+    assert_ne!(answer[0]["messageId"], next[0]["messageId"]);
+}
+
+#[test]
+fn event_mapper_emits_no_thought_chunk_without_daemon_reasoning() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let updates = mapper.map_event(ServerEvent::TextDelta {
+        text: "answer".to_string(),
+    });
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["sessionUpdate"], "agent_message_chunk");
+    // Nothing is invented when the daemon exposes no reasoning.
+    assert!(
+        mapper
+            .map_event(ServerEvent::ReasoningDone {
+                duration_secs: None
+            })
+            .is_empty()
+    );
+}
+
+#[test]
+fn event_mapper_reports_tool_locations_from_structured_input() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard)
+        .with_working_dir(Some(PathBuf::from("/repo")));
+    let start = mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "read".to_string(),
+    });
+    assert_eq!(start[0]["name"], "read");
+    // The streamed input is not complete yet: no location key at all, not an
+    // empty array, and nothing guessed from the title.
+    assert!(start[0].get("locations").is_none());
+    mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: "{\"file_path\":\"src/a.rs\",\"start_line\":12}".to_string(),
+    });
+    let exec = mapper.map_event(ServerEvent::ToolExec {
+        id: "tool1".to_string(),
+        name: "read".to_string(),
+    });
+    assert_eq!(
+        exec[0]["locations"],
+        json!([{"path": "/repo/src/a.rs", "line": 12}])
+    );
+}
+
+#[test]
+fn event_mapper_omits_locations_when_the_tool_names_no_file() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard)
+        .with_working_dir(Some(PathBuf::from("/repo")));
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "bash".to_string(),
+    });
+    mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: "{\"command\":\"cargo test\"}".to_string(),
+    });
+    let exec = mapper.map_event(ServerEvent::ToolExec {
+        id: "tool1".to_string(),
+        name: "bash".to_string(),
+    });
+    assert!(exec[0].get("locations").is_none());
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "tool1".to_string(),
+        name: "bash".to_string(),
+        output: "ok".to_string(),
+        error: None,
+    });
+    assert_eq!(done[0]["content"].as_array().unwrap().len(), 1);
+    assert_eq!(done[0]["content"][0]["type"], "content");
+}
+
+#[test]
+fn event_mapper_reports_edit_diffs_from_structured_edits() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard)
+        .with_working_dir(Some(PathBuf::from("/repo")));
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "edit".to_string(),
+    });
+    mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: json!({
+            "file_path": "src/a.rs",
+            "edits": [
+                {"old_string": "let a = 1;", "new_string": "let a = 2;"},
+                {"old_string": "let b = 1;", "new_string": "let b = 2;"},
+            ],
+        })
+        .to_string(),
+    });
+    let exec = mapper.map_event(ServerEvent::ToolExec {
+        id: "tool1".to_string(),
+        name: "edit".to_string(),
+    });
+    assert_eq!(exec[0]["locations"], json!([{"path": "/repo/src/a.rs"}]));
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "tool1".to_string(),
+        name: "edit".to_string(),
+        output: "Applied 2 edits".to_string(),
+        error: None,
+    });
+    assert_eq!(
+        done[0]["content"],
+        json!([
+            {
+                "type": "diff",
+                "path": "/repo/src/a.rs",
+                "oldText": "let a = 1;",
+                "newText": "let a = 2;",
+            },
+            {
+                "type": "diff",
+                "path": "/repo/src/a.rs",
+                "oldText": "let b = 1;",
+                "newText": "let b = 2;",
+            },
+            {"type": "content", "content": {"type": "text", "text": "Applied 2 edits"}},
+        ])
+    );
+}
+
+#[test]
+fn event_mapper_reports_write_as_a_diff_without_old_text() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard)
+        .with_working_dir(Some(PathBuf::from("/repo")));
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "write".to_string(),
+    });
+    mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: json!({"file_path": "src/new.rs", "content": "fn main() {}\n"}).to_string(),
+    });
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "tool1".to_string(),
+        name: "write".to_string(),
+        output: "Wrote src/new.rs".to_string(),
+        error: None,
+    });
+    // The previous content is unknown and is not read to invent it.
+    assert_eq!(
+        done[0]["content"][0],
+        json!({
+            "type": "diff",
+            "path": "/repo/src/new.rs",
+            "newText": "fn main() {}\n",
+        })
+    );
+    assert!(done[0]["content"][0].get("oldText").is_none());
+}
+
+#[test]
+fn event_mapper_reports_no_diff_for_a_failed_edit() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard)
+        .with_working_dir(Some(PathBuf::from("/repo")));
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "edit".to_string(),
+    });
+    mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: json!({
+            "file_path": "src/a.rs",
+            "edits": [{"old_string": "a", "new_string": "b"}],
+        })
+        .to_string(),
+    });
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "tool1".to_string(),
+        name: "edit".to_string(),
+        output: "old_string not found".to_string(),
+        error: Some("old_string not found".to_string()),
+    });
+    assert_eq!(done[0]["status"], "failed");
+    assert_eq!(done[0]["content"].as_array().unwrap().len(), 1);
+    assert_eq!(done[0]["content"][0]["type"], "content");
+}
+
+fn todo_snapshot(todos: Value) -> String {
+    json!({"todos": todos, "plan": {}, "goals": []}).to_string()
+}
+
+#[test]
+fn plan_update_replaces_the_whole_plan_each_time() {
+    let mut last = None;
+    let first = plan_update(
+        &mut last,
+        &todo_snapshot(json!([
+            {"content": "Audit the adapter", "status": "completed", "priority": "high"},
+            {"content": "Map reasoning", "status": "in_progress", "priority": "medium"},
+            {"content": "Map plans", "status": "pending", "priority": "low"},
+        ])),
+    )
+    .expect("first plan");
+    assert_eq!(first["sessionUpdate"], "plan");
+    assert_eq!(
+        first["entries"],
+        json!([
+            {"content": "Audit the adapter", "priority": "high", "status": "completed"},
+            {"content": "Map reasoning", "priority": "medium", "status": "in_progress"},
+            {"content": "Map plans", "priority": "low", "status": "pending"},
+        ])
+    );
+    // Every update carries the whole list, never a delta of it.
+    let second = plan_update(
+        &mut last,
+        &todo_snapshot(json!([
+            {"content": "Map plans", "status": "in_progress", "priority": "low"},
+        ])),
+    )
+    .expect("replacement plan");
+    assert_eq!(
+        second["entries"],
+        json!([{"content": "Map plans", "priority": "low", "status": "in_progress"}])
+    );
+    // An unchanged snapshot is not re-sent as if it were a new plan.
+    assert!(
+        plan_update(
+            &mut last,
+            &todo_snapshot(json!([
+                {"content": "Map plans", "status": "in_progress", "priority": "low"},
+            ])),
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn plan_update_drops_cancelled_todos_and_defaults_required_fields() {
+    let update = plan_update(
+        &mut None,
+        &todo_snapshot(json!([
+            {"content": "cancelled work", "status": "cancelled", "priority": "high"},
+            {"content": "unknown status", "status": "blocked", "priority": "urgent"},
+            {"content": "no status", "priority": ""},
+        ])),
+    )
+    .expect("plan update");
+    // ACP has no cancelled state, so cancelled work is not part of the plan;
+    // the required priority and status default instead of being guessed.
+    assert_eq!(
+        update["entries"],
+        json!([
+            {"content": "unknown status", "priority": "medium", "status": "pending"},
+            {"content": "no status", "priority": "medium", "status": "pending"},
+        ])
+    );
+}
+
+#[test]
+fn plan_update_reports_an_emptied_list_as_a_replacement() {
+    let mut last = None;
+    plan_update(
+        &mut last,
+        &todo_snapshot(json!([
+            {"content": "one", "status": "pending", "priority": "high"},
+        ])),
+    )
+    .expect("plan update");
+    let cleared = plan_update(&mut last, &todo_snapshot(json!([]))).expect("cleared plan");
+    assert_eq!(cleared["sessionUpdate"], "plan");
+    assert_eq!(cleared["entries"], json!([]));
+}
+
+#[test]
+fn plan_update_ignores_a_payload_that_is_not_a_todo_snapshot() {
+    // Absence is legitimate: a malformed or unrelated payload yields an empty
+    // plan, never entries invented from text.
+    let update = plan_update(&mut None, "not json").expect("empty plan");
+    assert_eq!(update["entries"], json!([]));
+}
+
+#[test]
+fn todo_tool_names_are_the_daemons_canonical_name_and_aliases() {
+    for name in ["todo", "todo_read", "todo_write", "todoread", "todowrite"] {
+        assert!(is_todo_tool(name), "{name}");
+    }
+    for name in ["read", "bash", "todos", "todo_list"] {
+        assert!(!is_todo_tool(name), "{name}");
+    }
 }
 
 #[test]
@@ -1058,6 +1383,7 @@ fn config_options_include_model_selector_and_effort_ladder() {
         available_models: vec!["gpt-5.2".to_string(), "gpt-5.2-codex".to_string()],
         reasoning_effort: Some("high".to_string()),
         available_reasoning_efforts: None,
+        last_plan: None,
     };
     let options = session_config_options(&state);
     assert_eq!(options.len(), 2);
@@ -1094,6 +1420,7 @@ fn config_options_current_model_prepended_when_not_listed() {
         available_models: vec!["claude-sonnet-4-5".to_string()],
         reasoning_effort: None,
         available_reasoning_efforts: None,
+        last_plan: None,
     };
     let options = session_config_options(&state);
     let model_values: Vec<&str> = options[0]["options"]
@@ -1114,6 +1441,7 @@ fn legacy_models_catalog_is_emitted_alongside_config_options() {
         available_models: vec!["deepseek-v4-pro".to_string()],
         reasoning_effort: Some("high".to_string()),
         available_reasoning_efforts: None,
+        last_plan: None,
     };
     let mut result = json!({"sessionId": "s1"});
     insert_session_configuration(&mut result, &state);
@@ -1143,6 +1471,7 @@ fn context_limit_falls_back_to_default_for_unknown_models() {
         available_models: Vec::new(),
         reasoning_effort: None,
         available_reasoning_efforts: None,
+        last_plan: None,
     };
     assert_eq!(
         state.context_limit(),
@@ -1197,6 +1526,7 @@ fn action_label(action: &RouteAction) -> String {
         RouteAction::PeerTurnEnded { turn_id, .. } => format!("ended {turn_id}"),
         RouteAction::PeerPromptReplayed { turn_id } => format!("replayed {turn_id}"),
         RouteAction::SessionState(change) => format!("state {change:?}"),
+        RouteAction::Plan { .. } => "plan".to_string(),
         RouteAction::PeerSteer { turn_id, index, .. } => format!("steer {turn_id} {index}"),
         RouteAction::PeerTurnAdopted { turn_id } => format!("adopted {turn_id}"),
         RouteAction::Send(request) => format!("send {request:?}"),
@@ -1359,6 +1689,7 @@ fn usage_updates_carry_the_session_context_gauge() {
         available_models: Vec::new(),
         reasoning_effort: None,
         available_reasoning_efforts: None,
+        last_plan: None,
     };
     let payload = usage_update_payload("session-1", &state, 1_000, Some(4_000), None);
     assert_eq!(payload["sessionId"], "session-1");
@@ -1920,4 +2251,25 @@ fn detach_support_requires_work_preservation_and_withdrawal() {
             ..
         }
     ));
+}
+
+#[test]
+fn unattributed_model_work_is_unknown_not_turnless() {
+    let usage = TurnUsage::default();
+    let unknown = streamed_prompt_response("end_turn", &usage, None, false);
+    assert_eq!(unknown, json!({"stopReason":"end_turn"}));
+    let turnless = streamed_prompt_response("cancelled", &usage, None, true);
+    assert_eq!(
+        turnless["_meta"]["jcode"],
+        json!({"turnId":null,"role":"none"})
+    );
+    assert_eq!(
+        prompt_response("end_turn", &usage)["_meta"]["jcode"],
+        json!({"turnId":null,"role":"none"})
+    );
+    assert_eq!(
+        streamed_prompt_response("end_turn", &usage, Some(("t1".into(), "origin")), false)["_meta"]
+            ["jcode"],
+        json!({"turnId":"t1","role":"origin"})
+    );
 }

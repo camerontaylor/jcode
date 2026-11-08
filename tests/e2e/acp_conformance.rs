@@ -150,6 +150,152 @@ async fn acp_conformance_create_list_load() -> Result<()> {
     result
 }
 
+#[tokio::test]
+async fn acp_conformance_maps_reasoning_tool_calls_and_plan() -> Result<()> {
+    let _env = setup_test_env()?;
+    // The default `acp` tool profile has no `todo` tool, so this scenario asks
+    // for exactly the two tools it scripts. Everything else about the adapter
+    // is the shipped configuration.
+    let _tools = EnvVarGuard::set("JCODE_TOOLS", "todo,read");
+    let runtime = tempfile::Builder::new()
+        .prefix("acp-mappings-")
+        .tempdir_in("/tmp")?;
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", runtime.path());
+    let socket = runtime.path().join("jcode.sock");
+    let provider = Arc::new(MockProvider::new());
+    provider.queue_response(vec![
+        StreamEvent::ThinkingStart,
+        StreamEvent::ThinkingDelta("weighing the plan".into()),
+        StreamEvent::ThinkingEnd,
+        StreamEvent::ToolUseStart {
+            id: "call-todo".into(),
+            name: "todo".into(),
+        },
+        StreamEvent::ToolInputDelta(
+            json!({"todos": [{
+                "name": "wire-check",
+                "status": "in_progress",
+                "priority": "high",
+                "confidence": "plausible",
+            }]})
+            .to_string(),
+        ),
+        StreamEvent::ToolUseEnd,
+        StreamEvent::ToolUseStart {
+            id: "call-read".into(),
+            name: "read".into(),
+        },
+        StreamEvent::ToolInputDelta(json!({"file_path": "Cargo.toml"}).to_string()),
+        StreamEvent::ToolUseEnd,
+        StreamEvent::MessageEnd {
+            stop_reason: Some("tool_use".into()),
+        },
+    ]);
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("all mapped".into()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".into()),
+        },
+    ]);
+    let server =
+        server::Server::new_with_paths(provider, socket.clone(), runtime.path().join("debug.sock"));
+    let task = tokio::spawn(async move { server.run().await });
+    let result = async {
+        wait_for_socket(&socket).await?;
+        let mut c = AcpClient::spawn()?;
+        initialize(&mut c).await?;
+        let cwd = std::env::current_dir()?;
+        let new = c.request("session/new", json!({"cwd":cwd})).await?;
+        let id = &new["sessionId"];
+        let answer = c
+            .request(
+                "session/prompt",
+                json!({"sessionId":id,"prompt":[{"type":"text","text":"map it"}]}),
+            )
+            .await?;
+        assert_eq!(answer["stopReason"], "end_turn");
+        let updates: Vec<Value> = c
+            .take_notifications()
+            .into_iter()
+            .filter(|m| m["method"] == "session/update")
+            .map(|m| m["params"]["update"].clone())
+            .collect();
+        let position = |predicate: &dyn Fn(&Value) -> bool| -> usize {
+            updates
+                .iter()
+                .position(|update| predicate(update))
+                .unwrap_or_else(|| panic!("missing update in {updates:#?}"))
+        };
+        let is_tool = |id: &'static str, kind: &'static str, status: &'static str| {
+            move |update: &Value| {
+                update["toolCallId"] == id
+                    && update["sessionUpdate"] == kind
+                    && update["status"] == status
+            }
+        };
+        // Reasoning is exposed as standard thought chunks, before any output.
+        let thought = position(&|update: &Value| update["sessionUpdate"] == "agent_thought_chunk");
+        assert_eq!(updates[thought]["content"]["text"], "weighing the plan");
+        // The initial call precedes every update for it, and reports the
+        // daemon's programmatic name and the planning kind.
+        let todo_call = position(&is_tool("call-todo", "tool_call", "pending"));
+        assert_eq!(updates[todo_call]["name"], "todo");
+        assert_eq!(updates[todo_call]["kind"], "think");
+        let todo_running = position(&is_tool("call-todo", "tool_call_update", "in_progress"));
+        let todo_done = position(&is_tool("call-todo", "tool_call_update", "completed"));
+        assert!(thought < todo_call && todo_call < todo_running && todo_running < todo_done);
+        // File work reports the locations the tool named, resolved against the
+        // session cwd the way the daemon resolves them.
+        let read_call = position(&is_tool("call-read", "tool_call", "pending"));
+        assert_eq!(updates[read_call]["kind"], "read");
+        assert!(updates[read_call].get("locations").is_none());
+        let read_running = position(&is_tool("call-read", "tool_call_update", "in_progress"));
+        assert_eq!(
+            updates[read_running]["locations"],
+            json!([{"path": cwd.join("Cargo.toml")}])
+        );
+        let read_done = position(&is_tool("call-read", "tool_call_update", "completed"));
+        assert!(read_call < read_running && read_running < read_done);
+        // The answer text comes after the tool frames.
+        let text = position(&|update: &Value| update["sessionUpdate"] == "agent_message_chunk");
+        assert_eq!(updates[text]["content"]["text"], "all mapped");
+        assert!(read_done < text);
+        // The todo tool's rendered card is not the plan: the adapter asks the
+        // daemon for the structured snapshot. The snapshot is session state, so
+        // it is written when the daemon answers the request, which is not
+        // sequenced against the turn's own frames: it can land before the tool
+        // completion frames or after the prompt response. Assert the content
+        // and that it is sent once, not a position.
+        let plan = match updates
+            .iter()
+            .find(|update| update["sessionUpdate"] == "plan")
+        {
+            Some(update) => update.clone(),
+            None => c
+                .wait_for_notification(|m| m["params"]["update"]["sessionUpdate"] == "plan")
+                .await?["params"]["update"]
+                .clone(),
+        };
+        assert_eq!(
+            plan["entries"],
+            json!([{"content": "wire-check", "priority": "high", "status": "in_progress"}])
+        );
+        assert!(
+            updates
+                .iter()
+                .filter(|update| update["sessionUpdate"] == "plan")
+                .count()
+                <= 1,
+            "the plan must not be duplicated: {updates:#?}"
+        );
+        c.shutdown().await;
+        Ok(())
+    }
+    .await;
+    task.abort();
+    result
+}
+
 fn texts(messages: &[Value]) -> Vec<&str> {
     messages
         .iter()
@@ -736,5 +882,77 @@ async fn terminal_exit_scenario(fail: bool) -> Result<()> {
     .await;
     task.abort();
     let _ = task.await;
+    result
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_conformance_detach_prepare_error_preserves_attachment() -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let _env = setup_test_env()?;
+    let runtime = tempfile::Builder::new()
+        .prefix("acp-prepare-error-")
+        .tempdir_in("/tmp")?;
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", runtime.path());
+    let listener = tokio::net::UnixListener::bind(runtime.path().join("jcode.sock"))?;
+    let daemon = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            connections.spawn(async move {
+                let (read, mut write) = socket.into_split();
+                let mut lines = BufReader::new(read).lines();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let id = &request["id"];
+                    let response = match request["type"].as_str().unwrap() {
+                        "ping" => json!({"type":"pong","id":id,"capabilities":["turn_origin","soft_interrupt_ids","detach_preserve_work"]}),
+                        "subscribe" => json!({"type":"done","id":id}),
+                        "get_history" => json!({"type":"history","id":id,"session_id":"prepare-test","messages":[],"all_sessions":["prepare-test"]}),
+                        "prepare_disconnect" => json!({"type":"error","id":id,"message":"prepare rejected"}),
+                        _ => panic!("unexpected request: {request}"),
+                    };
+                    write.write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                }
+            });
+        }
+    });
+    let result = async {
+        let mut client = AcpClient::spawn()?;
+        initialize(&mut client).await?;
+        let created = client
+            .request("session/new", json!({"cwd":std::env::current_dir()?}))
+            .await?;
+        let session = &created["sessionId"];
+        assert_eq!(session, "prepare-test");
+        assert_eq!(created["_meta"]["jcode"]["sharedControl"]["detach"], true);
+        for _ in 0..2 {
+            let id = client
+                .send_request("_jcode/detach", json!({"sessionId":session}))
+                .await?;
+            let failed = client.wait_for_response(id).await?;
+            assert_eq!(failed["error"]["code"], -32603);
+            assert!(
+                failed["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("prepare rejected")
+            );
+            assert!(failed.get("result").is_none());
+            initialize(&mut client).await?;
+            // Still attached: local commands can address the original session.
+            let selected = client
+                .request(
+                    "session/prompt",
+                    json!({"sessionId":session,"prompt":[{"type":"text","text":"/model"}]}),
+                )
+                .await?;
+            assert_eq!(selected["stopReason"], "end_turn");
+        }
+        client.shutdown().await;
+        Ok(())
+    }
+    .await;
+    daemon.abort();
     result
 }

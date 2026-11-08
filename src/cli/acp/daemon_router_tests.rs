@@ -1711,3 +1711,105 @@ fn detach_observer_closes_bracket_before_release() {
     ));
     assert!(r.detach_view().is_empty());
 }
+
+#[test]
+fn a_completed_todo_write_asks_the_daemon_for_the_plan_snapshot() {
+    let mut router = attached_router();
+    let mut prompt = router.register(77, PendingKind::Prompt);
+    router.route(turn_started(1, ours(77), Some("plan it")));
+    let actions = router.route(scoped(
+        1,
+        ServerEvent::ToolDone {
+            id: "call-todo".to_string(),
+            name: "todo".to_string(),
+            output: "[{\"name\":\"one\"}]".to_string(),
+            error: None,
+        },
+    ));
+    // The tool's own output is a rendered card; the plan comes from the
+    // structured snapshot the daemon owns.
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, RouteAction::Send(Request::GetTodos { .. }))),
+        "{actions:?}"
+    );
+    assert!(
+        drain(&mut prompt)
+            .iter()
+            .any(|event| matches!(event, ServerEvent::ToolDone { .. }))
+    );
+}
+
+#[test]
+fn other_tool_completions_do_not_request_a_plan_snapshot() {
+    let mut router = attached_router();
+    let mut prompt = router.register(77, PendingKind::Prompt);
+    router.route(turn_started(1, ours(77), Some("read it")));
+    let actions = router.route(scoped(
+        1,
+        ServerEvent::ToolDone {
+            id: "call-read".to_string(),
+            name: "read".to_string(),
+            output: "contents".to_string(),
+            error: None,
+        },
+    ));
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, RouteAction::Send(Request::GetTodos { .. }))),
+        "{actions:?}"
+    );
+    let _ = drain(&mut prompt);
+}
+
+#[test]
+fn a_todo_snapshot_is_a_session_plan_action_whenever_it_arrives() {
+    // The daemon writes the reply on the connection's event channel, which can
+    // drain after the turn that produced it ended. The plan must still render,
+    // so it is not scoped to a turn.
+    let mut router = attached_router();
+    let mut prompt = router.register(77, PendingKind::Prompt);
+    router.route(turn_started(1, ours(77), Some("plan it")));
+    router.route(scoped_terminal(1, TurnEndStatus::Completed));
+    router.route(scoped(1, ServerEvent::Done { id: 77 }));
+    assert!(!router.own_turn_running());
+    let _ = drain(&mut prompt);
+
+    let payload =
+        json!({"todos": [{"content": "one", "status": "pending", "priority": "high"}]}).to_string();
+    let actions = router.route(ServerEvent::Todos {
+        session_id: "session-1".to_string(),
+        payload: payload.clone(),
+    });
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RouteAction::Plan { payload: routed }] if *routed == payload
+        ),
+        "{actions:?}"
+    );
+}
+
+#[test]
+fn a_todo_snapshot_during_a_turn_is_not_delivered_as_turn_output() {
+    let mut router = attached_router();
+    let mut prompt = router.register(77, PendingKind::Prompt);
+    router.route(turn_started(1, ours(77), Some("plan it")));
+    let payload =
+        json!({"todos": [{"content": "one", "status": "pending", "priority": "high"}]}).to_string();
+    let actions = router.route(ServerEvent::Todos {
+        session_id: "session-1".to_string(),
+        payload,
+    });
+    assert!(
+        matches!(actions.as_slice(), [RouteAction::Plan { .. }]),
+        "{actions:?}"
+    );
+    assert!(
+        !drain(&mut prompt)
+            .iter()
+            .any(|event| matches!(event, ServerEvent::Todos { .. }))
+    );
+}

@@ -162,6 +162,9 @@ struct RouteSink {
     ui_state: Arc<Mutex<SessionUiState>>,
     gate: Arc<Mutex<PeerActionGate>>,
     peer_mapper: Arc<Mutex<Option<EventMapper>>>,
+    /// Workspace root the daemon resolves tool paths against, so mirrored tool
+    /// calls carry absolute locations and diff paths.
+    working_dir: Option<PathBuf>,
     session: std::sync::Weak<DaemonSession>,
 }
 
@@ -199,6 +202,7 @@ impl RouteSink {
                                 &self.ui_state,
                                 &self.gate,
                                 &self.peer_mapper,
+                                self.working_dir.as_deref(),
                                 action,
                             )
                             .await
@@ -319,6 +323,9 @@ struct SessionUiState {
     available_models: Vec<String>,
     reasoning_effort: Option<String>,
     available_reasoning_efforts: Option<Vec<String>>,
+    /// The plan entries this connection last sent. A plan is session state, so
+    /// the dedup lives here rather than in a per-turn mapper.
+    last_plan: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Default)]
@@ -419,6 +426,25 @@ fn prompt_response(stop_reason: &str, usage: &TurnUsage) -> Value {
     response
 }
 
+/// Missing attribution on streamed work means unknown, not a turnless action.
+fn streamed_prompt_response(
+    stop_reason: &str,
+    usage: &TurnUsage,
+    correlation: Option<(String, &'static str)>,
+    turnless: bool,
+) -> Value {
+    let mut response = prompt_response(stop_reason, usage);
+    if let Some((turn_id, role)) = correlation {
+        response["_meta"]["jcode"] = json!({"turnId":turn_id,"role":role});
+    } else if !turnless {
+        response
+            .as_object_mut()
+            .expect("prompt response is an object")
+            .remove("_meta");
+    }
+    response
+}
+
 impl SessionUiState {
     fn from_history_fields(
         provider_name: Option<String>,
@@ -433,6 +459,7 @@ impl SessionUiState {
             available_models,
             reasoning_effort,
             available_reasoning_efforts,
+            last_plan: None,
         }
     }
 
@@ -561,6 +588,7 @@ impl DaemonSession {
             ui_state: Arc::clone(&self.ui_state),
             gate: Arc::clone(&self.peer_gate),
             peer_mapper: Arc::clone(&self.peer_mapper),
+            working_dir: self.working_dir.clone(),
             session: Arc::downgrade(self),
         }
     }
@@ -1098,19 +1126,26 @@ impl AcpRuntime {
             // alone would otherwise invoke owner disconnect cancellation.
             let prepare_id = session.next_id();
             let mut reply = session.register(prepare_id, PendingKind::Reply).await;
-            session
-                .send(&Request::PrepareDisconnect {
-                    id: prepare_id,
-                    preserve_work: true,
-                })
-                .await?;
-            loop {
-                if matches!(next_routed(&mut reply).await?, ServerEvent::Done { id } if id == prepare_id)
-                {
-                    break;
-                }
+            let prepared = async {
+                session
+                    .send(&Request::PrepareDisconnect {
+                        id: prepare_id,
+                        preserve_work: true,
+                    })
+                    .await?;
+                wait_for_done(&mut reply, prepare_id).await
             }
+            .await;
             session.unregister(prepare_id).await;
+            if let Err(err) = prepared {
+                return self
+                    .write_error_value(
+                        id,
+                        JSONRPC_INTERNAL_ERROR,
+                        format!("Failed to prepare detach: {err:#}"),
+                    )
+                    .await;
+            }
             self.sessions.lock().await.remove(&session_id);
             let actions = session.router.lock().await.detach_view();
             session.sink(self.clone()).apply(actions).await;
@@ -1761,7 +1796,8 @@ impl AcpRuntime {
     ) -> Result<()> {
         let session_id = session.session_id().await;
         let scope = format!("{session_id}:own:{prompt_id}");
-        let mut mapper = EventMapper::with_scope(session_id.clone(), self.profile, scope.clone());
+        let mut mapper = EventMapper::with_scope(session_id.clone(), self.profile, scope.clone())
+            .with_working_dir(session.working_dir.clone());
         let mut stop_reason = "end_turn".to_string();
         let mut turn_usage = TurnUsage::default();
         let mut steers = 0u32;
@@ -1862,10 +1898,14 @@ impl AcpRuntime {
             }
         }
 
-        let mut response = prompt_response(&stop_reason, &turn_usage);
-        if let Some((turn_id, role)) = session.router.lock().await.prompt_correlation(prompt_id) {
-            response["_meta"]["jcode"] = json!({"turnId": turn_id, "role": role});
-        }
+        let router = session.router.lock().await;
+        let response = streamed_prompt_response(
+            &stop_reason,
+            &turn_usage,
+            router.prompt_correlation(prompt_id),
+            router.prompt_was_turnless(prompt_id),
+        );
+        drop(router);
         ticket.release().await;
         self.write_result(rpc_id, response).await?;
         Ok(())
@@ -2070,6 +2110,7 @@ impl AcpRuntime {
         ui_state: &Arc<Mutex<SessionUiState>>,
         gate: &Arc<Mutex<PeerActionGate>>,
         peer_mapper: &Arc<Mutex<Option<EventMapper>>>,
+        working_dir: Option<&Path>,
         action: RouteAction,
     ) -> Result<()> {
         if let RouteAction::SessionState(change) = action {
@@ -2087,7 +2128,7 @@ impl AcpRuntime {
         if gate.lock().await.hold(action.clone()) {
             return Ok(());
         }
-        self.apply_peer_action(router, ui_state, peer_mapper, action)
+        self.apply_peer_action(router, ui_state, peer_mapper, working_dir, action)
             .await
     }
 
@@ -2100,6 +2141,7 @@ impl AcpRuntime {
                     &session.router,
                     &session.ui_state,
                     &session.peer_mapper,
+                    session.working_dir.as_deref(),
                     action,
                 )
                 .await
@@ -2114,6 +2156,7 @@ impl AcpRuntime {
         router: &Arc<Mutex<RouterState>>,
         ui_state: &Arc<Mutex<SessionUiState>>,
         peer_mapper: &Arc<Mutex<Option<EventMapper>>>,
+        working_dir: Option<&Path>,
         action: RouteAction,
     ) -> Result<()> {
         let session_id = router.lock().await.session_id().to_string();
@@ -2127,11 +2170,14 @@ impl AcpRuntime {
                 // A fresh mapper per peer turn: tool-call ids and streamed
                 // inputs must not leak between turns or into this adapter's own
                 // prompt mapping.
-                *peer_mapper.lock().await = Some(EventMapper::with_scope(
-                    session_id.clone(),
-                    self.profile,
-                    format!("{session_id}:peer:{turn_id}"),
-                ));
+                *peer_mapper.lock().await = Some(
+                    EventMapper::with_scope(
+                        session_id.clone(),
+                        self.profile,
+                        format!("{session_id}:peer:{turn_id}"),
+                    )
+                    .with_working_dir(working_dir.map(Path::to_path_buf)),
+                );
                 self.write_turn_notification(&session_id, &turn_id, "started", Some(&origin), None)
                     .await?;
                 // A mid-turn attach already replayed this prompt from the
@@ -2177,6 +2223,7 @@ impl AcpRuntime {
                                 self.connection_seq.fetch_add(1, Ordering::Relaxed)
                             );
                             EventMapper::with_scope(session_id.clone(), self.profile, scope)
+                                .with_working_dir(working_dir.map(Path::to_path_buf))
                         })
                         .map_event(event)
                 };
@@ -2224,6 +2271,19 @@ impl AcpRuntime {
                 // The prompt that adopted the turn maps the rest of it.
                 crate::logging::debug(&format!("acp: prompt adopted peer turn {turn_id}"));
                 *peer_mapper.lock().await = None;
+            }
+            RouteAction::Plan { payload } => {
+                let update = {
+                    let mut state = ui_state.lock().await;
+                    plan_update(&mut state.last_plan, &payload)
+                };
+                if let Some(update) = update {
+                    self.write_notification(
+                        "session/update",
+                        json!({ "sessionId": session_id, "update": update }),
+                    )
+                    .await?;
+                }
             }
             // Executed by `RouteSink::apply`, never rendered.
             RouteAction::Send(_) | RouteAction::Wake { .. } => {}
@@ -2775,6 +2835,12 @@ struct EventMapper {
     /// index.
     message_scope: String,
     message_index: u64,
+    /// Index of the reasoning block currently being streamed, in its own id
+    /// space so a thought block and an assistant message never share an id.
+    thought_index: u64,
+    /// Workspace root the daemon resolves tool paths against. Tool inputs name
+    /// files relative to it, and ACP locations require absolute paths.
+    working_dir: Option<PathBuf>,
 }
 
 impl EventMapper {
@@ -2793,7 +2859,15 @@ impl EventMapper {
             tool_inputs: HashMap::new(),
             message_scope,
             message_index: 0,
+            thought_index: 0,
+            working_dir: None,
         }
+    }
+
+    /// Resolve tool input paths the way the daemon does.
+    fn with_working_dir(mut self, working_dir: Option<PathBuf>) -> Self {
+        self.working_dir = working_dir;
+        self
     }
 
     /// Stable id for the assistant message currently being streamed.
@@ -2801,8 +2875,24 @@ impl EventMapper {
         format!("{}:{}", self.message_scope, self.message_index)
     }
 
+    /// Stable id for the reasoning block currently being streamed.
+    fn thought_message_id(&self) -> String {
+        format!("{}:thought:{}", self.message_scope, self.thought_index)
+    }
+
     fn agent_chunk(&self, text: String) -> Value {
         agent_message_chunk_with_id(text, self.message_id())
+    }
+
+    fn thought_chunk(&self, text: String) -> Value {
+        json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "messageId": self.thought_message_id(),
+            "content": {
+                "type": "text",
+                "text": text,
+            }
+        })
     }
 
     fn map_event(&mut self, event: ServerEvent) -> Vec<Value> {
@@ -2812,6 +2902,15 @@ impl EventMapper {
             // One assistant message ended; the next chunk starts a new one.
             ServerEvent::MessageEnd { .. } => {
                 self.message_index = self.message_index.saturating_add(1);
+                self.thought_index = self.thought_index.saturating_add(1);
+                Vec::new()
+            }
+            // Raw model reasoning. v1 has no non-chunk shape for it, and the
+            // daemon's `ReasoningDone` only closes the block, so the block's
+            // chunks share one `messageId` and the next block gets the next.
+            ServerEvent::ReasoningDelta { text } => vec![self.thought_chunk(text)],
+            ServerEvent::ReasoningDone { .. } => {
+                self.thought_index = self.thought_index.saturating_add(1);
                 Vec::new()
             }
             ServerEvent::TextDelta { text } => vec![self.agent_chunk(text)],
@@ -2828,6 +2927,7 @@ impl EventMapper {
                     "sessionUpdate": "tool_call",
                     "toolCallId": id,
                     "title": tool_title(&name),
+                    "name": name,
                     "kind": tool_kind(&name),
                     "status": "pending",
                 })]
@@ -2862,9 +2962,17 @@ impl EventMapper {
                     .tool_inputs
                     .get(update["toolCallId"].as_str().unwrap_or_default())
                     && let Some(raw_input) = parse_json_object(input)
-                    && let Some(object) = update.as_object_mut()
                 {
-                    object.insert("rawInput".to_string(), raw_input);
+                    // The streamed input is complete once the call executes,
+                    // so this is where the affected files are known. No
+                    // location key at all means the tool names no file.
+                    let locations = tool_locations(&name, &raw_input, self.working_dir.as_deref());
+                    if let Some(object) = update.as_object_mut() {
+                        if !locations.is_empty() {
+                            object.insert("locations".to_string(), json!(locations));
+                        }
+                        object.insert("rawInput".to_string(), raw_input);
+                    }
                 }
                 vec![update]
             }
@@ -2873,24 +2981,38 @@ impl EventMapper {
                 name,
                 output,
                 error,
-            } => vec![json!({
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": id,
-                "title": tool_title(&name),
-                "kind": tool_kind(&name),
-                "status": if error.is_some() { "failed" } else { "completed" },
-                "content": [{
+            } => {
+                let mut content = Vec::new();
+                // Diffs come from the structured edit input the model sent, and
+                // only for a call that actually applied. Reading the file to
+                // reconstruct old text would be a guess, so `write` reports no
+                // `oldText` at all.
+                if error.is_none()
+                    && let Some(input) = self.tool_inputs.get(&id)
+                    && let Some(raw_input) = parse_json_object(input)
+                {
+                    content.extend(tool_diffs(&name, &raw_input, self.working_dir.as_deref()));
+                }
+                content.push(json!({
                     "type": "content",
                     "content": {
                         "type": "text",
-                        "text": output,
+                        "text": output.clone(),
                     }
-                }],
-                "rawOutput": {
-                    "output": output,
-                    "error": error,
-                }
-            })],
+                }));
+                vec![json!({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": id,
+                    "title": tool_title(&name),
+                    "kind": tool_kind(&name),
+                    "status": if error.is_some() { "failed" } else { "completed" },
+                    "content": content,
+                    "rawOutput": {
+                        "output": output,
+                        "error": error,
+                    }
+                })]
+            }
             ServerEvent::GeneratedImage {
                 id,
                 path,
@@ -2933,6 +3055,187 @@ fn parse_json_object(input: &str) -> Option<Value> {
     let value: Value = serde_json::from_str(input).ok()?;
     value.as_object()?;
     Some(value)
+}
+
+/// The tools whose writes change the session plan. Aliases match the daemon's
+/// own name resolution (`todo_read`/`todo_write`/`todoread`/`todowrite`).
+fn is_todo_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "todo" | "todo_read" | "todo_write" | "todoread" | "todowrite"
+    )
+}
+
+/// Structured input fields that name the file a tool call works on, with the
+/// field that carries its line when the schema documents one.
+///
+/// Only tools whose schema declares these fields appear here, and only those
+/// fields are read: a tool that names no file has no location, which is
+/// legitimate and reported as absence rather than guessed from its arguments
+/// or its display title. `apply_patch` is absent on purpose; its input is patch
+/// text, and deriving paths from it would mean parsing the patch.
+fn tool_location_fields(name: &str) -> &'static [(&'static str, Option<&'static str>)] {
+    match name {
+        "read" => &[("file_path", Some("start_line"))],
+        "edit" | "write" => &[("file_path", None)],
+        _ => &[],
+    }
+}
+
+/// The absolute form of a tool input path, resolved exactly as the daemon's
+/// `ToolContext::resolve_path` resolves it. ACP locations and diffs require an
+/// absolute path, so a path that cannot be made absolute yields nothing.
+fn absolute_tool_path(path: &str, working_dir: Option<&Path>) -> Option<String> {
+    let path = Path::new(path);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        working_dir?.join(path)
+    };
+    resolved
+        .is_absolute()
+        .then(|| resolved.to_string_lossy().into_owned())
+}
+
+/// ACP `locations` for a tool call, from its structured input.
+fn tool_locations(name: &str, input: &Value, working_dir: Option<&Path>) -> Vec<Value> {
+    let mut locations = Vec::new();
+    for (path_field, line_field) in tool_location_fields(name) {
+        let Some(path) = input.get(*path_field).and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(path) = absolute_tool_path(path, working_dir) else {
+            continue;
+        };
+        let line = line_field
+            .and_then(|field| input.get(field))
+            .and_then(Value::as_u64)
+            .filter(|line| *line > 0)
+            .and_then(|line| u32::try_from(line).ok());
+        locations.push(match line {
+            Some(line) => json!({ "path": path, "line": line }),
+            None => json!({ "path": path }),
+        });
+    }
+    locations
+}
+
+/// ACP `diff` content for a tool call, from its structured edit input.
+///
+/// `edit` reports one diff per replacement the model asked for. `write` reports
+/// only `newText`: the previous content is not part of the request, and reading
+/// the file to reconstruct it would report a state the daemon never supplied.
+fn tool_diffs(name: &str, input: &Value, working_dir: Option<&Path>) -> Vec<Value> {
+    let Some(path) = input
+        .get("file_path")
+        .and_then(Value::as_str)
+        .and_then(|path| absolute_tool_path(path, working_dir))
+    else {
+        return Vec::new();
+    };
+    let diff = |old_text: Option<&str>, new_text: &str| match old_text {
+        Some(old_text) => json!({
+            "type": "diff",
+            "path": path,
+            "oldText": old_text,
+            "newText": new_text,
+        }),
+        None => json!({
+            "type": "diff",
+            "path": path,
+            "newText": new_text,
+        }),
+    };
+    match name {
+        "edit" => {
+            let mut diffs = Vec::new();
+            if let Some(edits) = input.get("edits").and_then(Value::as_array) {
+                for edit in edits {
+                    let (Some(old_text), Some(new_text)) = (
+                        edit.get("old_string").and_then(Value::as_str),
+                        edit.get("new_string").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    diffs.push(diff(Some(old_text), new_text));
+                }
+            }
+            // The legacy single-replacement form of the same tool.
+            if let (Some(old_text), Some(new_text)) = (
+                input.get("old_string").and_then(Value::as_str),
+                input.get("new_string").and_then(Value::as_str),
+            ) {
+                diffs.push(diff(Some(old_text), new_text));
+            }
+            diffs
+        }
+        "write" => match input.get("content").and_then(Value::as_str) {
+            Some(content) => vec![diff(None, content)],
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// The `plan` update for a todo snapshot, or `None` when it repeats the plan
+/// this connection already sent.
+///
+/// A plan is session state, not turn output, so it is rendered whenever the
+/// daemon's snapshot arrives — including after the turn that wrote it ended.
+/// Each update carries the complete list, as v1 requires; an emptied list is a
+/// real replacement and is still sent.
+fn plan_update(last: &mut Option<Vec<Value>>, payload: &str) -> Option<Value> {
+    let entries = plan_entries(payload);
+    if last.as_ref() == Some(&entries) {
+        return None;
+    }
+    *last = Some(entries.clone());
+    Some(json!({
+        "sessionUpdate": "plan",
+        "entries": entries,
+    }))
+}
+
+/// ACP `plan` entries from the daemon's todo snapshot payload.
+///
+/// The payload is the structured todo card (`todos`, `plan`, `goals`); only the
+/// todo list is a plan. ACP requires every entry to carry a `high`/`medium`/
+/// `low` priority and a `pending`/`in_progress`/`completed` status, so jcode's
+/// free-form priority defaults to `medium` and an unrecognized status to
+/// `pending`. Cancelled todos are not plan entries: ACP has no cancelled state
+/// and cancelled work is not part of the plan.
+fn plan_entries(payload: &str) -> Vec<Value> {
+    let Ok(snapshot) = serde_json::from_str::<Value>(payload) else {
+        return Vec::new();
+    };
+    snapshot
+        .get("todos")
+        .and_then(Value::as_array)
+        .map(|todos| {
+            todos
+                .iter()
+                .filter_map(|todo| {
+                    let content = todo.get("content").and_then(Value::as_str)?;
+                    let status = match todo.get("status").and_then(Value::as_str) {
+                        Some("in_progress") => "in_progress",
+                        Some("completed") => "completed",
+                        Some("cancelled") => return None,
+                        _ => "pending",
+                    };
+                    let priority = match todo.get("priority").and_then(Value::as_str) {
+                        Some("high") => "high",
+                        Some("low") => "low",
+                        _ => "medium",
+                    };
+                    Some(json!({
+                        "content": content,
+                        "priority": priority,
+                        "status": status,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn compatibility_option_value(
@@ -3779,7 +4082,12 @@ pub(crate) fn tool_kind(name: &str) -> &'static str {
         "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => "edit",
         "bash" | "bg" | "selfdev" => "execute",
         "agentgrep" | "grep" | "glob" | "ls" | "session_search" | "conversation_search" => "search",
+        // Planning, not file or command work.
+        "todo" => "think",
         "webfetch" | "websearch" | "codesearch" => "fetch",
+        // No jcode tool is named for deleting or moving: `apply_patch` does
+        // both and reports `edit`. Unknown names stay `other` rather than being
+        // inferred from their spelling.
         _ => "other",
     }
 }

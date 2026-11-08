@@ -358,6 +358,11 @@ pub(super) enum RouteAction {
         turn_id: String,
     },
     SessionState(SessionStateChange),
+    /// The daemon's structured todo snapshot, rendered as a full-replacement
+    /// `plan` update. A plan is session state, so this is not turn-scoped.
+    Plan {
+        payload: String,
+    },
     /// Send this request to the daemon.
     Send(Request),
     /// Call [`RouterState::wake`] with `token` once `after` has passed.
@@ -377,6 +382,7 @@ pub(super) struct RouterState {
     live_sessions: Option<Vec<String>>,
     pending: HashMap<u64, PendingRequest>,
     correlations: HashMap<u64, (String, &'static str)>,
+    turnless: HashSet<u64>,
     own_turn: Option<OwnTurn>,
     peer_turn: Option<PeerTurn>,
     fence: TurnFence,
@@ -410,6 +416,7 @@ impl RouterState {
             live_sessions: None,
             pending: HashMap::new(),
             correlations: HashMap::new(),
+            turnless: HashSet::new(),
             own_turn: None,
             peer_turn: None,
             fence: TurnFence::default(),
@@ -510,7 +517,12 @@ impl RouterState {
         self.correlations.get(&request_id).cloned()
     }
 
+    pub(super) fn prompt_was_turnless(&self, request_id: u64) -> bool {
+        self.turnless.contains(&request_id)
+    }
+
     pub(super) fn unregister(&mut self, request_id: u64) {
+        self.turnless.remove(&request_id);
         self.correlations.remove(&request_id);
         self.pending.remove(&request_id);
         self.waiting.remove(&request_id);
@@ -739,6 +751,9 @@ impl RouterState {
 
     /// Answer a withdrawn (or lost) prompt as cancelled.
     fn resolve_cancelled(&mut self, prompt_id: u64) {
+        if !self.correlations.contains_key(&prompt_id) {
+            self.turnless.insert(prompt_id);
+        }
         self.waiting.remove(&prompt_id);
         self.deliver(prompt_id, ServerEvent::Interrupted);
         self.deliver(prompt_id, ServerEvent::Done { id: prompt_id });
@@ -1216,6 +1231,15 @@ fn flatten_scope(mut event: ServerEvent) -> Option<ServerEvent> {
             event => return Some(event),
         };
     }
+}
+
+/// The innermost event of a (possibly nested) turn envelope, by reference, so
+/// the caller can inspect an event it is about to route.
+fn inner_event(mut event: &ServerEvent) -> &ServerEvent {
+    while let ServerEvent::TurnEvent { event: inner, .. } = event {
+        event = inner.as_ref();
+    }
+    event
 }
 
 /// How many trailing history messages are searched for the running turn's

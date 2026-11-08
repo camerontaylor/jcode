@@ -1,9 +1,75 @@
 # R1 single lifecycle verification
 
-Status: R1 complete. The staged checkpoint notes below are historical; this
+Status: R1 complete, including integration of stage `7e4acbee2f`. The staged checkpoint notes below are historical; this
 final result supersedes their pending-work notes.
 
-## Final result
+## Stage integration (latest verification)
+
+Merged `origin/fork/acp-stage` at `7e4acbee2f` into the R1 branch without rebasing.
+Router conflict resolution retains the R1 lifecycle split and applies
+`1e7f94bbc2`'s plan-routing wrapper inside `daemon_router/lifecycle.rs`.
+`RouteAction::Plan`, GetTodos invalidation and the four plan router tests remain.
+The conformance file unions the independent producer-exit and detach-error
+regressions. The new plan test uses R1's classified scoped-terminal helper.
+Review fixes (including unknown attribution and fixture version normalization)
+and thought/tool mappings are retained. No fixture file differs from the stage.
+
+Cancellation ordering survives because the stage's synchronous notification
+sends run inside `cancel_active`, after revalidation, under the turn-state lock.
+The effect sends TurnStopped and requester Interrupted before signalling and
+unlocking. R1's drain still takes that same lock in `publication.retire()` before
+publishing its classified scoped terminal. Thus a successful cancellation's
+notices cannot be overtaken by the terminal; retirement first makes a late
+cancellation fail revalidation. Rejected cancellation restores the task handle
+exactly as on stage (`client_processing.rs` differs from stage only by the two
+optional scope fields). The existing cancellation-scope test now explicitly
+checks TurnStopped on both attachments and requester Interrupted precede the
+classified terminal. The new late-Stop handle regression is also retained.
+
+Mixed-version decode: an old fork's `turn_ended` line decodes to None and is
+skipped without failing the connection; the following scoped terminal is still
+routed. `undecodable_lines_are_skipped_and_never_end_the_session` already feeds
+exactly that sequence and asserts text plus Done; protocol tests reject the old
+variant. Absent `end` metadata still uses Done/completed and Error/failed fallback.
+
+All commands again used `CARGO_BUILD_RUSTC_WRAPPER= CARGO_NET_GIT_FETCH_WITH_CLI=true
+nice -n 10 cargo test -j 3` with available memory checked before each run:
+
+| Command suffix | Passed |
+| --- | ---: |
+| `--test e2e acp_conformance` | 17 |
+| `--test e2e acp_shared_session` | 4 |
+| `--lib cli::acp::tests` | 71 |
+| `--lib cli::acp::daemon_router::tests` | 45 |
+| `-p jcode-app-core --lib server::client_lifecycle` | 58 |
+| `-p jcode-app-core --lib turn_event_channel_tests` | 14 |
+| `-p jcode-app-core --lib agent::turn_ownership::tests` | 3 |
+| `-p jcode-app-core --lib server::client_session::tests` | 44 |
+| `-p jcode-app-core --lib tool::sdk::tests` | 4 |
+| `-p jcode-harness-api-server --lib` | 199 |
+| `-p jcode-protocol --lib turn_identity` | 10 |
+
+Conformance includes `acp_conformance_maps_reasoning_tool_calls_and_plan`, the
+prepare-error regression and comparator version-normalization regression, plus
+both R1 producer-exit cases. All four recorded fixtures replayed unmodified.
+The first exploratory router compilation exposed a newly merged test's old
+`turn_ended` helper name; it now uses `scoped_terminal`, and the final 45-test
+run passes. No behavior was dropped to resolve the merge.
+
+`~/.jcode-fork/fmt-check.sh` is absent. Per-file `rustfmt --edition 2024 --check
+--config skip_children=true` passes for all 25 Rust files changed since
+`47a130e98`; `git diff --check` passes. `git diff --exit-code
+origin/fork/acp-stage -- tests/fixtures/acp/` exits 0.
+
+Current core stat against upstream after incorporating the stage's cancellation
+fix (the original R1 before/after comparison below remains historical):
+
+```text
+ 93 files changed, 4589 insertions(+), 344 deletions(-)
+```
+
+## Final result at the pre-stage R1 checkpoint
+
 
 The daemon publishes one classified scoped terminal, with no `TurnEnded` event
 or `ended` flag. `TurnEndStatus` remains the generic shared enum. `TurnEvent`

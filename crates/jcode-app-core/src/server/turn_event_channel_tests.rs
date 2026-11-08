@@ -487,7 +487,7 @@ async fn cancel_turn_stopped_is_scoped_to_the_active_turn_for_every_attachment()
     )
     .await;
 
-    for (rx, identity) in receivers.iter_mut().zip(&identities) {
+    for (index, (rx, identity)) in receivers.iter_mut().zip(&identities).enumerate() {
         // Read the channel terminal, then include any extra direct replies.
         let mut events = read_until(rx, |event| is_scoped_done(event, 31)).await;
         assert!(
@@ -527,6 +527,31 @@ async fn cancel_turn_stopped_is_scoped_to_the_active_turn_for_every_attachment()
                 .any(|event| is_scoped_done(event, 31)),
             "classification is on the channel terminal: {events:?}"
         );
+        let stopped = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    scoped_payload(event),
+                    Some((_, ServerEvent::TurnStopped { .. }))
+                )
+            })
+            .expect("stop notification");
+        assert!(
+            stopped < ended,
+            "TurnStopped precedes the classified terminal"
+        );
+        if index == 0 {
+            let interrupted = events
+                .iter()
+                .position(|event| {
+                    matches!(scoped_payload(event), Some((_, ServerEvent::Interrupted)))
+                })
+                .expect("requester's interruption");
+            assert!(
+                interrupted < ended,
+                "Interrupted precedes the classified terminal"
+            );
+        }
         events.extend(std::iter::from_fn(|| rx.try_recv().ok()));
         assert_eq!(
             events
@@ -1108,8 +1133,9 @@ async fn turn_is_attributed_before_turn_started_is_announced() {
 async fn cancellation_dispatch_cannot_signal_a_successor() {
     let _lock = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
-    let harness =
+    let mut harness =
         TurnHarness::new("dispatch_replacement", 2, Arc::new(HangingStreamProvider)).await;
+    let mut requester = harness.take_receiver(0);
     for mode in 0..3 {
         let guard = harness.agent.lock().await;
         let lease = (mode < 2).then(|| guard.claim_server_turn().unwrap());
@@ -1156,6 +1182,18 @@ async fn cancellation_dispatch_cannot_signal_a_successor() {
             !signal.is_set(),
             "dispatch must not signal the successor (mode={mode})"
         );
+        if mode < 2 {
+            let events: Vec<_> = std::iter::from_fn(|| requester.try_recv().ok()).collect();
+            assert!(
+                !events.iter().any(|event| scoped_payload(event).is_some_and(
+                    |(_, event)| matches!(
+                        event,
+                        ServerEvent::TurnStopped { .. } | ServerEvent::Interrupted
+                    )
+                )),
+                "a non-owning stale Stop must not publish stopped events: {events:?}"
+            );
+        }
         drop(successor);
     }
 }
@@ -1412,6 +1450,15 @@ async fn two_steering_producers_withdraw_on_either_side_of_insertion() {
 /// completion can retire T while cancellation is paused before revalidation.
 #[tokio::test]
 async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
+    assert_completed_turn_survives_late_stop(false).await;
+}
+
+#[tokio::test]
+async fn late_stop_preserves_task_for_completion_reconciliation() {
+    assert_completed_turn_survives_late_stop(true).await;
+}
+
+async fn assert_completed_turn_survives_late_stop(check_handle_first: bool) {
     let _lock = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
     let mut harness =
@@ -1435,6 +1482,7 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
     let (retired, retirement) = tokio::sync::oneshot::channel();
     let (finish, finishing) = tokio::sync::oneshot::channel();
     let (exited, exit) = tokio::sync::oneshot::channel();
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<ProcessingCompletion>();
     // Publication can complete before the producer's final bookkeeping exits.
     let mut task = Some(tokio::spawn(async move {
         completed.await.unwrap();
@@ -1449,8 +1497,12 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
         drop(lease);
         retired.send(()).unwrap();
         finishing.await.unwrap();
+        done_tx
+            .send((77, Ok(()), None, tokio::task::id(), None))
+            .unwrap();
         exited.send(()).unwrap();
     }));
+    let producer_id = task.as_ref().unwrap().id();
     let control = SessionControlHandle::cancel_only(
         harness.session_id.clone(),
         Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1473,17 +1525,18 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
         ..harness.swarm()
     };
     let blocked = dispatch_members.write().await;
-    let cancel = super::client_processing::cancel_processing_message_for_turn(
-        &mut state,
-        &control,
-        &requester,
-        &swarm,
-        Some(78),
-        None,
-        Some(&harness.sessions),
-        None,
+    let mut cancel = Box::pin(
+        super::client_processing::cancel_processing_message_for_turn(
+            &mut state,
+            &control,
+            &requester,
+            &swarm,
+            Some(78),
+            None,
+            Some(&harness.sessions),
+            None,
+        ),
     );
-    tokio::pin!(cancel);
     assert!(futures::poll!(cancel.as_mut()).is_pending());
     complete.send(()).unwrap();
     let normal = read_until(&mut observer, |event| is_scoped_done(event, 77)).await;
@@ -1498,22 +1551,37 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
         1
     );
     assert!(!normal.iter().any(|event| {
-        scoped_payload(event).is_some_and(|(_, event)| matches!(event, ServerEvent::Interrupted))
+        scoped_payload(event).is_some_and(|(_, event)| {
+            matches!(
+                event,
+                ServerEvent::TurnStopped { .. } | ServerEvent::Interrupted
+            )
+        })
     }));
     let epoch = signal.epoch();
     let successor = harness.agent.lock().await.claim_server_turn().unwrap();
     drop(blocked);
-    cancel.await;
+    cancel.as_mut().await;
+    drop(cancel);
     finish.send(()).unwrap();
     exit.await.unwrap();
+    if check_handle_first {
+        assert_eq!(
+            state.task.as_ref().map(|task| task.id()),
+            Some(producer_id),
+            "stale cancellation must retain the task for completion reconciliation"
+        );
+    }
     let replies: Vec<_> = std::iter::from_fn(|| replies.try_recv().ok()).collect();
     assert!(
         !replies.iter().any(
-            |event| scoped_payload(event)
-                .is_some_and(|(scope, event)| scope == &identity
-                    && matches!(event, ServerEvent::Interrupted))
+            |event| scoped_payload(event).is_some_and(|(scope, event)| scope == &identity
+                && matches!(
+                    event,
+                    ServerEvent::TurnStopped { .. } | ServerEvent::Interrupted
+                ))
         ),
-        "a naturally completed turn must not be reported interrupted: {replies:?}"
+        "a naturally completed turn must not be reported stopped: {replies:?}"
     );
     assert_eq!(
         signal.epoch(),
@@ -1521,5 +1589,29 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
         "late Stop must not fire the successor signal"
     );
     assert!(!signal.is_set());
+    assert_eq!(
+        state.task.as_ref().map(|task| task.id()),
+        Some(producer_id),
+        "stale cancellation must retain the task for completion reconciliation"
+    );
+    let completion = done_rx.recv().await.unwrap();
+    assert!(completion.1.is_ok());
+    let connections = Arc::new(RwLock::new(HashMap::new()));
+    reconcile_processing_completions(
+        Some(completion),
+        &mut done_rx,
+        &mut state,
+        "late-stop-owner",
+        &connections,
+        &swarm,
+    )
+    .await;
+    assert!(state.task.is_none());
+    assert!(
+        !*state.client_is_processing,
+        "the completion must be accepted"
+    );
+    assert!(state.message_id.is_none());
+    assert!(state.session_id.is_none());
     drop(successor);
 }
