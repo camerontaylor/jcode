@@ -10,12 +10,14 @@ async fn acp_known_defect_replay_first_user_once() -> Result<()> {
     let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", runtime.path());
     let socket = runtime.path().join("jcode.sock");
     let provider = Arc::new(MockProvider::new());
-    provider.queue_response(vec![
-        StreamEvent::TextDelta("answer".into()),
-        StreamEvent::MessageEnd {
-            stop_reason: Some("end_turn".into()),
-        },
-    ]);
+    for _ in 0..2 {
+        provider.queue_response(vec![
+            StreamEvent::TextDelta("answer".into()),
+            StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            },
+        ]);
+    }
     let daemon =
         server::Server::new_with_paths(provider, socket.clone(), runtime.path().join("debug.sock"));
     let task = tokio::spawn(async move { daemon.run().await });
@@ -26,10 +28,12 @@ async fn acp_known_defect_replay_first_user_once() -> Result<()> {
             ServerEvent::History { session_id, .. } => session_id,
             event => anyhow::bail!("expected history: {event:?}"),
         };
-        raw.send_message("first-user-marker").await?;
-        loop {
-            if matches!(raw.read_event().await?, ServerEvent::Done { .. }) {
-                break;
+        for _ in 0..2 {
+            raw.send_message("first-user-marker").await?;
+            loop {
+                if matches!(raw.read_event().await?, ServerEvent::Done { .. }) {
+                    break;
+                }
             }
         }
         let mut acp = AcpClient::spawn()?;
@@ -46,13 +50,53 @@ async fn acp_known_defect_replay_first_user_once() -> Result<()> {
             .collect();
         assert_eq!(
             users.len(),
-            1,
-            "one stored user insertion, one replay item: {users:?}"
+            2,
+            "two intentionally repeated stored user insertions, two replay items: {users:?}"
         );
         assert_eq!(
             users[0]["params"]["update"]["content"]["text"],
             "first-user-marker"
         );
+        let ids: Vec<_> = acp
+            .pending
+            .iter()
+            .filter_map(|m| m["params"]["update"]["messageId"].as_str())
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            4
+        );
+        assert_eq!(texts(&acp.pending), vec!["answer", "answer"]);
+        let kinds: Vec<_> = acp
+            .pending
+            .iter()
+            .filter_map(|m| m["params"]["update"]["sessionUpdate"].as_str())
+            .filter(|k| k.ends_with("message_chunk"))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "user_message_chunk",
+                "agent_message_chunk",
+                "user_message_chunk",
+                "agent_message_chunk"
+            ]
+        );
+        acp.take_notifications();
+        acp.request(
+            "session/load",
+            json!({"sessionId":session,"cwd":std::env::current_dir()?}),
+        )
+        .await?;
+        let again: Vec<_> = acp
+            .pending
+            .iter()
+            .filter_map(|m| m["params"]["update"]["messageId"].as_str())
+            .collect();
+        assert_eq!(again, ids);
+        acp_fixture::check("11-import-repeated-user-replay-v1.jsonl", &acp.tape)?;
         acp.shutdown().await;
         Ok(())
     }
@@ -62,7 +106,6 @@ async fn acp_known_defect_replay_first_user_once() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "known defect: QA-STEER, see fork/acp-e2e-defects"]
 async fn acp_known_defect_reverse_steer_is_mirrored() -> Result<()> {
     reverse_steer().await
 }
@@ -107,9 +150,13 @@ async fn reverse_steer() -> Result<()> {
             .await?;
         acp.wait_for_notification(|m| m["params"]["update"]["content"]["text"] == "before-steer")
             .await?;
-        raw.send_message("reverse-steer-marker").await?;
-        // Require the insertion echo while the provider remains gated; this
-        // prevents a late new turn from passing as a same-turn steer.
+        let mut steering_peer = tokio::net::UnixStream::connect(&socket).await?;
+        steering_peer.write_all(format!("{}\n{}\n", json!({"type":"subscribe","id":800,"working_dir":std::env::current_dir()?,"target_session_id":session}), json!({"type":"soft_interrupt","id":801,"content":"reverse-steer-marker","urgent":false,"client_id":"raw-steer"})).as_bytes()).await?;
+        // Steering is inserted at the safe point after provider completion,
+        // not at admission. Waiting for the echo before release deadlocks the
+        // test, and was the cause of this probe's original false failure.
+        wait_for_steer_admission(runtime.path()).await?;
+        gate.add_permits(2);
         let update = acp
             .wait_for_notification(|m| {
                 m["params"]["update"]["sessionUpdate"] == "user_message_chunk"
@@ -119,11 +166,28 @@ async fn reverse_steer() -> Result<()> {
             update["params"]["update"]["content"]["text"],
             "reverse-steer-marker"
         );
-        gate.add_permits(2);
         assert_eq!(
             acp.wait_for_response(prompt).await?["result"]["stopReason"],
             "end_turn"
         );
+        assert!(update["params"]["update"]["messageId"].as_str().is_some_and(|id| id.ends_with(":steer:0")), "inserted steer has its own message identity: {update}");
+        let updates: Vec<_> = acp
+            .tape
+            .iter()
+            .filter(|r| r["dir"] == "a2c")
+            .map(|r| r["msg"].clone())
+            .collect();
+        assert_eq!(texts(&updates), vec!["before-steer", "after-steer"]);
+        let user = updates
+            .iter()
+            .position(|m| m["params"]["update"]["content"]["text"] == "reverse-steer-marker")
+            .unwrap();
+        let after = updates
+            .iter()
+            .position(|m| m["params"]["update"]["content"]["text"] == "after-steer")
+            .unwrap();
+        assert!(user < after, "steer insertion precedes affected output");
+        acp_fixture::check("10-reverse-steer-v1.jsonl", &acp.tape)?;
         acp.shutdown().await;
         Ok(())
     }
