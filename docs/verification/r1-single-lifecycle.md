@@ -1,6 +1,7 @@
 # R1 single lifecycle verification
 
-Status: inventory; lifecycle replacement and equivalence gate are pending.
+Status: inventory and pure-move router split complete; lifecycle replacement and
+equivalence gate are pending.
 
 Baseline: `47a130e98`, branch `fork/r1-single-lifecycle`, host triton.
 Memory at start: 18,965 MiB available. Configured contributor identity retained.
@@ -366,3 +367,29 @@ crates/jcode-app-core/src/agent.rs:27:    CancelProbe, RuntimeMutationLease, Tur
 ## Verification
 
 No fixture was re-recorded. No lifecycle behavior has been changed yet.
+
+## Pure-move lifecycle split
+
+Commit `36d16910e7` moves the route entry point, scoped lifecycle handling,
+steer adoption and adopted bracket delivery into
+`src/cli/acp/daemon_router/lifecycle.rs`. `include!` preserves the existing
+private scope and method visibility. The method text was compared to the
+pre-move source and is identical apart from boundary blank lines.
+`daemon_router.rs` shrinks from 1,653 to 1,270 lines; the new file is 389 lines.
+
+Verification:
+
+- `CARGO_NET_GIT_FETCH_WITH_CLI=true CARGO_BUILD_RUSTC_WRAPPER= nice -n 10 cargo test -j 3 --lib cli::acp::daemon_router::tests`: 41 passed, 0 failed.
+- `rustfmt --edition 2024 --check --config skip_children=true src/cli/acp/daemon_router.rs src/cli/acp/daemon_router/lifecycle.rs`: passed.
+- `git diff --check`: passed.
+- No tests deleted; deleted-test/surviving-coverage mapping is empty.
+- Fixtures remain unmodified; conformance replay has **not** been run.
+- No generic terminal refinement has been implemented. D3 remains.
+- No core files changed. Repeating the requested core diff command yields
+  **93 files changed, 4476 insertions(+), 296 deletions(-)**, identical to before.
+
+Remaining work: failing-first generic terminal classification regression;
+scoped terminal refinement; adapter-owned local bracket delivery; adapter
+switch; removal of competing protocol lifecycle and redundant bookkeeping;
+coverage migration and all requested equivalence commands. This document
+records preparatory work, not acceptance of R1.
