@@ -95,3 +95,7 @@ pub fn stored_session_catalog(limit: Option<usize>) -> Vec<SessionCatalogEntry> 
     });
     entries
 }
+
+#[cfg(test)]
+#[path = "session_catalog_tests.rs"]
+mod tests;
