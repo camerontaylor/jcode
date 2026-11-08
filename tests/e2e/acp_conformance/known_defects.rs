@@ -1,10 +1,9 @@
 use super::*;
 
-/// Regression target for the independently observed load duplicate. Ignored
-/// rather than asserting the bug as correct: the fix lane can run this exact
-/// intended assertion, and no successful test enshrines the defect.
+/// Narrow regression probe for the independently observed load duplicate.
+/// This simple single-message history passes; the imported live QA history
+/// needs a richer reproducer in the defect lane.
 #[tokio::test]
-#[ignore = "known defect: QA-REPLAY, see fork/acp-e2e-defects"]
 async fn acp_known_defect_replay_first_user_once() -> Result<()> {
     let _env = setup_test_env()?;
     let runtime = tempfile::tempdir_in("/tmp")?;
@@ -136,7 +135,6 @@ async fn reverse_steer() -> Result<()> {
 /// Provider-stream version of the observed Stop assertion. The deployed QA
 /// failure was during a tool wait; passing this narrower probe does not close it.
 #[tokio::test]
-#[ignore = "known defect: QA-STOP tool-wait variant, see fork/acp-e2e-defects"]
 async fn acp_known_defect_stop_observed_peer() -> Result<()> {
     let _env = setup_test_env()?;
     let runtime = tempfile::tempdir_in("/tmp")?;
