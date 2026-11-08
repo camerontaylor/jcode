@@ -528,3 +528,25 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
     - pluto and saturn: auto provider -> OpenRouter, `OPENROUTER_API_KEY` 401 "User not found"
     - ceres: "No tokens/providers left" (Copilot unauthenticated, usage exhausted)
   - **Pre-existing, not a regression:** the same prompt test with pluto's previous 0.99.1002 binary fails identically. These are host credential issues and were not changed (no credential changes).
+
+### 2026-11-08 — triton deployed; fleet complete on v0.99.1003
+
+- **Rollout:** waited for an idle window (no jcode-provider Paseo agent running a turn), then ran `harness-update.py --only jcode` -> `v0.99.1003 (bf9f0b22f)`.
+- **Gotcha:** the `server reload --force` that `jcode update` issues went to the wrong socket.
+  - My SSH shell has `XDG_RUNTIME_DIR=/run/user/502`, so it targeted `/run/user/502/jcode.sock` ("No running jcode server found").
+  - The Paseo-spawned daemon has no `XDG_RUNTIME_DIR` and listens on `/tmp/jcode-502/jcode.sock`.
+  - Both versions share the same `runtime_dir()`, so this is an environment mismatch, not a regression.
+  - Fix: `env -u XDG_RUNTIME_DIR TMPDIR=/tmp jcode --no-update server reload` reloaded PID 371976 in place onto 0.99.1003.
+- **After the reload:**
+  - All 18 idle 0.99.1002 `jcode acp` adapters stayed connected.
+  - An in-flight review turn (`session_dove`) kept streaming.
+  - No WARN/ERROR beyond pre-existing skill-shadow notices.
+- **Tests:**
+  - Private-daemon smoke test: PASS 13/13.
+  - **Live shared daemon** (new script mode `--existing-socket=/tmp/jcode-502/jcode.sock`, which never stops the daemon): PASS 13/13, including a real prompt with `end_turn` and turnId correlation.
+- **Fleet:** every host on `v0.99.1003`.
+  - Full prompt-level PASS: atlas, neptune, uranus, triton.
+  - Protocol-level PASS only: pluto, saturn, ceres. Their prompt failures are pre-existing provider credentials (OpenRouter 401, no provider), identical with 0.99.1002.
+- **Follow-ups:**
+  - Distinct fork release naming, proposed to the user: `v0.99.1004+fork.p199`. It needs `harness-update.py` `version_key` to drop `+` metadata (currently raises ValueError).
+  - `jcode update` and harness-update should reload the daemon on the socket it actually uses. Run from a login/SSH shell, they miss a daemon started under Paseo's environment.
