@@ -363,6 +363,7 @@ pub(super) struct RouterState {
     turn_origin: bool,
     live_sessions: Option<Vec<String>>,
     pending: HashMap<u64, PendingRequest>,
+    correlations: HashMap<u64, (String, &'static str)>,
     own_turn: Option<OwnTurn>,
     peer_turn: Option<PeerTurn>,
     fence: TurnFence,
@@ -393,6 +394,7 @@ impl RouterState {
             turn_origin: false,
             live_sessions: None,
             pending: HashMap::new(),
+            correlations: HashMap::new(),
             own_turn: None,
             peer_turn: None,
             fence: TurnFence::default(),
@@ -490,7 +492,12 @@ impl RouterState {
         rx
     }
 
+    pub(super) fn prompt_correlation(&self, request_id: u64) -> Option<(String, &'static str)> {
+        self.correlations.get(&request_id).cloned()
+    }
+
     pub(super) fn unregister(&mut self, request_id: u64) {
+        self.correlations.remove(&request_id);
         self.pending.remove(&request_id);
         self.waiting.remove(&request_id);
     }
@@ -947,6 +954,8 @@ impl RouterState {
             // `turn_started` this connection somehow missed.
             let request_id = origin.request_id.unwrap_or_default();
             self.waiting.remove(&request_id);
+            self.correlations
+                .insert(request_id, (turn_id_string(&identity), "origin"));
             self.own_turn = Some(OwnTurn::started(identity, request_id));
             return actions;
         }
@@ -1004,6 +1013,8 @@ impl RouterState {
                     turn: Some(identity.clone()),
                 }));
             }
+            self.correlations
+                .insert(request_id, (turn_id_string(&identity), "origin"));
             self.own_turn = Some(OwnTurn::started(identity, request_id));
         } else {
             actions.extend(self.open_peer_turn(identity, origin, user_content));
@@ -1143,6 +1154,10 @@ impl RouterState {
         client_ids: &[String],
     ) -> Vec<RouteAction> {
         let ours = self.take_waiting(client_ids);
+        for prompt_id in &ours {
+            self.correlations
+                .insert(*prompt_id, (turn_id_string(&identity), "steer"));
+        }
         if let Some(own) = self
             .own_turn
             .as_mut()

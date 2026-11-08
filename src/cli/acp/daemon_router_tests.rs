@@ -1642,3 +1642,18 @@ fn eof_closes_an_adopted_turn_bracket() {
         "{actions:?}"
     );
 }
+
+#[test]
+fn correlation_survives_terminal_until_request_release() {
+    let mut r = steering_router();
+    let _origin = steer(&mut r, 10);
+    r.route(turn_started(1, ours(10), None));
+    let _joined = steer(&mut r, 11);
+    r.route(scoped(1, injected("steer", &[cid(11)])));
+    r.route(turn_ended(1, TurnEndStatus::Completed));
+    r.route(scoped(1, ServerEvent::Done { id: 10 }));
+    assert_eq!(r.prompt_correlation(10), Some((tid(1), "origin")));
+    assert_eq!(r.prompt_correlation(11), Some((tid(1), "steer")));
+    r.unregister(10);
+    assert_eq!(r.prompt_correlation(10), None);
+}

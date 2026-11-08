@@ -405,7 +405,8 @@ fn add_optional_tokens(total: &mut Option<u64>, tokens: Option<u64>) {
 }
 
 fn prompt_response(stop_reason: &str, usage: &TurnUsage) -> Value {
-    let mut response = json!({ "stopReason": stop_reason });
+    let mut response =
+        json!({ "stopReason": stop_reason, "_meta": {"jcode": {"turnId": null, "role": "none"}} });
     if let Some(usage) = usage.to_acp() {
         response
             .as_object_mut()
@@ -1734,9 +1735,12 @@ impl AcpRuntime {
             }
         }
 
+        let mut response = prompt_response(&stop_reason, &turn_usage);
+        if let Some((turn_id, role)) = session.router.lock().await.prompt_correlation(prompt_id) {
+            response["_meta"]["jcode"] = json!({"turnId": turn_id, "role": role});
+        }
         ticket.release().await;
-        self.write_result(rpc_id, prompt_response(&stop_reason, &turn_usage))
-            .await?;
+        self.write_result(rpc_id, response).await?;
         Ok(())
     }
 
@@ -2835,11 +2839,10 @@ fn compatibility_option_value(
 ///
 /// `interfaceVersion` versions the jcode extensions, not ACP or the daemon
 /// protocol. Only extensions this build actually honors are listed:
-/// `turn_correlation` and `skill_selection` arrive in a later phase, so they
-/// must not appear yet. `sessionMcpServers` is false because client-supplied
+/// `skill_selection` arrives in a later phase. `sessionMcpServers` is false because client-supplied
 /// session MCP servers are accepted but not connected.
 fn jcode_capability_meta(profile: AcpProfile) -> Value {
-    let mut extensions = vec!["shared_control", "peer_turns"];
+    let mut extensions = vec!["shared_control", "peer_turns", "turn_correlation"];
     if profile.is_extended() {
         extensions.push("raw_server_event");
     }

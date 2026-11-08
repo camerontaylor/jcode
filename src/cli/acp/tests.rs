@@ -164,6 +164,7 @@ fn prompt_response_reports_usage_accumulated_across_the_turn() {
         prompt_response("end_turn", &usage),
         json!({
             "stopReason": "end_turn",
+            "_meta": {"jcode": {"turnId": null, "role": "none"}},
             "usage": {
                 "totalTokens": 57,
                 "inputTokens": 30,
@@ -179,7 +180,7 @@ fn prompt_response_reports_usage_accumulated_across_the_turn() {
 fn prompt_response_omits_unreported_usage_and_cache_fields() {
     assert_eq!(
         prompt_response("end_turn", &TurnUsage::default()),
-        json!({ "stopReason": "end_turn" })
+        json!({ "stopReason": "end_turn", "_meta": {"jcode": {"turnId": null, "role": "none"}} })
     );
 
     let mut usage = TurnUsage::default();
@@ -188,6 +189,7 @@ fn prompt_response_omits_unreported_usage_and_cache_fields() {
         prompt_response("cancelled", &usage),
         json!({
             "stopReason": "cancelled",
+            "_meta": {"jcode": {"turnId": null, "role": "none"}},
             "usage": {
                 "totalTokens": 12,
                 "inputTokens": 10,
@@ -203,17 +205,27 @@ fn initialize_advertises_jcode_capability_meta_in_every_profile() {
         (
             AcpProfile::Standard,
             "standard",
-            vec!["shared_control", "peer_turns"],
+            vec!["shared_control", "peer_turns", "turn_correlation"],
         ),
         (
             AcpProfile::Extended,
             "extended",
-            vec!["shared_control", "peer_turns", "raw_server_event"],
+            vec![
+                "shared_control",
+                "peer_turns",
+                "turn_correlation",
+                "raw_server_event",
+            ],
         ),
         (
             AcpProfile::Full,
             "full",
-            vec!["shared_control", "peer_turns", "raw_server_event"],
+            vec![
+                "shared_control",
+                "peer_turns",
+                "turn_correlation",
+                "raw_server_event",
+            ],
         ),
     ] {
         let result = initialize_result(&json!({"protocolVersion": 1}), profile);
@@ -238,7 +250,7 @@ fn initialize_advertises_jcode_capability_meta_in_every_profile() {
             .iter()
             .map(|extension| extension.as_str().expect("extension names are strings"))
             .collect();
-        for later in ["turn_correlation", "skill_selection"] {
+        for later in ["skill_selection"] {
             assert!(
                 !advertised.contains(&later),
                 "{later} is not honored by this build yet: {advertised:?}"
@@ -266,7 +278,7 @@ fn initialize_meta_ignores_unknown_and_absent_params() {
             json!({
                 "interfaceVersion": 1,
                 "profile": "standard",
-                "extensions": ["shared_control", "peer_turns"],
+                "extensions": ["shared_control", "peer_turns", "turn_correlation"],
                 "sessionMcpServers": false,
             }),
             "initialize params never change the advertised metadata: {params}"

@@ -126,6 +126,17 @@ async fn acp_conformance_create_list_load() -> Result<()> {
         let replay = c.take_notifications();
         assert_eq!(texts(&replay), vec!["fixture-answer"]);
         acp_fixture::check("01-create-list-load-v1.jsonl", &c.tape)?;
+        let selection = c
+            .request(
+                "session/prompt",
+                json!({"sessionId":id,"prompt":[{"type":"text","text":"/model"}]}),
+            )
+            .await?;
+        assert_eq!(
+            selection["_meta"]["jcode"],
+            json!({"turnId":null,"role":"none"})
+        );
+        c.take_notifications();
         c.request("session/close", json!({"sessionId":id})).await?;
         c.request("session/close", json!({"sessionId":id})).await?;
         c.request("session/resume", json!({"sessionId":id,"cwd":cwd}))
@@ -279,13 +290,17 @@ async fn shared_scenario(check_close: bool) -> Result<()> {
         })
         .await??;
         gate.add_permits(2);
+        let origin = a.wait_for_response(first).await?;
+        let joined = b.wait_for_response(steer).await?;
+        assert_eq!(origin["result"]["stopReason"], "end_turn");
+        assert_eq!(joined["result"]["stopReason"], "end_turn");
         assert_eq!(
-            a.wait_for_response(first).await?["result"]["stopReason"],
-            "end_turn"
+            origin["result"]["_meta"]["jcode"],
+            json!({"turnId":turn,"role":"origin"})
         );
         assert_eq!(
-            b.wait_for_response(steer).await?["result"]["stopReason"],
-            "end_turn"
+            joined["result"]["_meta"]["jcode"],
+            json!({"turnId":turn,"role":"steer"})
         );
         observed.extend(b.take_notifications());
         assert_eq!(texts(&observed), vec!["answer-0", "answer-1"]);

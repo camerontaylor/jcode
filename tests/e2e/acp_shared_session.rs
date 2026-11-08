@@ -8,10 +8,10 @@
 //! TUI or SDK follow-up: the daemon injects it at the turn's next safe point,
 //! and the prompt adopts the turn, resolving with it.
 
+use crate::test_support::acp::*;
 use crate::test_support::*;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use crate::test_support::acp::*;
 
 /// Streams a scripted word per turn, with a pause before the end so a second
 /// client can prompt while the first turn is still running.
@@ -827,7 +827,7 @@ async fn acp_capability_metadata_identifies_each_attachment() -> Result<()> {
         assert_eq!(meta["profile"], "standard");
         assert_eq!(
             meta["extensions"],
-            serde_json::json!(["shared_control", "peer_turns"])
+            serde_json::json!(["shared_control", "peer_turns", "turn_correlation"])
         );
         assert_eq!(meta["sessionMcpServers"], false);
         assert_eq!(
