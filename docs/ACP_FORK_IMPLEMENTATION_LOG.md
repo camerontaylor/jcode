@@ -67,8 +67,8 @@ observe it, plus a wire-level test:
 | P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | done; in stage | `57bc78ce9`: budgets green, no ceiling raised; `ServerEvent::scoped` constructor; acp.rs 4182 -> 940; new modules transport/session/presentation/requests/prompt all < 1200; test names 71/45 unchanged; 123 ACP unit + 17 conformance + 4 shared pass |
 | R2-fix | 3 | queued review #2 fixes (F1 F2 F3 F6 F7); branch `fork/acp-review2-fixes` off stage `76045f863` | Sol `aa00969c` (triton, `acp-review2-fixes`) | accepted; merged into `fork/acp-stage-next` `e87becb75` | F1 `9f5c97299`, F2 `8ae2d0834`, F3 `af56fa992`, F6 `82965e1f0`, F7 `415e31f2c`; 126 ACP unit + 17 conformance + 4 shared pass |
 | CI-guard | 0 | clear clippy/warning/panic/swallowed-error ratchet failures; branch `fork/acp-ci-guardrails` off `fork/acp-stage-next` `e87becb75` | Sol `ae3f6bd4` (triton, `acp-ci-guardrails`) | done; is the new `custom`/stage head `bf9f0b22f` | run 42465256663 green; panic totals 8 -> 8, swallowed 17 -> 17 across split families; 3 swallowed + 1 panic genuinely removed |
-| REL-name | rel | fork release naming `vX.Y.Z+fork.pNNN` (user-approved): build-meta `release_semver` accepts `+build`, updater tests, `fork-release.yml` tag check/title/notes; branch `fork/release-fork-naming` off `custom` | Sol `68a66c4c` (triton, `release-fork-naming`) | running | |
-| REL-reload | rel | `jcode update` reloads every reachable shared daemon (socket-env mismatch), plus a `server reload` hint; branch `fork/update-reload-all-daemons` off `custom` | Sol `bcab9716` (triton, `update-reload-all-daemons`) | running | |
+| REL-name | rel | fork release naming `vX.Y.Z+fork.pNNN` (user-approved): build-meta `release_semver` accepts `+build`, updater tests, `fork-release.yml` tag check/title/notes; branch `fork/release-fork-naming` off `custom` | Sol `68a66c4c` (triton, `release-fork-naming`) | accepted at `905e8834c` (worker crashed after push: Codex app-server exit, triton load 28) | CI 42513153287 green @ `b42a9cc8a`; provenance preflight fix `905e8834c` reviewed |
+| REL-reload | rel | `jcode update` reloads every reachable shared daemon (socket-env mismatch), plus a `server reload` hint; branch `fork/update-reload-all-daemons` off `custom` | Sol `bcab9716` (triton, `update-reload-all-daemons`) | accepted at `c3ae51461` (worker crashed before reporting; reviewed by orchestrator) | CI 42513311668 green |
 | REL-agents | rel | agents repo `harness-update.py`: ignore `+build` in `version_key`, percent-encode the tag in the download URL; PR camerontaylor/agents#56 | orchestrator | merged `f70952f38` (CI green ubuntu+macos) | 11/11 tests; hosts pick it up on next agents deploy (needed before cutting v0.99.1004+fork.p199) |
 
 Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
@@ -567,4 +567,20 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   - Existing release retitled to "jcode fork 0.99.1003 (upstream v1.0.0-preview.199)"; the tag is unchanged and it is still Latest.
 - **Reload:** REL-reload makes `jcode update` reload every live daemon on the candidate sockets (current, XDG, `/tmp` and `$TMPDIR` fallbacks, JCODE_* overrides), with per-socket reporting and no false "requested". Tests use temp-dir sockets only.
 - **Order:** merge REL-name and REL-reload into `custom` once Fork CI is green, and merge agents#56, before cutting `v0.99.1004+fork.p199`.
+
+### 2026-11-09 — release lanes accepted; release stage
+
+- **Naming review:**
+  - `release_semver` keeps `+build` and rejects malformed or injected metadata.
+  - `fork-release.yml` gained a `preflight` job that runs before any build. It does the tag-format check and resolves `v1.0.0-preview.N` from upstream with `git ls-remote` (no upstream tags pushed to the fork). It checks that the upstream SHA is an ancestor of the tagged commit; verified true for `custom`, and preview.199 is a lightweight tag that the fallback handles. It also computes the custom merge-base.
+  - The release title is "jcode fork X (upstream v1.0.0-preview.N)", with provenance notes.
+  - Installers percent-encode `+`.
+- **Blocking issue found in review and fixed:** the first cut read the upstream tag from the fork remote, which lacks it.
+- **Reload review:**
+  - `socket_discovery.rs` builds a deduped candidate set and checks liveness (an owned socket that answers the ping); it never starts a daemon.
+  - `update_reload.rs` reloads each live daemon with explicit `--socket`, keeping `--force` as before, and reports reloaded/skipped/failed per socket, or says no daemon was found.
+  - `server reload` names other live daemons.
+  - The upstream-owned change is a thin `fallback_runtime_dir_in` helper.
+- **Workers:** both crashed (Codex app-server exited; triton load average about 28). Their worktrees were clean and fully pushed.
+- **Stage:** `fork/release-stage` = `custom` + naming (fast-forward) + reload = `0f9a3e5de`. fmt, module and all 4 budgets pass locally; Fork CI is running. On green, fast-forward `custom`, then ask the user before tagging `v0.99.1004+fork.p199`. The hosts' agents checkouts need agents `f70952f38` first.
 
