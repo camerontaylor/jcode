@@ -10,7 +10,6 @@ async fn acp_conformance_seeded_three_client_invariants() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "known defect: ACP-LOAD-BRACKET, repeated mid-turn load starts a nested bracket"]
 async fn acp_conformance_repeated_midturn_load_has_one_bracket() -> Result<()> {
     schedules(true).await
 }

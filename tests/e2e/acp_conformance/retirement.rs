@@ -5,7 +5,6 @@ async fn acp_conformance_busy_config_errors_are_atomic() -> Result<()> {
     retirement("config").await
 }
 #[tokio::test]
-#[ignore = "known defect: ACP-LOST-STEER, abrupt adapter loss leaves queued input"]
 async fn acp_conformance_transport_loss_withdraws_waiting_steer() -> Result<()> {
     retirement("pending-loss").await
 }

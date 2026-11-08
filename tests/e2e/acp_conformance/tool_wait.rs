@@ -6,7 +6,6 @@ use super::*;
 /// terminal deadline spans the handoff window; cleanup releases the tool even
 /// on the known failing baseline. No production implementation is patched here.
 #[tokio::test]
-#[ignore = "known defect: QA-STOP, fixed by d46434b52 on fork/acp-e2e-defects"]
 async fn acp_conformance_stop_observed_bash_wait() -> Result<()> {
     let _env = setup_test_env()?;
     let _tools = EnvVarGuard::set("JCODE_TOOLS", "bash");
