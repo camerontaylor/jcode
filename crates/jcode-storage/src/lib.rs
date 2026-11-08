@@ -127,7 +127,12 @@ pub fn runtime_dir() -> PathBuf {
 }
 
 fn fallback_runtime_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("jcode-{}", runtime_user_discriminator()))
+    fallback_runtime_dir_in(&std::env::temp_dir())
+}
+
+/// No-XDG socket directory under a particular temporary directory.
+pub fn fallback_runtime_dir_in(temp: &Path) -> PathBuf {
+    temp.join(format!("jcode-{}", runtime_user_discriminator()))
 }
 
 #[cfg(unix)]
