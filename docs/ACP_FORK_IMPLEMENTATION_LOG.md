@@ -65,6 +65,7 @@ observe it, plus a wire-level test:
 | P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | accepted; merged into stage `b1d801910`, compile verification assigned to `436bb2af` | `d94ec61af`: reasoning -> `agent_thought_chunk`; todo -> session `plan` via `GetTodos` snapshot; tool `name`, `locations` (read/edit/write), `diff` on edit/write; apply_patch paths/diffs and plan-on-load skipped (no structured data) |
 | P3-corpus | 3 | record scenarios 05 close owner-aware, 07 config/commands, 08 negotiation/legacy; branch `fork/acp-corpus-v1` off stage `76045f863` | Sol `e66fe5f0` (triton, `acp-corpus-v1`) | running (01–04 recorded) | |
 | P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | done; in stage | `57bc78ce9`: budgets green, no ceiling raised; `ServerEvent::scoped` constructor; acp.rs 4182 -> 940; new modules transport/session/presentation/requests/prompt all < 1200; test names 71/45 unchanged; 123 ACP unit + 17 conformance + 4 shared pass |
+| R2-fix | 3 | queued review #2 fixes (F1 F2 F3 F6 F7); branch `fork/acp-review2-fixes` off stage `76045f863` | Sol `aa00969c` (triton, `acp-review2-fixes`) | running | |
 
 Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 
@@ -358,3 +359,20 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   integrate the same way: topic -> stage -> green CI on that SHA -> ff
   custom.
 - 2026-11-08: P3-corpus dispatched (Sol, triton): fixtures 05, 07, 08.
+
+### 2026-11-08 — queued review #2 result
+
+- Request `jcode-acp-r1-stage-38fa8f3ee-r2` completed (receipt `91e7f79d…`, head `38fa8f3ee`, 3 major / 4 minor / 2 trivial). The report is on triton under `~/.cache/jcode-review-38fa8f3ee/.cq/queue-evidence/results/91e7f79d…/report.md`.
+- Every finding was checked against stage `76045f863`:
+  - **Accepted:**
+    - F1: the `detach_view` doc comment belongs to `close_view`.
+    - F2: the stale fixture-drift paragraph in `p3-mappings.md`.
+    - F3: `route()` emits a Plan or sends `GetTodos` after `view_closed`.
+    - F6: an explicit `skill` selection is overridden by `parse_acp_slash_command`, in both `prompt.rs` and the `concurrent` computation.
+    - F7: plausible. The dispatcher is sequential, but a prompt task spawned before detach or close can register after `detach_view`, so it never settles and the detach wait can hang.
+  - **Skipped:** F4 and F9 are in upstream-owned `translate.rs` bootstrap code. The fork diff there is 2 lines.
+  - **Declined:**
+    - F5: re-adding `turn_ended` would bring back the R1/D3 competing lifecycle. Old fork clients already fall back to scoped Done/Error, so only the cancelled label degrades.
+    - F8: the env lock (`jcode_home_test_lock`) is already shared, and the dedup would edit upstream `translate_tests.rs`.
+- Accepted findings were routed to Sol `aa00969c` as `R2-fix`. Reported to `1f8a9aff`.
+
