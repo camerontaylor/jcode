@@ -53,9 +53,9 @@ No timer sleeps establish protocol ordering.
 
 - `05-close-owner-aware-v1.jsonl`: observer view of owner cancellation and observer close; Rust checks correlated origin cancellation, surviving peer completion and idempotence.
 
-- `07-config-commands-v1.jsonl`: effective model/effort options, legacy setter aliases, command discovery and selection-only correlation. Peer config propagation is an ignored contract-gap test: the setter succeeds, but the attached peer receives no config update within 30 seconds.
+- `07-config-commands-v1.jsonl`: effective model/effort options, legacy setter aliases, command discovery and selection-only correlation. An attached peer also receives the full effective options after every model/effort setter, checked in Rust.
 
 - `08-negotiation-legacy-v1.jsonl`: future-version negotiation, full adapter metadata, extension errors, ignored prompt metadata, legacy shared-control refusal and omitted correlation. Uses the existing test-only Unix daemon stub, with no runtime capability switch.
 
 Wire tests also exercise observer detach, queued-input withdrawal, adopted-steer detach,
-parameter errors and observer-close brackets. The peer config propagation test is ignored pending a production fix; no other contract gaps were found.
+parameter errors and observer-close brackets. All contract-gap tests are enabled.

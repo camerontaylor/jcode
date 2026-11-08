@@ -6,7 +6,6 @@ async fn acp_conformance_config_commands_v1() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract gap: model changes do not publish config updates to attached peers"]
 async fn acp_conformance_config_peer_update_contract() -> Result<()> {
     config_scenario(true).await
 }
@@ -98,6 +97,10 @@ async fn config_scenario(check_peer: bool) -> Result<()> {
                         m["params"]["update"]["sessionUpdate"] == "config_option_update"
                     })
                     .await?;
+                assert_eq!(
+                    update["params"]["update"]["configOptions"],
+                    response["configOptions"]
+                );
                 assert!(
                     update["params"]["update"]["configOptions"]
                         .as_array()

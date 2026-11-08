@@ -1995,7 +1995,13 @@ pub(super) async fn handle_client(
             }
 
             Request::CycleModel { id, direction } => {
-                handle_cycle_model(id, direction, &agent, &client_event_tx).await;
+                let config_tx = super::provider_config_fanout::config_reply_channel(
+                    &swarm_members,
+                    &client_session_id,
+                    &client_connection_id,
+                    &client_event_tx,
+                );
+                handle_cycle_model(id, direction, &agent, &config_tx).await;
             }
 
             Request::RefreshModels { id } => {
@@ -2007,11 +2013,23 @@ pub(super) async fn handle_client(
             }
 
             Request::SetModel { id, model } => {
-                handle_set_model(id, model, &agent, &client_event_tx).await;
+                let config_tx = super::provider_config_fanout::config_reply_channel(
+                    &swarm_members,
+                    &client_session_id,
+                    &client_connection_id,
+                    &client_event_tx,
+                );
+                handle_set_model(id, model, &agent, &config_tx).await;
             }
 
             Request::SetRoute { id, selection, automatic_failover } => {
-                handle_set_route(id, selection, automatic_failover, &agent, &client_event_tx).await;
+                let config_tx = super::provider_config_fanout::config_reply_channel(
+                    &swarm_members,
+                    &client_session_id,
+                    &client_connection_id,
+                    &client_event_tx,
+                );
+                handle_set_route(id, selection, automatic_failover, &agent, &config_tx).await;
             }
 
             Request::SetAgentModel { id, target, model, global } => {
@@ -2088,10 +2106,16 @@ pub(super) async fn handle_client(
                 effort,
                 target_session_id,
             } => {
+                let config_tx = super::provider_config_fanout::config_reply_channel(
+                    &swarm_members,
+                    target_session_id.as_deref().unwrap_or(&client_session_id),
+                    &client_connection_id,
+                    &client_event_tx,
+                );
                 if let Some(target_session_id) = target_session_id {
                     let target_agent = { sessions.read().await.get(&target_session_id).cloned() };
                     if let Some(target_agent) = target_agent {
-                        handle_set_reasoning_effort(id, effort, &target_agent, &client_event_tx)
+                        handle_set_reasoning_effort(id, effort, &target_agent, &config_tx)
                             .await;
                     } else {
                         let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
@@ -2101,7 +2125,7 @@ pub(super) async fn handle_client(
                         });
                     }
                 } else {
-                    handle_set_reasoning_effort(id, effort, &agent, &client_event_tx).await;
+                    handle_set_reasoning_effort(id, effort, &agent, &config_tx).await;
                 }
             }
 

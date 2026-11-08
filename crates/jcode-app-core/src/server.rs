@@ -50,6 +50,7 @@ mod jade_relay;
 mod lifecycle;
 mod live_status;
 mod live_turn;
+mod provider_config_fanout;
 mod provider_control;
 mod reload;
 mod reload_recovery;

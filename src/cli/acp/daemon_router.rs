@@ -964,9 +964,9 @@ impl RouterState {
                 ));
                 return actions;
             }
-            // `ModelChanged` is also broadcast with id 0 and forwarded to peers
-            // with the changer's id; anything else is a stale reply.
-            if !matches!(event, ServerEvent::ModelChanged { .. }) {
+            // Configuration acknowledgements can also arrive as peer state,
+            // with broadcast id 0 or the changer's id on older daemons.
+            if session_state_change(&event).is_none() {
                 return actions;
             }
         }
@@ -1054,7 +1054,7 @@ impl RouterState {
                 self.deliver(request_id, event);
                 return actions;
             }
-            if !matches!(event, ServerEvent::ModelChanged { .. }) {
+            if session_state_change(&event).is_none() {
                 crate::logging::debug(&format!(
                     "acp: dropping reply for non-pending request id {request_id}"
                 ));

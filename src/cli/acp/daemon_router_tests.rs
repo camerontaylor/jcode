@@ -540,6 +540,32 @@ fn session_state_from_peers_becomes_an_update_and_replies_still_route() {
         [ServerEvent::ModelChanged { id: 90, .. }]
     ));
 
+    // Peer effort acknowledgements are session state, not stale replies.
+    for id in [0, 789] {
+        let actions = router.route(ServerEvent::ReasoningEffortChanged {
+            id,
+            effort: Some("high".into()),
+            error: None,
+        });
+        assert!(matches!(actions.as_slice(),
+            [RouteAction::SessionState(SessionStateChange::Effort { effort })]
+                if effort.as_deref() == Some("high")));
+    }
+    let mut effort_reply = router.register(92, PendingKind::Reply);
+    assert!(
+        router
+            .route(ServerEvent::ReasoningEffortChanged {
+                id: 92,
+                effort: Some("low".into()),
+                error: None,
+            })
+            .is_empty()
+    );
+    assert!(matches!(
+        drain(&mut effort_reply).as_slice(),
+        [ServerEvent::ReasoningEffortChanged { id: 92, .. }]
+    ));
+
     // The capability probe's answer is a reply too.
     let mut probe = router.register(91, PendingKind::Reply);
     router.route(ServerEvent::Pong {
