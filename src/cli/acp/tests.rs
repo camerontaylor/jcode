@@ -203,17 +203,27 @@ fn initialize_advertises_jcode_capability_meta_in_every_profile() {
         (
             AcpProfile::Standard,
             "standard",
-            vec!["shared_control", "peer_turns"],
+            vec!["shared_control", "peer_turns", "skill_selection"],
         ),
         (
             AcpProfile::Extended,
             "extended",
-            vec!["shared_control", "peer_turns", "raw_server_event"],
+            vec![
+                "shared_control",
+                "peer_turns",
+                "skill_selection",
+                "raw_server_event",
+            ],
         ),
         (
             AcpProfile::Full,
             "full",
-            vec!["shared_control", "peer_turns", "raw_server_event"],
+            vec![
+                "shared_control",
+                "peer_turns",
+                "skill_selection",
+                "raw_server_event",
+            ],
         ),
     ] {
         let result = initialize_result(&json!({"protocolVersion": 1}), profile);
@@ -238,12 +248,16 @@ fn initialize_advertises_jcode_capability_meta_in_every_profile() {
             .iter()
             .map(|extension| extension.as_str().expect("extension names are strings"))
             .collect();
-        for later in ["turn_correlation", "skill_selection"] {
+        for later in ["turn_correlation"] {
             assert!(
                 !advertised.contains(&later),
                 "{later} is not honored by this build yet: {advertised:?}"
             );
         }
+        assert!(
+            advertised.contains(&"skill_selection"),
+            "null-clearing skill selection is honored, so it is advertised: {advertised:?}"
+        );
         assert_eq!(
             result["agentCapabilities"]["mcpCapabilities"],
             json!({"http": false, "sse": false}),
@@ -266,7 +280,7 @@ fn initialize_meta_ignores_unknown_and_absent_params() {
             json!({
                 "interfaceVersion": 1,
                 "profile": "standard",
-                "extensions": ["shared_control", "peer_turns"],
+                "extensions": ["shared_control", "peer_turns", "skill_selection"],
                 "sessionMcpServers": false,
             }),
             "initialize params never change the advertised metadata: {params}"
@@ -646,20 +660,191 @@ fn unknown_escaped_and_path_like_slash_text_is_untouched() {
 }
 
 #[test]
-fn explicit_skill_metadata_is_read_from_prompt_meta() {
+fn skill_selection_reads_the_canonical_metadata_field() {
+    // Canonical string selects; hosts that serialize the textual form are
+    // still understood.
     assert_eq!(
-        explicit_skill_from_params(&json!({"_meta": {"jcode": {"skill": "/interrogate"}}})),
-        Some("interrogate".to_string())
+        skill_selection_from_params(&json!({"_meta": {"jcode": {"skill": "/interrogate"}}})),
+        Ok(SkillSelection::Select("interrogate".to_string()))
     );
     assert_eq!(
-        explicit_skill_from_params(&json!({"_meta": {"activeSkill": "$review"}})),
-        Some("review".to_string())
+        skill_selection_from_params(&json!({"_meta": {"jcode": {"skill": "interrogate"}}})),
+        Ok(SkillSelection::Select("interrogate".to_string()))
+    );
+    // An explicit null is the clear verb, not an absent key.
+    assert_eq!(
+        skill_selection_from_params(&json!({"_meta": {"jcode": {"skill": null}}})),
+        Ok(SkillSelection::Clear)
+    );
+    // A missing key (or no `_meta` at all) leaves the selection untouched.
+    assert_eq!(
+        skill_selection_from_params(&json!({"_meta": {"jcode": {}}})),
+        Ok(SkillSelection::Unchanged)
     );
     assert_eq!(
-        explicit_skill_from_params(&json!({"_meta": {"skill": " "}})),
-        None
+        skill_selection_from_params(&json!({"_meta": {}})),
+        Ok(SkillSelection::Unchanged)
     );
-    assert_eq!(explicit_skill_from_params(&json!({})), None);
+    assert_eq!(skill_selection_from_params(&json!({})), Ok(SkillSelection::Unchanged));
+    // Malformed extension parameters are rejected, never silently ignored.
+    let err = skill_selection_from_params(&json!({"_meta": {"jcode": {"skill": 7}}}))
+        .expect_err("a non-string, non-null skill is malformed");
+    assert!(err.contains("skill name or null"), "{err}");
+}
+
+#[test]
+fn skill_selection_aliases_are_v1_compatibility_behind_the_canonical_field() {
+    for params in [
+        json!({"_meta": {"jcode": {"activeSkill": "$review"}}}),
+        json!({"_meta": {"jcode": {"active_skill": "review"}}}),
+        json!({"_meta": {"skill": "review"}}),
+        json!({"_meta": {"activeSkill": "review"}}),
+    ] {
+        assert_eq!(
+            skill_selection_from_params(&params),
+            Ok(SkillSelection::Select("review".to_string())),
+            "{params}"
+        );
+    }
+    // Blank aliases keep the current selection, as they always have.
+    assert_eq!(
+        skill_selection_from_params(&json!({"_meta": {"skill": " "}})),
+        Ok(SkillSelection::Unchanged)
+    );
+    // The canonical field wins over every alias, including its clear verb.
+    assert_eq!(
+        skill_selection_from_params(&json!({
+            "_meta": {"jcode": {"skill": "review", "activeSkill": "interrogate"}}
+        })),
+        Ok(SkillSelection::Select("review".to_string()))
+    );
+    assert_eq!(
+        skill_selection_from_params(&json!({
+            "_meta": {"jcode": {"skill": null}, "skill": "interrogate"}
+        })),
+        Ok(SkillSelection::Clear)
+    );
+}
+
+#[test]
+fn a_clearing_prompt_clears_the_attachment_and_starts_no_turn() {
+    let (_dir, skills) = project_skills(&["interrogate"]);
+
+    // Empty prompt text: a selection-only action, answered without a turn, and
+    // the attachment loses its skill.
+    let plan = plan_prompt_skill(
+        &SkillSelection::Clear,
+        Some("interrogate".to_string()),
+        &skills,
+        String::new(),
+        false,
+    )
+    .unwrap();
+    assert!(plan.selection_only, "a bare clear starts no model turn: {plan:?}");
+    assert_eq!(plan.skill, None, "the prompt runs without the cleared skill");
+    assert!(plan.attach, "the clear rewrites the sticky selection");
+
+    // With text, the text is submitted unskilled exactly as written, even when
+    // it looks like a skill invocation: only the clear decides the skill.
+    let plan = plan_prompt_skill(
+        &SkillSelection::Clear,
+        Some("interrogate".to_string()),
+        &skills,
+        "/interrogate why".to_string(),
+        false,
+    )
+    .unwrap();
+    assert!(!plan.selection_only);
+    assert_eq!(plan.skill, None);
+    assert_eq!(plan.text, "/interrogate why");
+}
+
+#[test]
+fn an_explicit_selection_wins_over_textual_recognition() {
+    let (_dir, skills) = project_skills(&["interrogate", "review"]);
+
+    // The metadata selection is the prompt's skill; the text stays a prompt.
+    let plan = plan_prompt_skill(
+        &SkillSelection::Select("review".to_string()),
+        Some("interrogate".to_string()),
+        &skills,
+        "/interrogate why".to_string(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(plan.skill, Some("review".to_string()));
+    assert_eq!(plan.text, "/interrogate why");
+    assert!(plan.attach);
+    assert!(!plan.selection_only);
+
+    // A selection-only selection still attaches and answers without a turn.
+    let plan = plan_prompt_skill(
+        &SkillSelection::Select("review".to_string()),
+        None,
+        &skills,
+        String::new(),
+        false,
+    )
+    .unwrap();
+    assert!(plan.selection_only);
+    assert_eq!(plan.skill, Some("review".to_string()));
+
+    // Textual invocations still select when no metadata is sent, and the
+    // resulting sticky skill rides the next prompt unchanged.
+    let plan = plan_prompt_skill(
+        &SkillSelection::Unchanged,
+        None,
+        &skills,
+        "$interrogate why".to_string(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(plan.skill, Some("interrogate".to_string()));
+    assert_eq!(plan.text, "why");
+    let plan = plan_prompt_skill(
+        &SkillSelection::Unchanged,
+        Some("interrogate".to_string()),
+        &skills,
+        "next question".to_string(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(plan.skill, Some("interrogate".to_string()));
+    assert!(!plan.attach, "an unchanged selection is not rewritten");
+    assert_eq!(plan.text, "next question");
+
+    // Unknown explicit names are `-32602`, not a silently unskilled prompt.
+    assert_eq!(
+        plan_prompt_skill(
+            &SkillSelection::Select("missing".to_string()),
+            None,
+            &skills,
+            "go".to_string(),
+            false,
+        )
+        .unwrap_err(),
+        "Unknown skill: missing"
+    );
+}
+
+#[test]
+fn a_busy_session_rejects_an_explicit_skill_selection_before_insertion() {
+    for selection in [
+        SkillSelection::Select("interrogate".to_string()),
+        SkillSelection::Clear,
+    ] {
+        let err = busy_skill_selection_error("s1", &selection, true)
+            .unwrap_or_else(|| panic!("{selection:?} must be rejected while busy"));
+        assert!(err.starts_with("Session s1 is already processing a prompt"), "{err}");
+        assert!(err.contains("skill selection needs an idle session"), "{err}");
+        assert_eq!(
+            busy_skill_selection_error("s1", &selection, false),
+            None,
+            "an idle session honors {selection:?}"
+        );
+    }
+    // A prompt that changes nothing is steered as before.
+    assert_eq!(busy_skill_selection_error("s1", &SkillSelection::Unchanged, true), None);
 }
 
 #[test]

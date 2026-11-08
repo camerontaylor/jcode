@@ -904,7 +904,14 @@ impl AcpRuntime {
                 return Ok(());
             }
         };
-        let explicit_skill = explicit_skill_from_params(&message.params);
+        let selection = match skill_selection_from_params(&message.params) {
+            Ok(selection) => selection,
+            Err(err) => {
+                self.write_error_value(id, JSONRPC_INVALID_PARAMS, err)
+                    .await?;
+                return Ok(());
+            }
+        };
         let (text, images) = match prompt_from_params(&message.params) {
             Ok(prompt) => prompt,
             Err(err) => {
@@ -926,6 +933,16 @@ impl AcpRuntime {
             .await?;
             return Ok(());
         };
+
+        // A skill change cannot ride a steer, and a prompt the daemon rejects
+        // as busy is resent as one, which would drop the change. Reject before
+        // anything is inserted so the client can retry when the session is
+        // idle, instead of believing a selection that never applied.
+        let busy = session.prompt_active() || session.router.lock().await.turn_open();
+        if let Some(err) = busy_skill_selection_error(&session_id, &selection, busy) {
+            self.write_error_value(id, JSONRPC_SERVER_ERROR, err).await?;
+            return Ok(());
+        }
 
         // A steering daemon injects a second prompt into the running turn, so
         // prompts may overlap. Slash commands and legacy daemons still take
@@ -951,7 +968,7 @@ impl AcpRuntime {
                     session,
                     text,
                     images,
-                    explicit_skill,
+                    selection,
                     &mut ticket,
                 )
                 .await;
@@ -1484,9 +1501,16 @@ impl AcpRuntime {
         session: Arc<DaemonSession>,
         text: String,
         images: Vec<(String, String)>,
-        explicit_skill: Option<String>,
+        selection: SkillSelection,
         ticket: &mut PromptTicket,
     ) -> Result<()> {
+        // An explicit clear lands before the text is interpreted, so neither a
+        // textual `/skill` invocation nor the daemon sees the old selection,
+        // and a command prompt cannot leave it attached either.
+        if selection == SkillSelection::Clear {
+            *session.active_skill.lock().await = None;
+        }
+
         let mut subagent = None;
         if let Some(command) = parse_acp_slash_command(&text) {
             if let Ok(AcpSlashCommand::Subagent(spec)) = command {
@@ -1500,61 +1524,58 @@ impl AcpRuntime {
             }
         }
 
-        let mut text = text;
-        let selected_skill = if subagent.is_some() {
-            None
+        let skills = session.skills();
+        let plan = if subagent.is_some() {
+            // A subagent launch is not a skill prompt: the attachment keeps its
+            // selection and the spec stays as written.
+            PromptSkillPlan {
+                skill: session.active_skill.lock().await.clone(),
+                attach: false,
+                text,
+                selection_only: false,
+            }
         } else {
             // Explicit client metadata wins. Otherwise resolve `/skill [prompt]`
             // (or `$skill [prompt]`, as some ACP hosts serialize command names)
             // against the session's registry. Unknown or path-like slash text is
             // passed through to the model unchanged.
-            let skills = session.skills();
-            match explicit_skill {
-                Some(name) => Some(name),
-                None => match resolve_acp_skill_invocation(&skills, &text) {
-                    Some((name, prompt)) => {
-                        text = prompt.unwrap_or_default();
-                        Some(name)
-                    }
-                    None => None,
-                },
+            let sticky = session.active_skill.lock().await.clone();
+            match plan_prompt_skill(&selection, sticky, &skills, text, !images.is_empty()) {
+                Ok(plan) => plan,
+                Err(err) => {
+                    ticket.release().await;
+                    self.write_error_value(rpc_id, JSONRPC_INVALID_PARAMS, err)
+                        .await?;
+                    return Ok(());
+                }
             }
         };
-        if let Some(name) = selected_skill {
-            let skills = session.skills();
-            let Some(skill) = skills.get(&name) else {
-                ticket.release().await;
-                self.write_error_value(
-                    rpc_id,
-                    JSONRPC_INVALID_PARAMS,
-                    format!("Unknown skill: {name}"),
+        if plan.attach {
+            *session.active_skill.lock().await = plan.skill.clone();
+            if let Some(skill) = plan.skill.as_deref().and_then(|name| skills.get(name)) {
+                let notice = format!("Activated skill: {} - {}", skill.name, skill.description);
+                let session_id = session.session_id().await;
+                self.write_notification(
+                    "session/update",
+                    json!({
+                        "sessionId": session_id,
+                        "update": agent_message_chunk_with_id(
+                        format!("{notice}\n\n"),
+                        format!("{session_id}:skill-notice:{rpc_id}"),
+                    ),
+                    }),
                 )
                 .await?;
-                return Ok(());
-            };
-            let notice = format!("Activated skill: {} - {}", skill.name, skill.description);
-            *session.active_skill.lock().await = Some(name);
-            let session_id = session.session_id().await;
-            self.write_notification(
-                "session/update",
-                json!({
-                    "sessionId": session_id,
-                    "update": agent_message_chunk_with_id(
-                    format!("{notice}\n\n"),
-                    format!("{session_id}:skill-notice:{rpc_id}"),
-                ),
-                }),
-            )
-            .await?;
-            if text.trim().is_empty() && images.is_empty() {
-                // Bare `/skill`: select it for the following prompts, like the TUI.
-                ticket.release().await;
-                self.write_result(rpc_id, prompt_response("end_turn", &TurnUsage::default()))
-                    .await?;
-                return Ok(());
             }
         }
-        let active_skill = session.active_skill.lock().await.clone();
+        if plan.selection_only {
+            // A selection-only action: the selection is the whole request (a
+            // bare `/skill`, or `skill: null` with no text), like the TUI.
+            ticket.release().await;
+            self.write_result(rpc_id, prompt_response("end_turn", &TurnUsage::default()))
+                .await?;
+            return Ok(());
+        }
 
         let prompt_id = session.next_id();
         let mut prompt_rx = session.register(prompt_id, PendingKind::Prompt).await;
@@ -1571,9 +1592,9 @@ impl AcpRuntime {
             None => prompt_request(
                 &mut *session.router.lock().await,
                 prompt_id,
-                text,
+                plan.text,
                 images,
-                active_skill,
+                plan.skill,
             ),
         };
         let send_result = session.send(&request).await;
@@ -2835,11 +2856,11 @@ fn compatibility_option_value(
 ///
 /// `interfaceVersion` versions the jcode extensions, not ACP or the daemon
 /// protocol. Only extensions this build actually honors are listed:
-/// `turn_correlation` and `skill_selection` arrive in a later phase, so they
-/// must not appear yet. `sessionMcpServers` is false because client-supplied
-/// session MCP servers are accepted but not connected.
+/// `turn_correlation` arrives in a later phase, so it must not appear yet.
+/// `sessionMcpServers` is false because client-supplied session MCP servers are
+/// accepted, declared unsupported here, and reported by one notice.
 fn jcode_capability_meta(profile: AcpProfile) -> Value {
-    let mut extensions = vec!["shared_control", "peer_turns"];
+    let mut extensions = vec!["shared_control", "peer_turns", "skill_selection"];
     if profile.is_extended() {
         extensions.push("raw_server_event");
     }
@@ -3173,20 +3194,159 @@ fn validate_acp_mcp_servers(params: &Value) -> std::result::Result<(), String> {
     }
 }
 
-/// Read an explicit skill selection from ACP prompt metadata. Accepts
-/// `_meta.jcode.skill`, `_meta.jcode.activeSkill`, `_meta.skill`, and
-/// `_meta.activeSkill`.
-fn explicit_skill_from_params(params: &Value) -> Option<String> {
-    let meta = params.get("_meta")?;
-    [meta.get("jcode"), Some(meta)]
-        .into_iter()
-        .flatten()
-        .flat_map(|object| ["skill", "activeSkill", "active_skill"].map(|key| object.get(key)))
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(|name| name.trim().trim_start_matches(['/', '$']).trim())
-        .find(|name| !name.is_empty())
-        .map(str::to_string)
+/// How an ACP prompt asks the adapter to change this attachment's sticky skill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SkillSelection {
+    /// No `skill` key was sent (or an empty one): keep the attached skill.
+    Unchanged,
+    /// `"skill": "name"`: run this prompt with `name` and keep it attached.
+    Select(String),
+    /// `"skill": null`: clear the attached skill before the text is read.
+    Clear,
+}
+
+impl SkillSelection {
+    fn is_explicit(&self) -> bool {
+        !matches!(self, SkillSelection::Unchanged)
+    }
+}
+
+/// Read the prompt's skill selection. The canonical field is
+/// `_meta.jcode.skill`, where a string selects and an explicit `null` clears;
+/// a missing key leaves the selection alone. The v1 compatibility aliases
+/// (`_meta.jcode.activeSkill`, `_meta.skill`, `_meta.activeSkill` and their
+/// `active_skill` spellings) are read after it, so the canonical field wins.
+///
+/// A canonical value that is neither a string nor `null` is a malformed
+/// extension parameter rather than a silently ignored field; the aliases stay
+/// lenient because they exist only for hosts written against older builds.
+fn skill_selection_from_params(params: &Value) -> std::result::Result<SkillSelection, String> {
+    let Some(meta) = params.get("_meta") else {
+        return Ok(SkillSelection::Unchanged);
+    };
+    let jcode = meta.get("jcode");
+    if let Some(canonical) = jcode.and_then(|jcode| jcode.get("skill")) {
+        return match canonical {
+            Value::Null => Ok(SkillSelection::Clear),
+            Value::String(name) => Ok(named_skill(name)),
+            other => Err(format!(
+                "ACP skill selection must be a skill name or null, got {other}"
+            )),
+        };
+    }
+    for object in [jcode, Some(meta)].into_iter().flatten() {
+        for key in ["skill", "activeSkill", "active_skill"] {
+            match object.get(key) {
+                Some(Value::Null) => return Ok(SkillSelection::Clear),
+                Some(Value::String(name)) => {
+                    let selection = named_skill(name);
+                    if selection.is_explicit() {
+                        return Ok(selection);
+                    }
+                }
+                Some(_) | None => {}
+            }
+        }
+    }
+    Ok(SkillSelection::Unchanged)
+}
+
+/// A selection written as a name. Hosts sometimes serialize the textual form,
+/// so a leading `/` or `$` is accepted; blank means no selection.
+fn named_skill(name: &str) -> SkillSelection {
+    let name = name.trim().trim_start_matches(['/', '$']).trim();
+    if name.is_empty() {
+        SkillSelection::Unchanged
+    } else {
+        SkillSelection::Select(name.to_string())
+    }
+}
+
+/// What one ACP prompt does with the attachment's sticky skill, decided before
+/// anything is sent to the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptSkillPlan {
+    /// Skill sent with the prompt, and kept on the attachment when `attach`.
+    skill: Option<String>,
+    /// Whether this prompt rewrites the attachment's sticky selection.
+    attach: bool,
+    /// Text sent to the model: a textual `/skill` prefix is consumed, an
+    /// explicit selection leaves the text exactly as written.
+    text: String,
+    /// Selection-only action: answer `end_turn` without starting a model turn.
+    selection_only: bool,
+}
+
+/// Decide the prompt's skill, keeping the contract's precedence: an explicit
+/// metadata selection wins over textual `/skill` or `$skill` recognition, a
+/// clear submits the text unskilled, and a bare selection starts no turn.
+fn plan_prompt_skill(
+    selection: &SkillSelection,
+    sticky: Option<String>,
+    skills: &crate::skill::SkillRegistry,
+    text: String,
+    has_images: bool,
+) -> std::result::Result<PromptSkillPlan, String> {
+    let selection_only = text.trim().is_empty() && !has_images;
+    match selection {
+        // The text of a clearing prompt is never interpreted as a skill
+        // invocation: it is submitted unskilled as written.
+        SkillSelection::Clear => Ok(PromptSkillPlan {
+            skill: None,
+            attach: true,
+            text,
+            selection_only,
+        }),
+        // The canonical selection is the prompt's skill, so the text stays a
+        // prompt even when it starts with a slash.
+        SkillSelection::Select(name) => {
+            if skills.get(name).is_none() {
+                return Err(format!("Unknown skill: {name}"));
+            }
+            Ok(PromptSkillPlan {
+                skill: Some(name.clone()),
+                attach: true,
+                text,
+                selection_only,
+            })
+        }
+        SkillSelection::Unchanged => match resolve_acp_skill_invocation(skills, &text) {
+            Some((name, prompt)) => {
+                let text = prompt.unwrap_or_default();
+                Ok(PromptSkillPlan {
+                    skill: Some(name),
+                    attach: true,
+                    selection_only: text.trim().is_empty() && !has_images,
+                    text,
+                })
+            }
+            None => Ok(PromptSkillPlan {
+                skill: sticky,
+                attach: false,
+                text,
+                selection_only,
+            }),
+        },
+    }
+}
+
+/// The error for an explicit skill selection that arrives while a turn or a
+/// prompt owns the session, or `None` when the selection can be honored.
+///
+/// v1 cannot carry a sticky-skill change on a steer: a soft interrupt has no
+/// skill field, and a prompt the daemon rejects as busy is resent as a steer.
+/// Rejecting here, before anything is inserted, keeps the client from believing
+/// a selection that would have been silently dropped.
+fn busy_skill_selection_error(
+    session_id: &str,
+    selection: &SkillSelection,
+    busy: bool,
+) -> Option<String> {
+    (selection.is_explicit() && busy).then(|| {
+        format!(
+            "Session {session_id} is already processing a prompt; a skill selection needs an idle session"
+        )
+    })
 }
 
 /// Resolve `/name [prompt]` or `$name [prompt]` to a registered skill. Returns
