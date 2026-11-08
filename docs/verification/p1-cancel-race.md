@@ -2,7 +2,7 @@
 
 ## Findings and changes
 
-- **D1**: `server/client_processing.rs:478` snapshots the dispatch target,
+- **D1**: `server/client_processing.rs:487` snapshots the dispatch target,
   including for unscoped Stop. After publication awaits,
   `agent/turn_ownership.rs:65` revalidates identity and signals under the same
   state lock used by claim, retirement and release. An idle snapshot cannot
@@ -24,7 +24,7 @@
   (abort retires before its fallback terminal); local cancellation preserves
   `Interrupted` before signalling but leaves `Done` to the channel.
 
-- **SDK ownership follow-up**: `server/client_session.rs:1498` and `:1770`
+- **SDK ownership follow-up**: `server/client_session.rs:1499` and `:1771`
   release a connection's SDK callback binding before successful live/persisted
   resume publishes completion. The existing SDK socket regression failed on
   this head before the fix; one isolated `origin/custom` run passed. Inspection
@@ -124,8 +124,98 @@ The first router command used the filename filter `daemon_router_tests` and
 matched zero tests; it is not counted. The corrected module filter shown in
 the table executes all 37 tests.
 
-Final named verification: 56 lifecycle, 44 session, 3 ownership, 37 ACP router
+Initial named verification: 56 lifecycle, 44 session, 3 ownership, 37 ACP router
 and 1 shared-session e2e tests pass. No full suite was run locally. D3 is the
 remaining compatibility item for R1. The receiver-drop steering harness is
 not a claim of a new real-network transport-loss test; the existing socket
 e2e and router close tests cover that adapter boundary separately.
+
+## Review corrections after 69d85b2a4
+
+### Late Stop classification and ordering
+
+`cancel_processing_message_for_turn` previously sent `Interrupted` before
+`signal_target` revalidated the captured identity. If T had retired normally,
+revalidation correctly declined cancellation but the already queued notification
+could still present normal completion as a stop.
+
+The regression-first commit `db810004f` adds
+`completed_turn_is_not_reported_interrupted_by_a_late_stop`
+(`server/turn_event_channel_tests.rs:1415`). It reuses the dispatch registry lock
+seam and a separate real `TurnEventChannel`: while unscoped Stop is paused, T
+publishes output, `TurnEnded(Completed)` and exactly one `Done`, then retires.
+The producer's final bookkeeping stays gated so cancellation still follows the
+local-task dispatch path. The test claims a successor, resumes Stop, checks no
+`Interrupted` for T and verifies that neither the signal epoch nor the successor's
+cancel flag changed. No sleeps are used.
+
+Before repair, on 69d85b2a4's cancellation implementation plus that test:
+
+```text
+completed_turn_is_not_reported_interrupted_by_a_late_stop ... FAILED
+  a naturally completed turn must not be reported interrupted
+  replies included a TurnEvent for T containing Interrupted
+  0 passed; 1 failed; 1922 filtered out
+```
+
+The fix queues `Interrupted` synchronously inside the successful `cancel_active`
+closure, before firing the signal, under the turn-state lock. Retirement obtains
+that same lock before the drain publishes its terminal. Thus the notification
+send completes before the drain can enqueue `Done`, including cooperative
+completion; a retired/replaced identity never enters the closure. This derives
+interruption from successful daemon cancellation, not adapter Stop intent.
+The candidate also retains only one notification for identity-backed requests.
+
+### Readability and formatting
+
+`tool/sdk.rs:34` now names the operation `release_connection`; guard Drop and
+explicit resume/detach cleanup call the same function. Existing four SDK tests
+and the socket ownership regression pass. The `TURN_CLAIM_HOOK` declaration
+states its thread-local restriction. Its sole installer,
+`cancel_after_turn_claim_is_preserved`, now explicitly builds a current-thread
+Tokio runtime with all drivers enabled; the correction also lives on the D2
+candidate.
+
+Ran `rustfmt --edition 2024 --config skip_children=true` on all touched Rust
+files, including the ownership braces, forwarding call, import list, SDK helper
+and tests. The scoped check below reported six files before correction and
+exits 0 afterward on the topic and both candidate branches:
+
+```sh
+bash ~/.jcode-fork/fmt-check.sh 7fd42339c907de223021bd63e5bb5df778c43a01
+```
+
+### Review rerun commands and results
+
+Using the same PATH, wrapper and target-cache exports above, with available
+memory checked before compilation, `nice -n 10` and two jobs. The user scope
+bus still refuses connections, so no systemd scope was available for these
+reruns. Cache remains on disk and mold is used.
+
+| Exact command after environment exports | Result |
+| --- | --- |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core completed_turn_is_not_reported_interrupted_by_a_late_stop --lib` | Before fix: 1 failed, as recorded above; after: included in the 57 and 13 passing module runs |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core server::client_lifecycle --lib` | 57 passed |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core turn_event_channel_tests --lib` | 13 passed |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core agent::turn_ownership::tests --lib` | 3 passed |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core server::client_session::tests --lib` | 44 passed |
+| `nice -n 10 cargo test -j 2 -p jcode-app-core tool::sdk::tests --lib` | 4 passed |
+| `nice -n 10 cargo test -j 2 -p jcode daemon_router::tests --lib` | 37 passed |
+| `nice -n 10 cargo test -j 2 -p jcode --test e2e acp_shared_session` | 1 passed, 7.96 seconds |
+
+The 13 turn-event tests are included in the 57 lifecycle tests, not additional
+coverage. Later merge-forward bookkeeping commits leave the tested source tree
+unchanged (`git diff b471b419b 436e2489b --stat` is empty).
+
+### New commits and branches
+
+- `pr/turn-scoped-cancel`: `733cfbdd3` locked notification; `842709d9b` avoids a
+  repeated notification on the candidate; `01cd0fc01` formats its regression.
+- `pr/stale-cancel-flag`: `e7c1a0627` documents the hook and uses a current-thread
+  test runtime.
+- `fork/p1-cancel-race`: `db810004f` failing regression first; merge `3fdf93a9e`;
+  SDK readability `343b83a3a`; formatting/runtime correction `b471b419b`;
+  merge-forward bookkeeping `59b020b77`, `21d89fb57`, `436e2489b`.
+
+All requested review corrections are addressed. D3 remains pending R1 as
+previously agreed. No shared daemon, installation or `custom` branch was changed.
