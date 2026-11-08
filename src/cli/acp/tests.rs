@@ -198,19 +198,199 @@ fn prompt_response_omits_unreported_usage_and_cache_fields() {
 }
 
 #[test]
-fn initialize_standard_omits_jcode_meta() {
-    let result = initialize_result(&json!({"protocolVersion": 1}), AcpProfile::Standard);
-    assert_eq!(result["protocolVersion"], 1);
-    assert!(result["agentCapabilities"].get("_meta").is_none());
-    assert_eq!(result["agentCapabilities"]["loadSession"], true);
+fn initialize_advertises_jcode_capability_meta_in_every_profile() {
+    for (profile, name, extensions) in [
+        (
+            AcpProfile::Standard,
+            "standard",
+            vec!["shared_control", "peer_turns"],
+        ),
+        (
+            AcpProfile::Extended,
+            "extended",
+            vec!["shared_control", "peer_turns", "raw_server_event"],
+        ),
+        (
+            AcpProfile::Full,
+            "full",
+            vec!["shared_control", "peer_turns", "raw_server_event"],
+        ),
+    ] {
+        let result = initialize_result(&json!({"protocolVersion": 1}), profile);
+        let meta = &result["agentCapabilities"]["_meta"]["jcode"];
+        assert_eq!(
+            meta,
+            &json!({
+                "interfaceVersion": 1,
+                "profile": name,
+                "extensions": extensions,
+                "sessionMcpServers": false,
+            }),
+            "{name} advertises the contract's capability metadata"
+        );
+        assert!(
+            meta["interfaceVersion"].is_u64(),
+            "interfaceVersion is a JSON number, not a string: {meta}"
+        );
+        let advertised: Vec<&str> = meta["extensions"]
+            .as_array()
+            .expect("extensions is an array")
+            .iter()
+            .map(|extension| extension.as_str().expect("extension names are strings"))
+            .collect();
+        for later in ["turn_correlation", "skill_selection"] {
+            assert!(
+                !advertised.contains(&later),
+                "{later} is not honored by this build yet: {advertised:?}"
+            );
+        }
+        assert_eq!(
+            result["agentCapabilities"]["mcpCapabilities"],
+            json!({"http": false, "sse": false}),
+            "stdio MCP support is still declared through the metadata, not here"
+        );
+    }
 }
 
 #[test]
-fn initialize_full_advertises_jcode_extension_meta() {
-    let result = initialize_result(&json!({"protocolVersion": 1}), AcpProfile::Full);
+fn initialize_meta_ignores_unknown_and_absent_params() {
+    for params in [
+        json!({}),
+        json!(null),
+        json!({"protocolVersion": 1}),
+        json!({"protocolVersion": 999, "unknownField": {"nested": true}}),
+    ] {
+        let result = initialize_result(&params, AcpProfile::Standard);
+        assert_eq!(
+            result["agentCapabilities"]["_meta"]["jcode"],
+            json!({
+                "interfaceVersion": 1,
+                "profile": "standard",
+                "extensions": ["shared_control", "peer_turns"],
+                "sessionMcpServers": false,
+            }),
+            "initialize params never change the advertised metadata: {params}"
+        );
+        assert_eq!(result["protocolVersion"], 1);
+        assert_eq!(result["agentCapabilities"]["loadSession"], true);
+    }
+}
+
+#[test]
+fn session_meta_reports_the_attachment_and_effective_shared_control() {
+    let support = SharedControlSupport {
+        observe: true,
+        stop_observed_turn: true,
+        implicit_steering: true,
+    };
     assert_eq!(
-        result["agentCapabilities"]["_meta"]["jcode"]["profile"],
-        "full"
+        jcode_session_meta("acp-test/0", support),
+        json!({
+            "clientInstanceId": "acp-test/0",
+            "sharedControl": {
+                "observe": true,
+                "stopObservedTurn": true,
+                "detach": false,
+                "implicitSteering": true,
+            },
+        })
+    );
+
+    // `_jcode/detach` does not exist, so detach stays false even where every
+    // other behavior is available.
+    let legacy = SharedControlSupport {
+        observe: false,
+        stop_observed_turn: false,
+        implicit_steering: false,
+    };
+    let meta = jcode_session_meta("acp-test/1", legacy);
+    assert_eq!(
+        meta["sharedControl"],
+        json!({
+            "observe": false,
+            "stopObservedTurn": false,
+            "detach": false,
+            "implicitSteering": false,
+        })
+    );
+    assert_eq!(meta["clientInstanceId"], "acp-test/1");
+}
+
+#[test]
+fn session_meta_merges_without_clobbering_existing_meta() {
+    let support = SharedControlSupport {
+        observe: true,
+        stop_observed_turn: true,
+        implicit_steering: true,
+    };
+
+    // new/load results carry no `_meta` today: the metadata creates it.
+    let mut plain = json!({"sessionId": "s1"});
+    insert_jcode_session_meta(&mut plain, "acp-test/0", support);
+    assert_eq!(plain["sessionId"], "s1");
+    assert_eq!(plain["_meta"]["jcode"]["clientInstanceId"], "acp-test/0");
+
+    // An existing `_meta` keeps its other keys.
+    let mut existing = json!({"_meta": {"other": {"kept": true}}});
+    insert_jcode_session_meta(&mut existing, "acp-test/1", support);
+    assert_eq!(existing["_meta"]["other"], json!({"kept": true}));
+    assert_eq!(existing["_meta"]["jcode"]["clientInstanceId"], "acp-test/1");
+
+    // A `_meta` that is not an object is replaced rather than dropped.
+    let mut odd = json!({"_meta": "not an object"});
+    insert_jcode_session_meta(&mut odd, "acp-test/2", support);
+    assert_eq!(odd["_meta"]["jcode"]["clientInstanceId"], "acp-test/2");
+}
+
+#[test]
+fn shared_control_follows_the_daemon_not_the_adapter() {
+    let router = |turn_origin: bool, soft_interrupt_ids: bool| {
+        let mut router = RouterState::new("acp-test/0", "session-1");
+        router.set_turn_origin(turn_origin);
+        router.set_soft_interrupt_ids(soft_interrupt_ids);
+        router
+    };
+
+    // A legacy daemon is read flat: peer turns are invisible and prompts are
+    // not steered.
+    assert_eq!(
+        SharedControlSupport::from_router(&router(false, false)),
+        SharedControlSupport {
+            observe: false,
+            stop_observed_turn: false,
+            implicit_steering: false,
+        }
+    );
+
+    // Attributed turns alone: peers are observable and stoppable, but a prompt
+    // still cannot join a running turn.
+    assert_eq!(
+        SharedControlSupport::from_router(&router(true, false)),
+        SharedControlSupport {
+            observe: true,
+            stop_observed_turn: true,
+            implicit_steering: false,
+        }
+    );
+
+    // Client ids on soft interrupts without turn identity is not steering.
+    assert_eq!(
+        SharedControlSupport::from_router(&router(false, true)),
+        SharedControlSupport {
+            observe: false,
+            stop_observed_turn: false,
+            implicit_steering: false,
+        }
+    );
+
+    // Both: the full baseline.
+    assert_eq!(
+        SharedControlSupport::from_router(&router(true, true)),
+        SharedControlSupport {
+            observe: true,
+            stop_observed_turn: true,
+            implicit_steering: true,
+        }
     );
 }
 
