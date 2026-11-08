@@ -102,7 +102,14 @@ fn acp_tool_kind_maps_core_tools() {
     assert_eq!(tool_kind("bash"), "execute");
     assert_eq!(tool_kind("agentgrep"), "search");
     assert_eq!(tool_kind("webfetch"), "fetch");
+    assert_eq!(tool_kind("todo"), "think");
     assert_eq!(tool_kind("swarm"), "other");
+    // Names are matched against the table, never inferred from their spelling:
+    // a tool this build does not know stays `other` even when its name sounds
+    // like a known kind.
+    assert_eq!(tool_kind("delete_file"), "other");
+    assert_eq!(tool_kind("move_file"), "other");
+    assert_eq!(tool_kind("read_file"), "other");
 }
 
 #[test]
@@ -554,6 +561,166 @@ fn event_mapper_emits_no_thought_chunk_without_daemon_reasoning() {
             })
             .is_empty()
     );
+}
+
+#[test]
+fn event_mapper_reports_tool_locations_from_structured_input() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard)
+        .with_working_dir(Some(PathBuf::from("/repo")));
+    let start = mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "read".to_string(),
+    });
+    assert_eq!(start[0]["name"], "read");
+    // The streamed input is not complete yet: no location key at all, not an
+    // empty array, and nothing guessed from the title.
+    assert!(start[0].get("locations").is_none());
+    mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: "{\"file_path\":\"src/a.rs\",\"start_line\":12}".to_string(),
+    });
+    let exec = mapper.map_event(ServerEvent::ToolExec {
+        id: "tool1".to_string(),
+        name: "read".to_string(),
+    });
+    assert_eq!(
+        exec[0]["locations"],
+        json!([{"path": "/repo/src/a.rs", "line": 12}])
+    );
+}
+
+#[test]
+fn event_mapper_omits_locations_when_the_tool_names_no_file() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard)
+        .with_working_dir(Some(PathBuf::from("/repo")));
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "bash".to_string(),
+    });
+    mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: "{\"command\":\"cargo test\"}".to_string(),
+    });
+    let exec = mapper.map_event(ServerEvent::ToolExec {
+        id: "tool1".to_string(),
+        name: "bash".to_string(),
+    });
+    assert!(exec[0].get("locations").is_none());
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "tool1".to_string(),
+        name: "bash".to_string(),
+        output: "ok".to_string(),
+        error: None,
+    });
+    assert_eq!(done[0]["content"].as_array().unwrap().len(), 1);
+    assert_eq!(done[0]["content"][0]["type"], "content");
+}
+
+#[test]
+fn event_mapper_reports_edit_diffs_from_structured_edits() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard)
+        .with_working_dir(Some(PathBuf::from("/repo")));
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "edit".to_string(),
+    });
+    mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: json!({
+            "file_path": "src/a.rs",
+            "edits": [
+                {"old_string": "let a = 1;", "new_string": "let a = 2;"},
+                {"old_string": "let b = 1;", "new_string": "let b = 2;"},
+            ],
+        })
+        .to_string(),
+    });
+    let exec = mapper.map_event(ServerEvent::ToolExec {
+        id: "tool1".to_string(),
+        name: "edit".to_string(),
+    });
+    assert_eq!(exec[0]["locations"], json!([{"path": "/repo/src/a.rs"}]));
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "tool1".to_string(),
+        name: "edit".to_string(),
+        output: "Applied 2 edits".to_string(),
+        error: None,
+    });
+    assert_eq!(
+        done[0]["content"],
+        json!([
+            {
+                "type": "diff",
+                "path": "/repo/src/a.rs",
+                "oldText": "let a = 1;",
+                "newText": "let a = 2;",
+            },
+            {
+                "type": "diff",
+                "path": "/repo/src/a.rs",
+                "oldText": "let b = 1;",
+                "newText": "let b = 2;",
+            },
+            {"type": "content", "content": {"type": "text", "text": "Applied 2 edits"}},
+        ])
+    );
+}
+
+#[test]
+fn event_mapper_reports_write_as_a_diff_without_old_text() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard)
+        .with_working_dir(Some(PathBuf::from("/repo")));
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "write".to_string(),
+    });
+    mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: json!({"file_path": "src/new.rs", "content": "fn main() {}\n"}).to_string(),
+    });
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "tool1".to_string(),
+        name: "write".to_string(),
+        output: "Wrote src/new.rs".to_string(),
+        error: None,
+    });
+    // The previous content is unknown and is not read to invent it.
+    assert_eq!(
+        done[0]["content"][0],
+        json!({
+            "type": "diff",
+            "path": "/repo/src/new.rs",
+            "newText": "fn main() {}\n",
+        })
+    );
+    assert!(done[0]["content"][0].get("oldText").is_none());
+}
+
+#[test]
+fn event_mapper_reports_no_diff_for_a_failed_edit() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard)
+        .with_working_dir(Some(PathBuf::from("/repo")));
+    mapper.map_event(ServerEvent::ToolStart {
+        id: "tool1".to_string(),
+        name: "edit".to_string(),
+    });
+    mapper.map_event(ServerEvent::ToolInput {
+        id: Some("tool1".to_string()),
+        delta: json!({
+            "file_path": "src/a.rs",
+            "edits": [{"old_string": "a", "new_string": "b"}],
+        })
+        .to_string(),
+    });
+    let done = mapper.map_event(ServerEvent::ToolDone {
+        id: "tool1".to_string(),
+        name: "edit".to_string(),
+        output: "old_string not found".to_string(),
+        error: Some("old_string not found".to_string()),
+    });
+    assert_eq!(done[0]["status"], "failed");
+    assert_eq!(done[0]["content"].as_array().unwrap().len(), 1);
+    assert_eq!(done[0]["content"][0]["type"], "content");
 }
 
 fn todo_snapshot(todos: Value) -> String {

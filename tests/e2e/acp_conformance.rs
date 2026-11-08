@@ -139,6 +139,148 @@ async fn acp_conformance_create_list_load() -> Result<()> {
     result
 }
 
+#[tokio::test]
+async fn acp_conformance_maps_reasoning_tool_calls_and_plan() -> Result<()> {
+    let _env = setup_test_env()?;
+    // The default `acp` tool profile has no `todo` tool, so this scenario asks
+    // for exactly the two tools it scripts. Everything else about the adapter
+    // is the shipped configuration.
+    let _tools = EnvVarGuard::set("JCODE_TOOLS", "todo,read");
+    let runtime = tempfile::Builder::new()
+        .prefix("acp-mappings-")
+        .tempdir_in("/tmp")?;
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", runtime.path());
+    let socket = runtime.path().join("jcode.sock");
+    let provider = Arc::new(MockProvider::new());
+    provider.queue_response(vec![
+        StreamEvent::ThinkingStart,
+        StreamEvent::ThinkingDelta("weighing the plan".into()),
+        StreamEvent::ThinkingEnd,
+        StreamEvent::ToolUseStart {
+            id: "call-todo".into(),
+            name: "todo".into(),
+        },
+        StreamEvent::ToolInputDelta(
+            json!({"todos": [{
+                "name": "wire-check",
+                "status": "in_progress",
+                "priority": "high",
+                "confidence": "plausible",
+            }]})
+            .to_string(),
+        ),
+        StreamEvent::ToolUseEnd,
+        StreamEvent::ToolUseStart {
+            id: "call-read".into(),
+            name: "read".into(),
+        },
+        StreamEvent::ToolInputDelta(json!({"file_path": "Cargo.toml"}).to_string()),
+        StreamEvent::ToolUseEnd,
+        StreamEvent::MessageEnd {
+            stop_reason: Some("tool_use".into()),
+        },
+    ]);
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("all mapped".into()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".into()),
+        },
+    ]);
+    let server =
+        server::Server::new_with_paths(provider, socket.clone(), runtime.path().join("debug.sock"));
+    let task = tokio::spawn(async move { server.run().await });
+    let result = async {
+        wait_for_socket(&socket).await?;
+        let mut c = AcpClient::spawn()?;
+        initialize(&mut c).await?;
+        let cwd = std::env::current_dir()?;
+        let new = c.request("session/new", json!({"cwd":cwd})).await?;
+        let id = &new["sessionId"];
+        let answer = c
+            .request(
+                "session/prompt",
+                json!({"sessionId":id,"prompt":[{"type":"text","text":"map it"}]}),
+            )
+            .await?;
+        assert_eq!(answer["stopReason"], "end_turn");
+        let updates: Vec<Value> = c
+            .take_notifications()
+            .into_iter()
+            .filter(|m| m["method"] == "session/update")
+            .map(|m| m["params"]["update"].clone())
+            .collect();
+        let position = |predicate: &dyn Fn(&Value) -> bool| -> usize {
+            updates
+                .iter()
+                .position(|update| predicate(update))
+                .unwrap_or_else(|| panic!("missing update in {updates:#?}"))
+        };
+        let is_tool = |id: &'static str, kind: &'static str, status: &'static str| {
+            move |update: &Value| {
+                update["toolCallId"] == id
+                    && update["sessionUpdate"] == kind
+                    && update["status"] == status
+            }
+        };
+        // Reasoning is exposed as standard thought chunks, before any output.
+        let thought = position(&|update: &Value| update["sessionUpdate"] == "agent_thought_chunk");
+        assert_eq!(updates[thought]["content"]["text"], "weighing the plan");
+        // The initial call precedes every update for it, and reports the
+        // daemon's programmatic name and the planning kind.
+        let todo_call = position(&is_tool("call-todo", "tool_call", "pending"));
+        assert_eq!(updates[todo_call]["name"], "todo");
+        assert_eq!(updates[todo_call]["kind"], "think");
+        let todo_running = position(&is_tool("call-todo", "tool_call_update", "in_progress"));
+        let todo_done = position(&is_tool("call-todo", "tool_call_update", "completed"));
+        assert!(thought < todo_call && todo_call < todo_running && todo_running < todo_done);
+        // File work reports the locations the tool named, resolved against the
+        // session cwd the way the daemon resolves them.
+        let read_call = position(&is_tool("call-read", "tool_call", "pending"));
+        assert_eq!(updates[read_call]["kind"], "read");
+        assert!(updates[read_call].get("locations").is_none());
+        let read_running = position(&is_tool("call-read", "tool_call_update", "in_progress"));
+        assert_eq!(
+            updates[read_running]["locations"],
+            json!([{"path": cwd.join("Cargo.toml")}])
+        );
+        let read_done = position(&is_tool("call-read", "tool_call_update", "completed"));
+        assert!(read_call < read_running && read_running < read_done);
+        // The answer text comes after the tool frames.
+        let text = position(&|update: &Value| update["sessionUpdate"] == "agent_message_chunk");
+        assert_eq!(updates[text]["content"]["text"], "all mapped");
+        assert!(read_done < text);
+        // The todo tool's rendered card is not the plan: the adapter asks the
+        // daemon for the structured snapshot. The daemon writes that reply on
+        // the connection's event channel, which drains after the turn's own
+        // output, so the plan arrives after the prompt response. A plan is
+        // session state, and v1 allows updates outside a turn.
+        let seq = |message: &Value| message["seq"].as_u64().unwrap_or_default();
+        let response_seq = c
+            .tape
+            .iter()
+            .find(|m| m["dir"] == "a2c" && m["msg"]["id"] == 3)
+            .map(seq)
+            .expect("prompt response in the tape");
+        let plan = c
+            .wait_for_notification(|m| m["params"]["update"]["sessionUpdate"] == "plan")
+            .await?;
+        assert_eq!(
+            plan["params"]["update"]["entries"],
+            json!([{"content": "wire-check", "priority": "high", "status": "in_progress"}])
+        );
+        let plan_seq = c.tape.last().map(seq).expect("plan in the tape");
+        assert!(
+            plan_seq > response_seq,
+            "plan {plan_seq} response {response_seq}"
+        );
+        c.shutdown().await;
+        Ok(())
+    }
+    .await;
+    task.abort();
+    result
+}
+
 fn texts(messages: &[Value]) -> Vec<&str> {
     messages
         .iter()

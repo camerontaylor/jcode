@@ -159,6 +159,9 @@ struct RouteSink {
     ui_state: Arc<Mutex<SessionUiState>>,
     gate: Arc<Mutex<PeerActionGate>>,
     peer_mapper: Arc<Mutex<Option<EventMapper>>>,
+    /// Workspace root the daemon resolves tool paths against, so mirrored tool
+    /// calls carry absolute locations and diff paths.
+    working_dir: Option<PathBuf>,
     session: std::sync::Weak<DaemonSession>,
 }
 
@@ -196,6 +199,7 @@ impl RouteSink {
                                 &self.ui_state,
                                 &self.gate,
                                 &self.peer_mapper,
+                                self.working_dir.as_deref(),
                                 action,
                             )
                             .await
@@ -562,6 +566,7 @@ impl DaemonSession {
             ui_state: Arc::clone(&self.ui_state),
             gate: Arc::clone(&self.peer_gate),
             peer_mapper: Arc::clone(&self.peer_mapper),
+            working_dir: self.working_dir.clone(),
             session: Arc::downgrade(self),
         }
     }
@@ -1638,7 +1643,8 @@ impl AcpRuntime {
     ) -> Result<()> {
         let session_id = session.session_id().await;
         let scope = format!("{session_id}:own:{prompt_id}");
-        let mut mapper = EventMapper::with_scope(session_id.clone(), self.profile, scope.clone());
+        let mut mapper = EventMapper::with_scope(session_id.clone(), self.profile, scope.clone())
+            .with_working_dir(session.working_dir.clone());
         let mut stop_reason = "end_turn".to_string();
         let mut turn_usage = TurnUsage::default();
         let mut steers = 0u32;
@@ -1943,6 +1949,7 @@ impl AcpRuntime {
         ui_state: &Arc<Mutex<SessionUiState>>,
         gate: &Arc<Mutex<PeerActionGate>>,
         peer_mapper: &Arc<Mutex<Option<EventMapper>>>,
+        working_dir: Option<&Path>,
         action: RouteAction,
     ) -> Result<()> {
         if let RouteAction::SessionState(change) = action {
@@ -1960,7 +1967,7 @@ impl AcpRuntime {
         if gate.lock().await.hold(action.clone()) {
             return Ok(());
         }
-        self.apply_peer_action(router, ui_state, peer_mapper, action)
+        self.apply_peer_action(router, ui_state, peer_mapper, working_dir, action)
             .await
     }
 
@@ -1973,6 +1980,7 @@ impl AcpRuntime {
                     &session.router,
                     &session.ui_state,
                     &session.peer_mapper,
+                    session.working_dir.as_deref(),
                     action,
                 )
                 .await
@@ -1987,6 +1995,7 @@ impl AcpRuntime {
         router: &Arc<Mutex<RouterState>>,
         ui_state: &Arc<Mutex<SessionUiState>>,
         peer_mapper: &Arc<Mutex<Option<EventMapper>>>,
+        working_dir: Option<&Path>,
         action: RouteAction,
     ) -> Result<()> {
         let session_id = router.lock().await.session_id().to_string();
@@ -2000,11 +2009,14 @@ impl AcpRuntime {
                 // A fresh mapper per peer turn: tool-call ids and streamed
                 // inputs must not leak between turns or into this adapter's own
                 // prompt mapping.
-                *peer_mapper.lock().await = Some(EventMapper::with_scope(
-                    session_id.clone(),
-                    self.profile,
-                    format!("{session_id}:peer:{turn_id}"),
-                ));
+                *peer_mapper.lock().await = Some(
+                    EventMapper::with_scope(
+                        session_id.clone(),
+                        self.profile,
+                        format!("{session_id}:peer:{turn_id}"),
+                    )
+                    .with_working_dir(working_dir.map(Path::to_path_buf)),
+                );
                 self.write_turn_notification(&session_id, &turn_id, "started", Some(&origin), None)
                     .await?;
                 // A mid-turn attach already replayed this prompt from the
@@ -2050,6 +2062,7 @@ impl AcpRuntime {
                                 self.connection_seq.fetch_add(1, Ordering::Relaxed)
                             );
                             EventMapper::with_scope(session_id.clone(), self.profile, scope)
+                                .with_working_dir(working_dir.map(Path::to_path_buf))
                         })
                         .map_event(event)
                 };
@@ -2665,6 +2678,9 @@ struct EventMapper {
     /// Index of the reasoning block currently being streamed, in its own id
     /// space so a thought block and an assistant message never share an id.
     thought_index: u64,
+    /// Workspace root the daemon resolves tool paths against. Tool inputs name
+    /// files relative to it, and ACP locations require absolute paths.
+    working_dir: Option<PathBuf>,
 }
 
 impl EventMapper {
@@ -2684,7 +2700,14 @@ impl EventMapper {
             message_scope,
             message_index: 0,
             thought_index: 0,
+            working_dir: None,
         }
+    }
+
+    /// Resolve tool input paths the way the daemon does.
+    fn with_working_dir(mut self, working_dir: Option<PathBuf>) -> Self {
+        self.working_dir = working_dir;
+        self
     }
 
     /// Stable id for the assistant message currently being streamed.
@@ -2744,6 +2767,7 @@ impl EventMapper {
                     "sessionUpdate": "tool_call",
                     "toolCallId": id,
                     "title": tool_title(&name),
+                    "name": name,
                     "kind": tool_kind(&name),
                     "status": "pending",
                 })]
@@ -2778,9 +2802,17 @@ impl EventMapper {
                     .tool_inputs
                     .get(update["toolCallId"].as_str().unwrap_or_default())
                     && let Some(raw_input) = parse_json_object(input)
-                    && let Some(object) = update.as_object_mut()
                 {
-                    object.insert("rawInput".to_string(), raw_input);
+                    // The streamed input is complete once the call executes,
+                    // so this is where the affected files are known. No
+                    // location key at all means the tool names no file.
+                    let locations = tool_locations(&name, &raw_input, self.working_dir.as_deref());
+                    if let Some(object) = update.as_object_mut() {
+                        if !locations.is_empty() {
+                            object.insert("locations".to_string(), json!(locations));
+                        }
+                        object.insert("rawInput".to_string(), raw_input);
+                    }
                 }
                 vec![update]
             }
@@ -2789,24 +2821,38 @@ impl EventMapper {
                 name,
                 output,
                 error,
-            } => vec![json!({
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": id,
-                "title": tool_title(&name),
-                "kind": tool_kind(&name),
-                "status": if error.is_some() { "failed" } else { "completed" },
-                "content": [{
+            } => {
+                let mut content = Vec::new();
+                // Diffs come from the structured edit input the model sent, and
+                // only for a call that actually applied. Reading the file to
+                // reconstruct old text would be a guess, so `write` reports no
+                // `oldText` at all.
+                if error.is_none()
+                    && let Some(input) = self.tool_inputs.get(&id)
+                    && let Some(raw_input) = parse_json_object(input)
+                {
+                    content.extend(tool_diffs(&name, &raw_input, self.working_dir.as_deref()));
+                }
+                content.push(json!({
                     "type": "content",
                     "content": {
                         "type": "text",
-                        "text": output,
+                        "text": output.clone(),
                     }
-                }],
-                "rawOutput": {
-                    "output": output,
-                    "error": error,
-                }
-            })],
+                }));
+                vec![json!({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": id,
+                    "title": tool_title(&name),
+                    "kind": tool_kind(&name),
+                    "status": if error.is_some() { "failed" } else { "completed" },
+                    "content": content,
+                    "rawOutput": {
+                        "output": output,
+                        "error": error,
+                    }
+                })]
+            }
             ServerEvent::GeneratedImage {
                 id,
                 path,
@@ -2860,7 +2906,118 @@ fn is_todo_tool(name: &str) -> bool {
     )
 }
 
-/// Structured input fields that name the file a tool call works on/// The `plan` update for a todo snapshot, or `None` when it repeats the plan
+/// Structured input fields that name the file a tool call works on, with the
+/// field that carries its line when the schema documents one.
+///
+/// Only tools whose schema declares these fields appear here, and only those
+/// fields are read: a tool that names no file has no location, which is
+/// legitimate and reported as absence rather than guessed from its arguments
+/// or its display title. `apply_patch` is absent on purpose; its input is patch
+/// text, and deriving paths from it would mean parsing the patch.
+fn tool_location_fields(name: &str) -> &'static [(&'static str, Option<&'static str>)] {
+    match name {
+        "read" => &[("file_path", Some("start_line"))],
+        "edit" | "write" => &[("file_path", None)],
+        _ => &[],
+    }
+}
+
+/// The absolute form of a tool input path, resolved exactly as the daemon's
+/// `ToolContext::resolve_path` resolves it. ACP locations and diffs require an
+/// absolute path, so a path that cannot be made absolute yields nothing.
+fn absolute_tool_path(path: &str, working_dir: Option<&Path>) -> Option<String> {
+    let path = Path::new(path);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        working_dir?.join(path)
+    };
+    resolved
+        .is_absolute()
+        .then(|| resolved.to_string_lossy().into_owned())
+}
+
+/// ACP `locations` for a tool call, from its structured input.
+fn tool_locations(name: &str, input: &Value, working_dir: Option<&Path>) -> Vec<Value> {
+    let mut locations = Vec::new();
+    for (path_field, line_field) in tool_location_fields(name) {
+        let Some(path) = input.get(*path_field).and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(path) = absolute_tool_path(path, working_dir) else {
+            continue;
+        };
+        let line = line_field
+            .and_then(|field| input.get(field))
+            .and_then(Value::as_u64)
+            .filter(|line| *line > 0)
+            .and_then(|line| u32::try_from(line).ok());
+        locations.push(match line {
+            Some(line) => json!({ "path": path, "line": line }),
+            None => json!({ "path": path }),
+        });
+    }
+    locations
+}
+
+/// ACP `diff` content for a tool call, from its structured edit input.
+///
+/// `edit` reports one diff per replacement the model asked for. `write` reports
+/// only `newText`: the previous content is not part of the request, and reading
+/// the file to reconstruct it would report a state the daemon never supplied.
+fn tool_diffs(name: &str, input: &Value, working_dir: Option<&Path>) -> Vec<Value> {
+    let Some(path) = input
+        .get("file_path")
+        .and_then(Value::as_str)
+        .and_then(|path| absolute_tool_path(path, working_dir))
+    else {
+        return Vec::new();
+    };
+    let diff = |old_text: Option<&str>, new_text: &str| match old_text {
+        Some(old_text) => json!({
+            "type": "diff",
+            "path": path,
+            "oldText": old_text,
+            "newText": new_text,
+        }),
+        None => json!({
+            "type": "diff",
+            "path": path,
+            "newText": new_text,
+        }),
+    };
+    match name {
+        "edit" => {
+            let mut diffs = Vec::new();
+            if let Some(edits) = input.get("edits").and_then(Value::as_array) {
+                for edit in edits {
+                    let (Some(old_text), Some(new_text)) = (
+                        edit.get("old_string").and_then(Value::as_str),
+                        edit.get("new_string").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    diffs.push(diff(Some(old_text), new_text));
+                }
+            }
+            // The legacy single-replacement form of the same tool.
+            if let (Some(old_text), Some(new_text)) = (
+                input.get("old_string").and_then(Value::as_str),
+                input.get("new_string").and_then(Value::as_str),
+            ) {
+                diffs.push(diff(Some(old_text), new_text));
+            }
+            diffs
+        }
+        "write" => match input.get("content").and_then(Value::as_str) {
+            Some(content) => vec![diff(None, content)],
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// The `plan` update for a todo snapshot, or `None` when it repeats the plan
 /// this connection already sent.
 ///
 /// A plan is session state, not turn output, so it is rendered whenever the
@@ -3563,7 +3720,12 @@ pub(crate) fn tool_kind(name: &str) -> &'static str {
         "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => "edit",
         "bash" | "bg" | "selfdev" => "execute",
         "agentgrep" | "grep" | "glob" | "ls" | "session_search" | "conversation_search" => "search",
+        // Planning, not file or command work.
+        "todo" => "think",
         "webfetch" | "websearch" | "codesearch" => "fetch",
+        // No jcode tool is named for deleting or moving: `apply_patch` does
+        // both and reports `edit`. Unknown names stay `other` rather than being
+        // inferred from their spelling.
         _ => "other",
     }
 }

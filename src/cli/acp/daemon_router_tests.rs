@@ -1708,8 +1708,8 @@ fn a_todo_snapshot_is_a_session_plan_action_whenever_it_arrives() {
     assert!(!router.own_turn_running());
     let _ = drain(&mut prompt);
 
-    let payload = json!({"todos": [{"content": "one", "status": "pending", "priority": "high"}]})
-        .to_string();
+    let payload =
+        json!({"todos": [{"content": "one", "status": "pending", "priority": "high"}]}).to_string();
     let actions = router.route(ServerEvent::Todos {
         session_id: "session-1".to_string(),
         payload: payload.clone(),
