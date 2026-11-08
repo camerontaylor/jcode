@@ -887,8 +887,7 @@ async fn acp_capability_metadata_identifies_each_attachment() -> Result<()> {
 
 /// `result._meta.jcode` of an attachment response, asserting the contract's
 /// exact shape: a non-empty instance id, and exactly the four boolean
-/// `sharedControl` fields with `detach` false (`_jcode/detach` does not exist
-/// yet, so the behavior is not usable).
+/// `sharedControl` fields, including effective daemon-backed detach support.
 fn attachment_instance(result: &serde_json::Value, method: &str) -> Result<String> {
     let jcode = &result["_meta"]["jcode"];
     let instance = jcode["clientInstanceId"]

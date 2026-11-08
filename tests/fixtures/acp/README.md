@@ -42,7 +42,12 @@ scenario gates provider completion on observed debug-socket queue admission,
 since steer injection happens after the provider reaches its safe point.
 No timer sleeps establish protocol ordering.
 
-## Known contract gaps
+## Scenarios
 
-- [`acp_conformance_capability_metadata_contract`](../../e2e/acp_conformance.rs): ignored because standard initialize omits jcode capability metadata.
-- [`acp_conformance_observer_close_bracket_contract`](../../e2e/acp_conformance.rs): ignored because observer close omits the required `canceled` peer terminal.
+- `01-create-list-load-v1.jsonl`: create, list, prompt and replay with attachment metadata.
+- `02-shared-observe-steer-v1.jsonl`: observer adopts a peer turn; its steer result shares the bracket identity.
+- `03-stop-then-prompt-v1.jsonl`: origin connection through shared work, observer close, then Stop immediately followed by a successor prompt. The successor ends normally.
+- `04-detach-v1.jsonl`: originator leaves while work is gated; its prompt response precedes detach success, repeated detach succeeds, and an initialize barrier carries no further session notifications. A second connection verifies shared completion.
+
+Wire tests also exercise observer detach, queued-input withdrawal, adopted-steer detach,
+parameter errors and observer-close brackets. All contract-gap tests are enabled.

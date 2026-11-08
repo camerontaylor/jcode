@@ -261,17 +261,6 @@ async fn shared_scenario(check_close: bool) -> Result<()> {
             .expect("peer start before text");
         let turn = observed[start]["params"]["turnId"].clone();
         assert!(turn.is_string());
-        // Control prompts cannot implicitly steer. A busy rejection remains
-        // a JSON-RPC error, never a successful role-none result.
-        let busy = a
-            .send_request(
-                "session/prompt",
-                json!({"sessionId":id,"prompt":[{"type":"text","text":"/model"}]}),
-            )
-            .await?;
-        let rejected = a.wait_for_response(busy).await?;
-        assert!(rejected.get("error").is_some());
-        assert!(rejected.get("result").is_none());
         let steer = b
             .send_request(
                 "session/prompt",
@@ -363,23 +352,49 @@ async fn shared_scenario(check_close: bool) -> Result<()> {
             .await?;
         a.send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":id}}))
             .await?;
-        assert_eq!(
-            a.wait_for_response(canceled).await?["result"]["stopReason"],
-            "cancelled"
-        );
-        a.send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":id}}))
-            .await?;
         let successor = a
             .send_request(
                 "session/prompt",
                 json!({"sessionId":id,"prompt":[{"type":"text","text":"successor"}]}),
             )
             .await?;
+        assert_eq!(
+            a.wait_for_response(canceled).await?["result"]["stopReason"],
+            "cancelled"
+        );
         a.wait_for_notification(|m| m["params"]["update"]["content"]["text"] == "answer-4")
             .await?;
         gate.add_permits(1);
         assert_eq!(
             a.wait_for_response(successor).await?["result"]["stopReason"],
+            "end_turn"
+        );
+        acp_fixture::check("03-stop-then-prompt-v1.jsonl", &a.tape)?;
+        // Keep the legacy human error outside the opaque-ID corpus: its
+        // message embeds a session id and intentionally remains literal.
+        let busy_turn = a
+            .send_request(
+                "session/prompt",
+                json!({"sessionId":id,"prompt":[{"type":"text","text":"busy control test"}]}),
+            )
+            .await?;
+        a.wait_for_notification(|m| m["params"]["update"]["content"]["text"] == "answer-5")
+            .await?;
+        // Control prompts cannot implicitly steer. A busy rejection remains
+        // a JSON-RPC error, never a successful role-none result.
+        let busy = a
+            .send_request(
+                "session/prompt",
+                json!({"sessionId":id,"prompt":[{"type":"text","text":"/model"}]}),
+            )
+            .await?;
+        let rejected = a.wait_for_response(busy).await?;
+        assert!(rejected.get("error").is_some());
+        assert!(rejected.get("result").is_none());
+
+        gate.add_permits(1);
+        assert_eq!(
+            a.wait_for_response(busy_turn).await?["result"]["stopReason"],
             "end_turn"
         );
         a.shutdown().await;

@@ -309,8 +309,8 @@ fn session_meta_reports_the_attachment_and_effective_shared_control() {
         })
     );
 
-    // `_jcode/detach` does not exist, so detach stays false even where every
-    // other behavior is available.
+    // Without negotiated daemon preservation, detach remains false even
+    // where the other shared-control behaviors are available.
     let legacy = SharedControlSupport {
         detach: false,
         observe: false,
