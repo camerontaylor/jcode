@@ -65,6 +65,8 @@ mod runtime_ssh_loops;
 mod runtime_ssh_sessions;
 mod runtime_upgrade;
 mod socket;
+mod socket_discovery;
+pub use socket_discovery::{daemon_socket_candidates, live_daemon_sockets};
 mod swarm;
 mod swarm_channels;
 mod swarm_labels;

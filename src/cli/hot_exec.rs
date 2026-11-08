@@ -496,29 +496,5 @@ fn reload_server_after_update(reason: &str) {
         return;
     };
 
-    let output = ProcessCommand::new(&exe)
-        .args(["--no-update", "server", "reload", "--force"])
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            crate::logging::info(&format!(
-                "update: requested server reload after {} via {:?}",
-                reason, exe
-            ));
-        }
-        Ok(output) => {
-            crate::logging::warn(&format!(
-                "update: server reload after {} failed with status {:?}: {}",
-                reason,
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        Err(error) => {
-            crate::logging::warn(&format!(
-                "update: failed to request server reload after {} via {:?}: {}",
-                reason, exe, error
-            ));
-        }
-    }
+    super::update_reload::reload_all(&exe, reason);
 }

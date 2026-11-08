@@ -2318,11 +2318,17 @@ async fn run_server_reload_command_to(
         // Reap a stale socket left by a crashed daemon so the next launch binds
         // cleanly instead of wedging in a connect-retry loop.
         let reaped = crate::server::reap_stale_socket_if_dead(&socket).await;
-        let detail = if reaped {
+        let mut detail = if reaped {
             "No running jcode server found; cleared a stale socket.".to_string()
         } else {
             "No running jcode server found; nothing to reload.".to_string()
         };
+        for other in crate::server::live_daemon_sockets().await {
+            detail.push_str(&format!(
+                "\nAnother jcode daemon is running at {}; use --socket to target it.",
+                other.display()
+            ));
+        }
         return emit(ServerReloadReport {
             socket: socket.display().to_string(),
             had_listener: false,

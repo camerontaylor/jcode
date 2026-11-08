@@ -36,7 +36,7 @@ pub fn default_socket_path() -> PathBuf {
 ///
 /// Falls back to the plain absolute path when the parent is absent too: two
 /// absent paths still compare consistently with each other.
-fn resolved_socket_identity(path: &std::path::Path) -> PathBuf {
+pub(super) fn resolved_socket_identity(path: &std::path::Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
