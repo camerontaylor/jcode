@@ -330,6 +330,7 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
             urgent: false,
             source: jcode_agent_runtime::SoftInterruptSource::User,
             client_id: None,
+            transport_owner: None,
         });
     old_background_signal.fire();
     old_cancel_signal.fire();

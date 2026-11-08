@@ -11,6 +11,8 @@ pub struct SoftInterruptMessage {
     /// Opaque caller-supplied id. Echoed in the injection event and used to
     /// cancel this one message while it is still queued.
     pub client_id: Option<String>,
+    /// Daemon transport that admitted this input; never taken from the wire.
+    pub transport_owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

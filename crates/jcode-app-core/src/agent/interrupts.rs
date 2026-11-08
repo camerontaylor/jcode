@@ -153,6 +153,7 @@ impl Agent {
                 urgent,
                 source,
                 client_id,
+                transport_owner: None,
             });
             logging::info(&format!(
                 "AGENT_SOFT_INTERRUPT_QUEUE_PUSH session={} source={:?} urgent={} content_bytes={} content_chars={} image_count={} pending_before={} pending_after={}",

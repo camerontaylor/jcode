@@ -1,4 +1,5 @@
 use super::*;
+use jcode_agent_runtime::SoftInterruptMessage;
 
 // Thread-local: hook tests must install and consume on a current-thread runtime.
 #[cfg(test)]
@@ -735,33 +736,27 @@ pub(super) async fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> 
 
 pub(super) fn queue_soft_interrupt(
     id: u64,
-    content: String,
-    images: Vec<(String, String)>,
-    urgent: bool,
-    client_id: Option<String>,
+    message: SoftInterruptMessage,
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) {
-    let source = SoftInterruptSource::User;
-    let content_bytes = content.len();
-    let content_chars = content.chars().count();
+) -> bool {
     crate::logging::info(&format!(
         "SERVER_SOFT_INTERRUPT_QUEUE_REQUEST id={} session={} source={:?} urgent={} content_bytes={} content_chars={} client_id={}",
         id,
         session_control.session_id,
-        source,
-        urgent,
-        content_bytes,
-        content_chars,
-        client_id.is_some()
+        message.source,
+        message.urgent,
+        message.content.len(),
+        message.content.chars().count(),
+        message.client_id.is_some()
     ));
-    let queued =
-        session_control.queue_soft_interrupt_with_id(content, images, urgent, source, client_id);
+    let queued = session_control.queue_transport_input(message);
     let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
     crate::logging::info(&format!(
         "SERVER_SOFT_INTERRUPT_QUEUE_RESULT id={} session={} queued={} ack_queued={}",
         id, session_control.session_id, queued, ack_queued
     ));
+    queued
 }
 
 pub(super) fn cancel_soft_interrupts_by_id(

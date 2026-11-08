@@ -207,6 +207,7 @@ mod tests {
             urgent: false,
             source: SoftInterruptSource::User,
             client_id: None,
+            transport_owner: None,
         });
         assert!(agent.hibernate_idle_caches().is_none());
         queue.lock().unwrap().clear();

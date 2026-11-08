@@ -265,10 +265,14 @@ async fn two_steering_producers_withdraw_on_either_side_of_insertion() {
     for (id, text) in [(61, "producer-a"), (62, "producer-b")] {
         queue_soft_interrupt(
             id,
-            text.into(),
-            vec![],
-            false,
-            Some(text.into()),
+            jcode_agent_runtime::SoftInterruptMessage {
+                content: text.into(),
+                images: vec![],
+                urgent: false,
+                source: SoftInterruptSource::User,
+                client_id: Some(text.into()),
+                transport_owner: None,
+            },
             &control,
             &reply,
         );

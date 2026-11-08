@@ -70,6 +70,7 @@ fn checkpoint_preserves_blank_session_ids_overrides_and_queued_input() {
             urgent: false,
             source: jcode_agent_runtime::SoftInterruptSource::User,
             client_id: Some("follow-up-7".into()),
+            transport_owner: None,
         });
     configured.checkpoint_idle_runtime_upgrade().unwrap();
     let restored = crate::session::Session::load(configured.session_id()).unwrap();
@@ -98,6 +99,7 @@ fn checkpoint_refuses_queue_write_failure_instead_of_losing_accepted_input() {
             urgent: false,
             source: jcode_agent_runtime::SoftInterruptSource::User,
             client_id: None,
+            transport_owner: None,
         });
     std::fs::write(
         home.1.path().join("pending-soft-interrupts"),
