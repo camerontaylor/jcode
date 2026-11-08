@@ -1,0 +1,468 @@
+# Jcode fork ACP interface contract
+
+Status: implementation target, 2026-11-08. This defines the interface after
+roadmap phases 1–5, before optional phase 6 features. It is a contract for the
+jcode fork and its consuming tool to implement independently, not a claim that
+the current binary implements the additions below. Baseline inspected:
+`f5e45624c`.
+
+Preserve existing v1 clients and ACP/TUI shared control. Add negotiated v2
+alongside v1, with explicit delivery and standard lifecycle semantics. Keep
+execution authority in the daemon and protocol presentation in the adapter.
+SDK adoption does not change this contract.
+
+Roadmap order: (1) repair existing shared control; (2) reduce the core carry;
+(3) improve v1 mappings/discovery; (4) separate version presentation and
+evaluate the SDK; (5) add v2 and explicit delivery; (6) optional new features.
+The SDK experiment may run alongside steps 1–3; production integration waits
+for compatibility evidence against the repaired baseline.
+
+## Sources and precedence
+
+Standard fields and operations use the official documents; this document
+defines jcode choices and extensions rather than copying the specifications.
+
+- [ACP v1](https://agentclientprotocol.com/protocol/v1/overview), including
+  [config options](https://agentclientprotocol.com/protocol/v1/session-config-options)
+  and [extensibility](https://agentclientprotocol.com/protocol/v1/extensibility).
+- [Pinned v2 migration guide](https://github.com/agentclientprotocol/agent-client-protocol/blob/7441d10/docs/protocol/v2/migration.mdx)
+  and [v2 schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/7441d10/schema/v2/schema.json),
+  draft `2.0.0-alpha.13`.
+- [Pinned v2 prompt lifecycle](https://github.com/agentclientprotocol/agent-client-protocol/blob/7441d10/docs/protocol/v2/draft/prompt-lifecycle.mdx)
+  and [session setup](https://github.com/agentclientprotocol/agent-client-protocol/blob/7441d10/docs/protocol/v2/draft/session-setup.mdx).
+- [Steering RFD #1261](https://github.com/agentclientprotocol/agent-client-protocol/pull/1261),
+  [pinned delivery revision](https://github.com/kennethsinder/agent-client-protocol/blob/ee193af58f211a1cbfde30029d5283f9c94c554c/docs/rfds/v2/prompt-delivery.mdx).
+  This remains a proposal, not stable ACP.
+- [Current shared-session behavior](ACP_SHARED_SESSIONS.md), especially
+  Deviations 34–49; [gap research](ACP_V2_GAP_HANDOVER.md);
+  [fork boundary strategy](FORK_BOUNDARY_STRATEGY.md).
+
+For the target implementation, this document supersedes recommendations in
+the reports where they differ. The reports remain useful evidence. Official
+definitions govern standard operations; the named RFD governs explicit v2
+delivery. A future spec revision does not silently change the pinned target:
+update this contract and both implementations together.
+
+## Delivery stages
+
+| Surface | Current baseline | Target before phase 6 |
+| --- | --- | --- |
+| ACP v1, shared attach, peer turns, implicit steering | Implemented, with known races | Preserved and repaired |
+| Model/effort, commands, skills, usage, raw diagnostic events | Implemented | Preserved |
+| Reasoning, plans, tool metadata | Incomplete mapping | Surface data the daemon already provides |
+| Capability metadata described below | Mostly absent | Added in every profile |
+| Detach without cancelling owned work | Not a distinct operation | `_jcode/detach` |
+| ACP v2 and explicit steer/queue | Not implemented | Negotiated, initially behind a flag |
+| v2 turn attribution metadata | Not implemented | Added as specified below |
+
+The new client should implement v2 plus a v1 fallback. Full target support
+does not require porting explicit queueing back to v1. Legacy fallback must
+not assume a feature just because the executable is named jcode.
+
+## Transport and feature discovery
+
+Use the existing `jcode acp` stdio transport and ACP framing. Stdout contains
+protocol traffic; diagnostics go elsewhere. One connection negotiates one
+ACP version. Session IDs identify daemon conversations shared with TUI and
+other ACP connections; attaching does not take ownership away from peers.
+
+Profiles `standard`, `extended` and `full` remain presentation choices.
+Essential shared control and feature discovery work in every profile.
+`extended` and `full` additionally expose raw diagnostic events.
+
+### Jcode capability metadata
+
+New target metadata lives at `agentCapabilities._meta.jcode` in the v1
+initialize result and `capabilities._meta.jcode` in v2. Example for v1:
+
+```json
+{
+  "interfaceVersion": 1,
+  "profile": "standard",
+  "extensions": ["shared_control", "peer_turns", "skill_selection"]
+}
+```
+
+`interfaceVersion` versions the jcode extensions defined here, not ACP or
+the daemon protocol. Unknown extension names and metadata keys are ignored.
+Additive keys do not require a version bump; incompatible semantics do.
+The extensions array retains the existing `raw_server_event` name where
+that profile enables it. In v2, replace `peer_turns` with `turn_metadata`.
+
+These markers describe adapter support. Effective daemon support is reported
+in each successful new/load/resume response at `result._meta.jcode`:
+
+```json
+{
+  "clientInstanceId": "opaque-attachment-id",
+  "sharedControl": {
+    "observe": true,
+    "stopObservedTurn": true,
+    "detach": true,
+    "implicitSteering": true
+  }
+}
+```
+
+All four fields are booleans. `implicitSteering` is v1-only and is false in
+v2. True means the whole behavior is usable on this attachment, including
+required daemon support. Missing/false means unavailable, not an invitation
+to probe by submitting work. `clientInstanceId` identifies this attachment
+for comparison with origin metadata; it is not a user identity or credential.
+It changes on a fresh attachment. A daemon restart invalidates the attachment;
+reconnect and rediscover rather than retaining its capability snapshot.
+
+For v2, advertise standard delivery capabilities only when the serving
+backend can honor them for sessions on the connection. Do not advertise
+optimistically based on adapter version. Use v1 or fail session setup clearly
+if backend drift makes the negotiated v2 contract impossible.
+
+Old binaries have no `interfaceVersion`. Existing consumers can retain their
+legacy behavior; new consumers must not send new extensions to those binaries.
+
+## Standard operations and jcode choices
+
+| Operation | v1 target | v2 target |
+| --- | --- | --- |
+| Initialize | Standard v1 fields, plus metadata above | Standard negotiation and v2 fields, plus metadata above |
+| New session | Standard; return config options and attachment metadata | Standard equivalent |
+| List | Standard list/pagination, plus optional liveness metadata | Standard equivalent |
+| Attach with replay | `session/load` | `session/resume` with `replayFrom: {"type":"start"}` |
+| Attach without replay | Advertised `session/resume` | `session/resume` without `replayFrom` |
+| Prompt | Response ends the prompt's work, with v1 stop reason | Standard insertion response; completion through state updates |
+| Cancel | Existing jcode Stop semantics below | Standard baseline cancellation; RFD exception for delivery prompts |
+| Close | Existing owner-aware close below | Standard v2 close, including its cancellation and final-update requirements |
+| Config | `session/set_config_option` | Standard v2 config route and typed selectors |
+| Detach view | `_jcode/detach` | `_jcode/detach` |
+
+For list entries, `_meta.jcode.live: boolean` remains advisory: omission means
+unknown, false means not live at the snapshot. It is not a running/idle flag.
+Working-directory filters use canonical paths. Treat pagination cursors as
+opaque and do not assume a fixed page size or a transactional listing.
+
+V1 replay preserves stored-message grouping but live and replay IDs are not
+guaranteed identical. On reload, rebuild the replayed transcript instead of
+merging it with a cached live transcript by guessed ID equivalence. In v2,
+use the standard replay/upsert rules; preserve an inserted message's ID into
+stored replay when that message is retained. Live-only/synthetic items need
+not appear in replay. Neither version promises durable exactly-once submission
+across a broken connection. Do not automatically resend an uncertain prompt.
+
+## Shared control semantics
+
+There is one execution authority and one authoritative insertion order per
+daemon session, including submissions from TUI and multiple ACP adapters.
+Observing or steering a peer turn does not transfer ownership of it.
+Cancellation checks and effects must be atomic relative to turn replacement.
+No stale stop may cancel a successor turn. A stop received while no turn is
+active must not arm cancellation for future work.
+
+| Action | v1 | v2 |
+| --- | --- | --- |
+| Stop | Withdraw this attachment's waiting steers, then stop its observed turn | Stop the active turn; explicit delivery prompts follow the RFD, ordinary held prompts follow baseline v2 |
+| Leave without stopping | `_jcode/detach` | `_jcode/detach` |
+| Close | Withdraw this attachment's waiting steers; cancel only its owned turn; adopted/peer turn continues | Standard close stops session work, including peer-origin work; use detach to leave it running |
+| Transport loss | Withdraw this connection's pending input; preserve already-inserted shared work as the target policy | Same |
+
+V2 close is intentionally different from the existing v1 close. The client
+must distinguish **leave view** from **stop and close session**. It must never
+implement ordinary window closure by blindly issuing v2 `session/close`.
+Standard close does not grant permission to delete stored history.
+
+### Detach extension
+
+Request, in either version:
+
+```json
+{"jsonrpc":"2.0","id":30,"method":"_jcode/detach","params":{"sessionId":"s1"}}
+```
+
+Success result is `{}`. Detach removes this connection's attachment only,
+withdraws its never-inserted input, and releases its subscriptions. It does
+not cancel already-inserted work, even work originally started here, and it
+does not remove stored history or other attachments.
+
+Before answering, settle this attachment's pending prompt requests. In v1,
+finish outstanding prompt waits with `stopReason: "cancelled"`; this means
+the local wait ended, not that shared execution stopped. Close any open
+local `_jcode/turn` bracket with `canceled`. In v2, never-inserted prompts
+receive `-32800`; already-inserted ones retain a successful insertion result.
+Do not invent a session-wide idle transition for a detach. No session updates
+are sent on this attachment after the detach response. Resume to attach again.
+
+Repeated detach of an already-detached session returns `{}`. Invalid parameter
+shapes return `-32602`; an unadvertised extension returns `-32601`. The client
+must require effective `sharedControl.detach` before calling it.
+
+## V1 steering and peer lifecycle
+
+Preserve implicit steering when `sharedControl.implicitSteering` is true.
+A normal prompt sent during active work is inserted at a safe point in that
+turn. A prompt sent while idle starts work. Several outstanding requests may
+share a turn, but each receives its own final response. Usage/output must
+not be counted again for every request sharing that turn.
+
+When steering joins a peer turn, the existing adoption behavior remains:
+the connection follows its remaining output and resolves the prompt at turn
+end. An already-open peer bracket still receives exactly one terminal;
+adoption does not produce another start. Own prompt/steer text is not echoed
+by default in v1. The client retains its submitted text; other attachments
+receive peer-user updates. This deliberately defers the report's suggested
+own-echo change to v2 rather than creating another v1 behavior mode.
+
+Without effective implicit steering, do not offer it. Busy requests may fail
+as in the legacy implementation. Do not introduce `delivery` or
+`_meta.jcode.delivery` on v1. Queueing UI may hold unsent text locally, but
+must label it as local, not as accepted shared-session work.
+
+### Peer turn notification
+
+Existing agent-to-client notification, unchanged:
+
+```json
+{"jsonrpc":"2.0","method":"_jcode/turn","params":{"sessionId":"s1","turnId":"opaque-turn-id","state":"started","origin":{"kind":"client","clientInstanceId":"opaque-peer-id"}}}
+```
+
+- `state`: `started`, `completed`, `failed`, or `canceled` (one `l`).
+- `origin` accompanies start. `kind` is currently `client`, `swarm`,
+  `background`, `relay`, or `debug`; display unknown future values generically.
+  `clientInstanceId` is optional. Do not infer TUI versus ACP from its spelling.
+- A failure can include `error: {"message":"..."}`.
+- IDs are opaque. A start precedes its peer output and one terminal follows
+  that output. Mid-turn attachment opens the observed active bracket.
+- This is a peer-view bracket, not a lifecycle event for every own prompt.
+  A local close/detach can end the bracket while the shared turn continues.
+- Peer content arrives through ordinary `session/update`; the bracket carries
+  attribution/lifecycle only. Continue reading notifications while no request
+  is outstanding. Do not count adoption as a second turn.
+
+## V2 lifecycle and explicit delivery
+
+Implement the pinned v2 baseline and the pinned delivery RFD by reference.
+Use their standard `delivery` field and capability location directly under
+an explicit experimental rollout; do not invent an interim `_meta` spelling.
+Both sides pin the same RFD revision. Missing SDK types are a tooling problem,
+not a reason to introduce a second public API.
+
+Support both advertised `steer` and `queue`. Apply the RFD's insertion,
+withdrawal, turn-end, ordering and cancellation rules. Started tools are not
+cancelled by a steer. The consumer should track outstanding requests separately
+from session activity; a prompt response is not a turn-completion signal.
+
+Jcode chooses to hold ordinary busy v2 prompts until foreground work ends,
+rather than implicitly steering. These remain ordinary held requests, with
+baseline cancellation semantics, not explicit-delivery queue entries. At a
+turn boundary, process waiting delivery work in RFD order, then ordinary held
+prompts in receipt order, each starting a turn. New submissions join their
+applicable pending class. No silent conversion of an ordinary request into
+a cancellation-surviving queue item is allowed. The intended client sends
+explicit delivery whenever the user specifies steer or queue.
+
+The daemon establishes the shared receipt order; independent adapter queues
+must not race to claim the next turn. A stop from a legacy v1/TUI client can
+stop the common turn but must not erase another attachment's pending steers
+or explicit-delivery queue entries. Ordinary held v2 prompts retain the
+baseline v2 cancellation rules.
+Transport loss and detach withdraw only that attachment's pending requests.
+
+### Turn attribution metadata
+
+V2 uses standard `state_update` as its only busy/idle authority. Do not emit
+v1 `_jcode/turn` notifications on v2 connections. With `turn_metadata`
+advertised, augment live `state_update` objects at `update._meta.jcode`:
+
+```json
+{
+  "turn": {
+    "turnId": "opaque-turn-id",
+    "origin": {"kind":"client","clientInstanceId":"opaque-peer-id"}
+  }
+}
+```
+
+Use the same origin shape as v1. Running/requires-action snapshots carry the
+active turn; terminal idle updates carry the turn just ended. An idle attach
+snapshot with no applicable turn has `turn: null`. Every state snapshot sets
+this field explicitly so clients do not retain attribution from an older turn.
+It is informational: a standard client can ignore it and still operate.
+
+Live user-message and agent-message updates also carry
+`update._meta.jcode.turnId` where known. User messages additionally carry
+`update._meta.jcode.origin` for their submitter, which can differ from the
+turn's origin after steering. The standard `messageId` correlates an own
+insertion response and echo; no additional request-correlation extension is
+needed. Historical items may omit origin and turn association when not stored.
+
+## Configuration, commands and skills
+
+Use config options as the primary structured model/effort interface:
+
+- Option identifiers remain `model` and `reasoning_effort`. Use the negotiated
+  ACP version's option schema; v1 option `id` is not a v2 `configId`.
+- Render advertised choices, including future provider models. Do not embed
+  a release-specific model or effort allowlist in the consumer.
+- Options describe session state shared with TUI. Show the acknowledged
+  effective value and follow updates from any client. A model change can
+  replace the effort choices or remove the effort option entirely.
+- Preserve current nearest-supported effort normalization and `auto`/`default`
+  reset behavior. Do not assume the requested value was the applied value.
+- Submit config changes while idle; handle a busy response without claiming
+  success. Configuration changes must not partially apply on error.
+
+Keep existing v1 `session/set_model` and `session/set_reasoning_effort` aliases
+for compatibility, but the new consumer uses config options. Do not add these
+unprefixed custom methods to v2, or create redundant namespaced aliases.
+
+Legacy alias parameters are `{sessionId, modelId}` (also accepts `model`)
+and `{sessionId, effort}` (also accepts `reasoningEffort`), respectively.
+Values are strings; aliases delegate to config options and return the same
+result, including the effective config option set. They are compatibility
+entry points, not independently advertised capabilities.
+
+Discover commands from `available_commands_update`. Preserve `/model`,
+`/models`, `/effort`, `/compact`, and `/subagent`; display advertised syntax.
+`/compact` schedules compaction for the next prompt. `/subagent` reports the
+launch through tool activity; completion of that launch is not completion
+of the worker. No structured child-session API is promised in this phase.
+
+Commands are submitted as text prompts. The consumer waits for idle before
+submitting mutation/subagent commands. V1 may reject a busy command; v2 holds
+an otherwise valid ordinary command prompt until it can execute. Delivery
+on a control command is rejected with `-32602` before side effects; delivery
+applies to conversational input, not command scheduling.
+
+In v2, successful command/skill submissions still use the standard insertion
+response and user-message echo. Report resulting notices through session
+updates; do not return a v1 stop-reason result. A selection-only command need
+not manufacture a daemon model turn.
+
+Canonical explicit skill selection is prompt metadata:
+
+```json
+{"_meta":{"jcode":{"skill":"skill-name"}}}
+```
+
+`skill_selection` advertises this field. It takes precedence over textual
+`/skill-name` or `$skill-name` recognition. Existing metadata aliases remain
+v1 compatibility only. Unknown/path-like slash text remains conversational
+text; a leading space escapes command/skill interpretation. The adapter
+remembers the selected skill on its session attachment for subsequent prompts;
+this is not a shared, synchronized config option. Its use affects shared work.
+There is no new skill-clear API in this contract. A bare skill invocation
+selects it without requiring a model turn. A busy steer must not claim to
+change a sticky skill: if explicit selection cannot be honored, reject before
+insertion instead of silently
+dropping it. Queue or wait for idle to change the skill.
+
+## Content and diagnostics
+
+Retain text, image and embedded-context prompt support; no audio support is
+promised. Use standard content shapes, not parser aliases. Render assistant
+text, exposed reasoning, plans/todos, tool progress/results, available usage,
+session information, commands and config updates. Tool names, locations and
+diffs are populated when authoritative data exists; absence is legitimate.
+No hidden reasoning or fabricated tool metadata is implied.
+
+V2 uses its standard replacement/upsert semantics. V1 cannot faithfully
+represent every replacement; do not append a replacement as if it were new
+text. Where v1 lacks a suitable standard shape, retain a best-effort display
+and treat reload as authoritative; do not invent another message-edit protocol.
+
+The extended/full diagnostic notification remains:
+
+```json
+{"jsonrpc":"2.0","method":"_jcode/server_event","params":{"sessionId":"s1","event":{"type":"daemon-event-type"}}}
+```
+
+`event` is the daemon's serialized event, with no ACP stability guarantee.
+It can duplicate information in standard updates. Render it in diagnostics
+only; do not base shared control, billing/usage totals or core UI state on it.
+Unknown event types are ignored. Supporting every stable ACP capability does
+not require exposing every daemon-internal event as a product feature.
+
+## Unsupported features and error behavior
+
+Before phase 6, do not advertise new auth flows, client filesystem/terminal
+execution, elicitation, per-tool cancellation, session deletion/fork/archive,
+or provider-management APIs. Existing `/subagent` is retained without adding
+the experimental structured subagent protocol. Reasoning, plans and metadata
+mapping do not imply a new permission system.
+
+Provider authentication and tool approvals remain daemon-side. The client
+must not present a nonfunctional Approve button or infer consent from a prompt.
+If work requires an unavailable approval interaction, report the condition
+clearly; implementing a new ACP approval flow is separate scope.
+
+Client-supplied session MCP servers remain unsupported. Empty `mcpServers`
+works; nonempty unsupported input is rejected before session creation/attach,
+with `-32602`, rather than silently ignored. Daemon-configured MCP tools remain
+usable. Treat this as a deliberate correction to the current v1 leniency.
+
+V2 follows standard error codes and insertion-boundary semantics. In v1,
+preserve existing error behavior except explicitly documented corrections;
+the new client must tolerate legacy unknown-session `-32602` rather than
+depending on v2's `-32002` in v1. Never silently accept an unsupported behavior
+field. Malformed extension parameters receive `-32602`; unknown methods
+receive `-32601`. No parsing of human-readable error strings is required.
+
+## Independent acceptance scenarios
+
+Both implementations should exercise the same observable scenarios:
+
+1. Create, list, replay and attach to a TUI session mid-turn; preserve ordering
+   between replay and live events and show the current activity correctly.
+2. Start from either TUI or ACP; observe the same work from two ACP connections.
+   Steering/adoption must not duplicate output, usage or turn completion.
+3. Stop followed immediately by another prompt; a delayed stop cannot hit the
+   successor. Producer failure/abort always yields a correctly classified end.
+4. Detach the originator and an observer independently; inserted work continues,
+   only the departing attachment's pending input is withdrawn.
+5. Verify v1 close remains owner-aware and v2 close follows standard semantics.
+6. V2 steer, queue and ordinary held prompts: test their distinct cancellation
+   behavior, concurrent producers, insertion/withdrawal races and disconnect.
+7. Model/effort changes from either interface propagate; skills, commands,
+   compaction and subagent launch retain their existing capabilities.
+8. Negotiate v1/v2, absent capabilities, legacy daemons and unknown metadata;
+   unsupported actions are not silently executed under another meaning.
+
+Use existing ACP JSON-shape/router tests and
+`tests/e2e/acp_shared_session.rs` as the jcode foundation. Add consumer-side
+fixtures for this contract; do not require both implementations to land at
+once. Runtime checks use a dedicated daemon socket and the intended binary.
+Existing exact-head CI remains authoritative; this document adds no new
+approval process.
+
+## SDK trial and build impact
+
+The bounded SDK trial can start immediately, independently of phases 1–3.
+Use an isolated experimental checkout because the dependency graph and adapter
+will differ from active repair work. The trial produces evidence and a small
+representative prototype, not a second production adapter. Rebase/recheck
+against the repaired v1 baseline before integrating it. Do not combine SDK
+integration, lifecycle refactoring and v2 behavior changes in one change.
+
+Compare the current implementation against SDK v1 and SDK v1+v2 variants,
+pinning SDK/schema versions and recording compiler, target, profile, feature
+set, job count and host. Measure:
+
+| Dimension | Required comparison |
+| --- | --- |
+| Dependency cost | Added crates, feature unification, lockfile changes, supported targets/MSRV |
+| Cold build | Clean build with a populated dependency download cache; elapsed time and peak memory |
+| Daily edit loop | Warm no-op, ACP-only edit, and representative non-ACP edit; elapsed rebuild/link time |
+| Packaging | Production binary and archive sizes under identical strip/LTO settings; build disk usage |
+| Coupling | `serde_json/preserve_order` effects on iteration, serialized provider requests and cache-sensitive bytes |
+| Runtime compatibility | Concurrent requests, extension dispatch, parser compatibility, startup and session behavior |
+
+Use separate target directories, consistent cache conditions and repeated
+measurements; report absolute values and deltas, not a single noisy timing.
+Run heavy builds on saturn, pluto, ceres or CI, following host memory guidance.
+Inspect `cargo tree -e features` and Cargo timings to explain regressions.
+An optional feature within the same binary does not isolate unified Cargo
+features once enabled.
+
+The original adapter commit `f0266100a` records no reason for avoiding the
+SDK. Build cost is a hypothesis to test, not established upstream intent.
+Prefer adoption if protocol-maintenance savings justify measured build and
+compatibility costs. If not, retain the hand-written transport and proceed
+with this interface. Neither a new sidecar nor a full rewrite is required.

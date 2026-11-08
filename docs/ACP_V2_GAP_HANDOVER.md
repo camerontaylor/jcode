@@ -2,6 +2,11 @@
 
 Prepared 2026-11-08. Research only; no code was changed.
 
+Implementation direction: [Fork ACP interface contract](ACP_FORK_INTERFACE.md)
+defines the phase 1–5 target for the fork and its consuming client, including
+decisions that supersede recommendations below. This report remains the
+pinned gap analysis and SDK research.
+
 This compares the ACP interface jcode publishes (what a client sees on the
 wire, not daemon internals) against the ACP v2 draft and the steering
 proposal, then evaluates replacing the hand-rolled adapter with the official
