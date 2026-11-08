@@ -183,3 +183,16 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   PATH); no `CQ_QUEUE_SSH_ALIAS`. No credentials or server policy touched.
   Waiting on `1f8a9aff` to grant/configure; independent acceptance + fork
   CI remain the gate regardless.
+- 2026-11-08: Queued review SUBMITTED (owner instruction confirmed by
+  `1f8a9aff`: "Have the jcode agent on atlas use the tool"). Request
+  `jcode-acp-p3-corr-detach-104604e23`, item `lr-c6d9121449db-g1`,
+  reviewedHead `104604e23972bfb0aad9c2c301c81066fa182266`, target `custom`,
+  reachable=true, no notify. Run from triton: client
+  `node ~/.cache/cq-client-e61fc8c9/dist/cli.js` (isolated e61fc8c97 build),
+  cwd `~/.cache/jcode-review-104604e23`, env
+  `PATH=/home/ctaylor/.local/state/cq-jcode-review-20261108/bin:$PATH
+  CQ_QUEUE_SSH_ALIAS=cq-queue-ceres`, unset `PASEO_AGENT_ID`
+  `CQ_REVIEW_NOTIFY_HOST`. Created local branch `custom` tracking
+  `origin/custom` in triton's `~/repos/jcode` (client resolves target as a
+  local ref). Polling status every 60 s from atlas (background task).
+  Findings: route actionable ones to a lane fix, then report to `1f8a9aff`.
