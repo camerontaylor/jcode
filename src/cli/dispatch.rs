@@ -372,6 +372,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             let mut agent = agent::Agent::new(provider, registry);
             agent.repl().await?;
         }
+        Some(Command::UpdatePostInstall { reason, .. }) => {
+            super::update_reload::reload_all(&std::env::current_exe()?, &reason);
+        }
         Some(Command::Update { channel }) => {
             hot_exec::run_update(channel.as_deref())?;
         }

@@ -292,6 +292,14 @@ pub(crate) enum Command {
     /// Run in simple REPL mode (no TUI)
     Repl,
 
+    #[command(hide = true)]
+    UpdatePostInstall {
+        #[arg(long)]
+        reason: String,
+        #[arg(long, hide = true)]
+        probe: bool,
+    },
+
     /// Update jcode to the latest version
     Update {
         /// Persist an update channel (stable permits returning from preview).

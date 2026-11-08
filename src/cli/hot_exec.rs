@@ -496,5 +496,7 @@ fn reload_server_after_update(reason: &str) {
         return;
     };
 
-    super::update_reload::reload_all(&exe, reason);
+    if super::update_post_install::needs_fallback(&exe, reason) {
+        super::update_reload::reload_all(&exe, reason);
+    }
 }

@@ -285,6 +285,17 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-app-core --lib model_prefetch
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-app-core --lib periodic_model_refresh
 
+      - name: Run post-install reload regressions
+        shell: bash
+        # CLI modules belong to the root library, not the binary harness.
+        run: |
+          set -euo pipefail
+          cargo_bin="$(rustup which cargo)"
+          target=x86_64-unknown-linux-gnu
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode --lib update_post_install -- --nocapture
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode --lib update_reload -- --nocapture
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode --test update_post_install -- --nocapture
+
       - name: Run embedding numeric-stability cohort (Linux only)
         shell: bash
         # `minilm_embedding_is_numerically_stable_across_inference_engines` pins

@@ -19,6 +19,13 @@ pub async fn run() -> Result<()> {
     // Parse once, before startup side effects. Invalid arguments and --help
     // must not harden credential files or create configuration/telemetry state.
     let args = Args::parse();
+    if let Some(Command::UpdatePostInstall { reason, probe }) = &args.command {
+        if *probe {
+            std::process::exit(super::update_post_install::SUPPORTED);
+        }
+        super::update_reload::reload_all(&std::env::current_exe()?, reason);
+        return Ok(());
+    }
     // Data belongs to the executable, not to the application/TUI dependency
     // chain. Every entrypoint using this startup path gets version-matched docs.
     crate::register_bundled_docs();
