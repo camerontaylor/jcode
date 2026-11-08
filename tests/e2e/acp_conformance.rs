@@ -223,7 +223,7 @@ async fn acp_conformance_maps_reasoning_tool_calls_and_plan() -> Result<()> {
         let position = |predicate: &dyn Fn(&Value) -> bool| -> usize {
             updates
                 .iter()
-                .position(|update| predicate(update))
+                .position(predicate)
                 .unwrap_or_else(|| panic!("missing update in {updates:#?}"))
         };
         let is_tool = |id: &'static str, kind: &'static str, status: &'static str| {

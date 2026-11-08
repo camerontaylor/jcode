@@ -51,10 +51,10 @@ fn normalized(tape: &[Value]) -> Vec<Value> {
         .map(|v| {
             let mut msg = v["msg"].clone();
             // Only the initialize result's agent version is release-volatile.
-            if let Some(version) = msg.pointer_mut("/result/agentInfo/version") {
-                if version.is_string() {
-                    *version = json!("<agent-version>");
-                }
+            if let Some(version) = msg.pointer_mut("/result/agentInfo/version")
+                && version.is_string()
+            {
+                *version = json!("<agent-version>");
             }
             visit(&mut msg, "", &mut ids, cwd);
             msg
