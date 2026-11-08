@@ -64,7 +64,7 @@ observe it, plus a wire-level test:
 | P3-mcp | 3 | ignored `mcpServers` notice (same branch/agent as P3-skill) | DeepSeek `8e023355` | accepted, awaiting integration | `5ca728de0`: notice only when client advertised `session.notices`; contract bullet amended on the branch |
 | P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | accepted; merged into stage `b1d801910`, compile verification assigned to `436bb2af` | `d94ec61af`: reasoning -> `agent_thought_chunk`; todo -> session `plan` via `GetTodos` snapshot; tool `name`, `locations` (read/edit/write), `diff` on edit/write; apply_patch paths/diffs and plan-on-load skipped (no structured data) |
 | P3-corpus | 3 | record scenarios 1–5, 7, 8 (v1) into corpus; CI replay | Sol | partial: 01 create/list/load, 02 shared observe/steer, 03 stop-then-prompt, 04 detach recorded; remaining: 05 close owner-aware, 07 config/commands, 08 negotiation/legacy | |
-| P0-split | 0/4 | split `src/cli/acp.rs` into transport/session/presentation | Sol | not started (after P3 adapter churn settles) | |
+| P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | running; blocks integration into custom | |
 
 Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 
@@ -296,3 +296,10 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   item `lr-b26eef738617-g1`, reviewedHead `38fa8f3ee6f4…`, target custom
   (full stage diff vs custom), cwd triton `~/.cache/jcode-review-38fa8f3ee`.
   Polling in background.
+- 2026-11-08: Budget check: the stage exceeds fork ceilings (`acp.rs` 4182 vs
+  3444, `tests.rs` 2275 vs 1380, `daemon_router_tests.rs` 1815 vs 1644).
+  Strategy forbids ratcheting these upward, so P0-split moves onto the
+  critical path before integration. Dispatched to Sol: pure moves, per-commit
+  move verification, identical test names, full equivalence gate, budgets
+  checked against `origin/fork/ci-baseline` JSON. Review #2 findings (if any)
+  will be applied on top of the split.
