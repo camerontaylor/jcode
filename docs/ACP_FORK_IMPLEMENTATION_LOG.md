@@ -313,3 +313,6 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   upstream file R2 restored). Allowlist decision handed to `1f8a9aff`
   (server policy owner); resubmit with `--supersedes` when resolved.
   Integration proceeds on independent acceptance + fork CI.
+- 2026-11-08: `1f8a9aff` acknowledged the false positive and is investigating
+  narrow scanner exceptions. Instruction: leave the source comment
+  unchanged, do NOT resubmit review #2 until it reports a fix.
