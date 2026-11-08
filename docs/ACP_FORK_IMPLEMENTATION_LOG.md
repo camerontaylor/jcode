@@ -440,3 +440,16 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 - **Lesson:** my local pre-push gates (fmt, module, size budgets) did not include clippy or the panic/swallowed ratchets. From now on, run those on stage merges too, or rely on topic-branch CI before staging.
 - **New plan:** `custom` fast-forwards straight to the first green stage head, `fork/acp-stage-next` + CI-guard. `76045f863` is superseded.
 
+### 2026-11-08 — cleanup of finished lanes
+
+- **Archived 12 lane workspaces** (agents archived, worktree directories removed). Each was first verified clean, with no commits missing from origin.
+  - triton: acp-conformance, acp-r1-lifecycle, acp-p3-corr-detach, acp-corpus-v1, acp-module-split, acp-p3-skill-mcp, acp-r2-catalog, acp-review2-fixes
+  - atlas: acp-p0-ci, acp-p1-meta, acp-p1-race, acp-p3-map
+- **Remote branches kept.** The stage and `pr/*` refer to them.
+- **One uncommitted rustfmt-only wrap** in `acp-p3-skill-mcp`'s pre-split `tests.rs` was saved to triton `~/.cache/acp-p3-skill-mcp-uncommitted-fmt.patch`. It is superseded: the stage passes fmt-check.
+- **Review scratch worktrees removed** on triton (`~/.cache/jcode-review-104604e23`, `~/.cache/jcode-review-38fa8f3ee`). Their `.cq` queue evidence, including the review #2 `report.md`, was copied (verified with `diff -rq`) to triton `~/.local/state/acp-review-evidence/<name>.cq/`.
+- **Kept:**
+  - this orchestrator worktree
+  - atlas `~/.cache/acp-stage` (on `fork/acp-stage-next`)
+  - triton `acp-ci-guardrails` (Sol `ae3f6bd4`, running)
+
