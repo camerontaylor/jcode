@@ -63,7 +63,7 @@ observe it, plus a wire-level test:
 | P3-skill | 3 | `skill: null` clear + `skill_selection` ext; branch `fork/acp-skill-clear-mcp-notice` off `fork/acp-capability-metadata` | DeepSeek `8e023355` (triton, `acp-p3-skill-mcp`) | accepted, awaiting integration | `5ca728de0`; 57 `cli::acp::tests` + 3 e2e wire tests pass |
 | P3-mcp | 3 | ignored `mcpServers` notice (same branch/agent as P3-skill) | DeepSeek `8e023355` | accepted, awaiting integration | `5ca728de0`: notice only when client advertised `session.notices`; contract bullet amended on the branch |
 | P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | accepted; merged into stage `b1d801910`, compile verification assigned to `436bb2af` | `d94ec61af`: reasoning -> `agent_thought_chunk`; todo -> session `plan` via `GetTodos` snapshot; tool `name`, `locations` (read/edit/write), `diff` on edit/write; apply_patch paths/diffs and plan-on-load skipped (no structured data) |
-| P3-corpus | 3 | record scenarios 05 close owner-aware, 07 config/commands, 08 negotiation/legacy; branch `fork/acp-corpus-v1` off stage `76045f863` | Sol `e66fe5f0` (triton, `acp-corpus-v1`) | running (01–04 recorded) | |
+| P3-corpus | 3 | record scenarios 05 close owner-aware, 07 config/commands, 08 negotiation/legacy; branch `fork/acp-corpus-v1` off stage `76045f863` | Sol `e66fe5f0` (triton, `acp-corpus-v1`) | accepted (05/07/08 recorded; `25604eeaa`, `5dcce24f8`, `adfe0f4c7`); gap fix in progress on same branch | conformance 20 pass + 1 ignored gap; shared 4; ACP unit 71; 5x replays each |
 | P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | done; in stage | `57bc78ce9`: budgets green, no ceiling raised; `ServerEvent::scoped` constructor; acp.rs 4182 -> 940; new modules transport/session/presentation/requests/prompt all < 1200; test names 71/45 unchanged; 123 ACP unit + 17 conformance + 4 shared pass |
 | R2-fix | 3 | queued review #2 fixes (F1 F2 F3 F6 F7); branch `fork/acp-review2-fixes` off stage `76045f863` | Sol `aa00969c` (triton, `acp-review2-fixes`) | running | |
 
@@ -375,4 +375,21 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
     - F5: re-adding `turn_ended` would bring back the R1/D3 competing lifecycle. Old fork clients already fall back to scoped Done/Error, so only the cancelled label degrades.
     - F8: the env lock (`jcode_home_test_lock`) is already shared, and the dedup would edit upstream `translate_tests.rs`.
 - Accepted findings were routed to Sol `aa00969c` as `R2-fix`. Reported to `1f8a9aff`.
+
+### 2026-11-08 — P3-corpus accepted; config peer-update gap
+
+- Sol `e66fe5f0` recorded the three scenarios on `fork/acp-corpus-v1`:
+  - 05: owner-aware close
+  - 07: config, commands and legacy aliases
+  - 08: negotiation and legacy degradation
+- Fixtures 01–04 and production code are unchanged. I spot-checked the 05 assertions: owner cancel with the turnId correlated, exactly one observer `canceled` terminal, and peer completion.
+- **Gap:** a model change by one client sends no `config_option_update` to the other attached peers. The contract says "follow updates from any client". The ignored test `acp_conformance_config_peer_update_contract` reproduced it 5/5 times.
+- **Decision:** fix it rather than amend the contract. The fix went to `e66fe5f0` on the same branch:
+  - map the daemon's model/effort broadcast to a peer `config_option_update`
+  - adapter-only fix preferred
+  - un-ignore the test
+- **Integration order:**
+  1. Fast-forward `custom` to `76045f863` once run 42461964356 is green.
+  2. Merge corpus and review2-fixes into the stage.
+  3. Wait for one CI run on that stage head, then fast-forward `custom` again.
 
