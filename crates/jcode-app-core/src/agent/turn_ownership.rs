@@ -167,8 +167,7 @@ impl TurnLease {
         }
     }
 
-    pub(super) fn with_cancel_signal(mut self, signal: InterruptSignal) -> Self {
-        let epoch = signal.epoch();
+    pub(super) fn with_cancel_signal(mut self, signal: InterruptSignal, epoch: u64) -> Self {
         self.cancel = Some((signal, epoch));
         self
     }
@@ -227,6 +226,11 @@ impl TurnOwnership {
     }
 
     pub(super) fn claim(&self) -> anyhow::Result<TurnLease> {
+        self.claim_after(|| {})
+    }
+
+    /// Run preparation under the identity lock, before exposing the new turn.
+    pub(super) fn claim_after(&self, prepare: impl FnOnce()) -> anyhow::Result<TurnLease> {
         let guard = Arc::clone(&self.gate)
             .try_lock_owned()
             .map_err(|_| anyhow::anyhow!("Already processing a message"))?;
@@ -243,6 +247,7 @@ impl TurnOwnership {
             runtime_generation: self.observer.runtime_generation().to_owned(),
             turn_id: state.latest,
         };
+        prepare();
         state.active = Some(identity.clone());
         Ok(TurnLease {
             reservation: Arc::new(Reservation {

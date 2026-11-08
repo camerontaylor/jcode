@@ -198,15 +198,10 @@ impl Agent {
         self.graceful_shutdown.fire();
     }
 
-    /// Clear a cancel that was armed before the caller claimed a new turn.
-    ///
-    /// Turn leases are exclusive, so a cancel already set when a new turn is
-    /// claimed was aimed at an earlier turn (or at none): a stop of a turn this
-    /// connection does not own only clears the flag on a 500 ms timer, and a
-    /// turn that started inside that window used to die at the loop head with
-    /// no reply. A cancel aimed at the new turn can only fire after its claim,
-    /// so it is never erased; the epoch guard keeps a fire that races this
-    /// reset.
+    /// Clear earlier cancellation while claiming a turn, before exposing its
+    /// identity. The caller holds the turn-state lock: scoped stops cannot
+    /// target this turn yet. The epoch guard preserves an unscoped fire which
+    /// races the reset. Never call this after exposing the new identity.
     pub(crate) fn discard_cancel_armed_before_turn(&self) -> bool {
         let epoch = self.graceful_shutdown.epoch();
         self.graceful_shutdown.is_set() && self.graceful_shutdown.reset_if_epoch(epoch)

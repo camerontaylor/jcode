@@ -386,10 +386,12 @@ impl Agent {
     }
 
     pub(crate) fn claim_server_turn(&self) -> Result<TurnLease> {
-        Ok(self
-            .turn_ownership
-            .claim()?
-            .with_cancel_signal(self.graceful_shutdown.clone()))
+        let mut cancel_epoch = 0;
+        let lease = self.turn_ownership.claim_after(|| {
+            self.discard_cancel_armed_before_turn();
+            cancel_epoch = self.graceful_shutdown.epoch();
+        })?;
+        Ok(lease.with_cancel_signal(self.graceful_shutdown.clone(), cancel_epoch))
     }
 
     pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {
