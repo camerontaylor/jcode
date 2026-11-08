@@ -477,6 +477,13 @@ impl DaemonSession {
         &self.instance_id
     }
 
+    /// Effective `sharedControl` support of this attachment, from the daemon
+    /// capabilities probed before subscribing.
+    async fn shared_control_support(&self) -> SharedControlSupport {
+        let router = self.router.lock().await;
+        SharedControlSupport::from_router(&router)
+    }
+
     /// Effective skills for this session: global skills plus the workspace's
     /// project-local overlay, loaded fresh so newly installed skills resolve.
     fn skills(&self) -> crate::skill::SkillRegistry {
@@ -799,12 +806,17 @@ impl AcpRuntime {
             Ok(session) => {
                 let session_id = session.session_id().await;
                 let state = session.ui_state.lock().await.clone();
+                let mut result = json!({ "sessionId": session_id });
+                insert_session_configuration(&mut result, &state);
+                insert_jcode_session_meta(
+                    &mut result,
+                    session.instance_id(),
+                    session.shared_control_support().await,
+                );
                 self.sessions
                     .lock()
                     .await
                     .insert(session_id.clone(), session);
-                let mut result = json!({ "sessionId": session_id });
-                insert_session_configuration(&mut result, &state);
                 self.write_result(id, result).await?;
                 self.write_available_commands(&session_id).await?;
             }
@@ -857,9 +869,14 @@ impl AcpRuntime {
             Ok(session) => {
                 let state = session.ui_state.lock().await.clone();
                 let attached_id = session.session_id().await;
-                self.sessions.lock().await.insert(attached_id, session);
                 let mut result = json!({});
                 insert_session_configuration(&mut result, &state);
+                insert_jcode_session_meta(
+                    &mut result,
+                    session.instance_id(),
+                    session.shared_control_support().await,
+                );
+                self.sessions.lock().await.insert(attached_id, session);
                 self.write_result(id, result).await?;
                 self.write_available_commands(&session_id).await?;
             }
@@ -2814,6 +2831,89 @@ fn compatibility_option_value(
         })
 }
 
+/// `agentCapabilities._meta.jcode`: the adapter-side capability metadata.
+///
+/// `interfaceVersion` versions the jcode extensions, not ACP or the daemon
+/// protocol. Only extensions this build actually honors are listed:
+/// `turn_correlation` and `skill_selection` arrive in a later phase, so they
+/// must not appear yet. `sessionMcpServers` is false because client-supplied
+/// session MCP servers are accepted but not connected.
+fn jcode_capability_meta(profile: AcpProfile) -> Value {
+    let mut extensions = vec!["shared_control", "peer_turns"];
+    if profile.is_extended() {
+        extensions.push("raw_server_event");
+    }
+    json!({
+        "interfaceVersion": 1,
+        "profile": profile.as_str(),
+        "extensions": extensions,
+        "sessionMcpServers": false,
+    })
+}
+
+/// Effective daemon support behind `sharedControl` on one attachment.
+///
+/// Derived from the daemon capabilities learned before subscribing, never from
+/// this adapter's version. A legacy daemon is read flat, so peer turns are
+/// neither observable nor stoppable there; prompts join a running turn only as
+/// a client-id-carrying soft interrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SharedControlSupport {
+    observe: bool,
+    stop_observed_turn: bool,
+    implicit_steering: bool,
+}
+
+impl SharedControlSupport {
+    /// `observe` and `stopObservedTurn` both need `turn_origin`: peer turns are
+    /// only visible as attributed turns, and stopping one sends the
+    /// turn-scoped `Cancel` that same capability enables. `implicitSteering`
+    /// needs `turn_origin` *and* `soft_interrupt_ids`
+    /// ([`RouterState::steering`]), because a prompt only joins a running turn
+    /// as a soft interrupt carrying this connection's client id.
+    fn from_router(router: &RouterState) -> Self {
+        let turn_origin = router.supports_turn_origin();
+        Self {
+            observe: turn_origin,
+            stop_observed_turn: turn_origin,
+            implicit_steering: router.steering(),
+        }
+    }
+}
+
+/// `_meta.jcode` of a successful new/load/resume result.
+///
+/// `detach` stays false: `_jcode/detach` does not exist in this build, so the
+/// whole behavior is not usable and must not be advertised.
+fn jcode_session_meta(instance_id: &str, support: SharedControlSupport) -> Value {
+    json!({
+        "clientInstanceId": instance_id,
+        "sharedControl": {
+            "observe": support.observe,
+            "stopObservedTurn": support.stop_observed_turn,
+            "detach": false,
+            "implicitSteering": support.implicit_steering,
+        },
+    })
+}
+
+/// Merge `_meta.jcode` into a result, keeping every other `_meta` key.
+fn insert_jcode_session_meta(result: &mut Value, instance_id: &str, support: SharedControlSupport) {
+    let Some(object) = result.as_object_mut() else {
+        return;
+    };
+    let meta = object.entry("_meta").or_insert_with(|| json!({}));
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    if let Some(meta) = meta.as_object_mut() {
+        meta.insert(
+            "jcode".to_string(),
+            jcode_session_meta(instance_id, support),
+        );
+    }
+}
+
 fn initialize_result(params: &Value, profile: AcpProfile) -> Value {
     // We only speak exactly ACP_PROTOCOL_VERSION; the response pins to our
     // version regardless of the `protocolVersion` the client requested.
@@ -2837,17 +2937,13 @@ fn initialize_result(params: &Value, profile: AcpProfile) -> Value {
         }
     });
 
-    if profile.is_extended()
-        && let Some(object) = agent_capabilities.as_object_mut()
-    {
+    // Every profile advertises the jcode capability metadata: a consumer gates
+    // every jcode behavior on it, so an older or narrower profile that omitted
+    // it would be indistinguishable from a build that predates it.
+    if let Some(object) = agent_capabilities.as_object_mut() {
         object.insert(
             "_meta".to_string(),
-            json!({
-                "jcode": {
-                    "profile": profile.as_str(),
-                    "extensions": ["raw_server_event"]
-                }
-            }),
+            json!({ "jcode": jcode_capability_meta(profile) }),
         );
     }
 
