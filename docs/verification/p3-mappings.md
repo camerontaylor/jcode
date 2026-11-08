@@ -167,11 +167,7 @@ precedes the tool frames, each `tool_call` precedes its `tool_call_update`, the
 session update with the structured entries (see "Timing and load").
 
 Existing usage, config, available-command, `_jcode/turn` and raw-server-event
-behavior is unchanged. Two recorded conformance fixtures already drift on this
-branch for a reason unrelated to these mappings: the initialize result now
-carries `agentCapabilities._meta.jcode` (the Phase 1 capability-metadata lane)
-and session results carry `_meta.jcode`, which
+behavior is unchanged. The recorded conformance fixtures
 `tests/fixtures/acp/01-create-list-load-v1.jsonl` and
-`tests/fixtures/acp/02-shared-observe-steer-v1.jsonl` predate. Re-recording them
-here would mix an unrelated wire change into this one, so they are left alone;
-a recording run confirms these mappings add no other drift line.
+`tests/fixtures/acp/02-shared-observe-steer-v1.jsonl` already include capability
+and attachment `_meta.jcode` metadata. These mappings add no fixture drift.
