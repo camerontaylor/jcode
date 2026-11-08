@@ -250,28 +250,32 @@ async fn acp_conformance_maps_reasoning_tool_calls_and_plan() -> Result<()> {
         assert_eq!(updates[text]["content"]["text"], "all mapped");
         assert!(read_done < text);
         // The todo tool's rendered card is not the plan: the adapter asks the
-        // daemon for the structured snapshot. The daemon writes that reply on
-        // the connection's event channel, which drains after the turn's own
-        // output, so the plan arrives after the prompt response. A plan is
-        // session state, and v1 allows updates outside a turn.
-        let seq = |message: &Value| message["seq"].as_u64().unwrap_or_default();
-        let response_seq = c
-            .tape
+        // daemon for the structured snapshot. The snapshot is session state, so
+        // it is written when the daemon answers the request, which is not
+        // sequenced against the turn's own frames: it can land before the tool
+        // completion frames or after the prompt response. Assert the content
+        // and that it is sent once, not a position.
+        let plan = match updates
             .iter()
-            .find(|m| m["dir"] == "a2c" && m["msg"]["id"] == 3)
-            .map(seq)
-            .expect("prompt response in the tape");
-        let plan = c
-            .wait_for_notification(|m| m["params"]["update"]["sessionUpdate"] == "plan")
-            .await?;
+            .find(|update| update["sessionUpdate"] == "plan")
+        {
+            Some(update) => update.clone(),
+            None => c
+                .wait_for_notification(|m| m["params"]["update"]["sessionUpdate"] == "plan")
+                .await?["params"]["update"]
+                .clone(),
+        };
         assert_eq!(
-            plan["params"]["update"]["entries"],
+            plan["entries"],
             json!([{"content": "wire-check", "priority": "high", "status": "in_progress"}])
         );
-        let plan_seq = c.tape.last().map(seq).expect("plan in the tape");
         assert!(
-            plan_seq > response_seq,
-            "plan {plan_seq} response {response_seq}"
+            updates
+                .iter()
+                .filter(|update| update["sessionUpdate"] == "plan")
+                .count()
+                <= 1,
+            "the plan must not be duplicated: {updates:#?}"
         );
         c.shutdown().await;
         Ok(())

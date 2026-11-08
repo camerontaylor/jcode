@@ -81,13 +81,15 @@ not an omission.
 
 **Timing and load.** A plan is session state, so it is routed as a session-level
 action (`RouteAction::Plan`) rather than as turn output. That is not a
-simplification for its own sake: the daemon writes the `Todos` reply on the
-connection's event channel, which drains *after* the turn's ordered output, so a
-reply requested mid-turn arrives after that turn's `session/prompt` response
-(measured in `acp_conformance_maps_reasoning_tool_calls_and_plan`). ACP allows
-session updates outside a prompt turn, so the plan is delivered as soon as the
-daemon supplies it. The same routing means a plan written by a peer turn is
-mirrored to an observing client instead of being dropped with the turn.
+simplification for its own sake: the daemon answers `GetTodos` on the
+connection's event channel, which is not sequenced against the turn's ordered
+output. The snapshot can therefore land before the tool-completion frames of
+the turn that produced it or after that turn's `session/prompt` response —
+both were observed while writing the wire test. ACP allows session updates
+outside a prompt turn, so the plan is delivered as soon as the daemon supplies
+it, and the wire test asserts its content and that it is sent once rather than
+its position. The same routing means a plan written by a peer turn is mirrored
+to an observing client instead of being dropped with the turn.
 
 ### 3. Tool call locations
 
@@ -161,8 +163,8 @@ action, in and out of a turn. The wire-level ordering test is
 `tests/e2e/acp_conformance.rs`: it scripts reasoning, a `todo` call and a `read`
 call against the real stdio adapter and asserts that `agent_thought_chunk`
 precedes the tool frames, each `tool_call` precedes its `tool_call_update`, the
-`read` update carries the cwd-resolved location, and the plan arrives as a
-session update after the prompt response (see "Timing and load").
+`read` update carries the cwd-resolved location, and the plan arrives as one
+session update with the structured entries (see "Timing and load").
 
 Existing usage, config, available-command, `_jcode/turn` and raw-server-event
 behavior is unchanged. Two recorded conformance fixtures already drift on this
