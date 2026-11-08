@@ -1,26 +1,53 @@
 # Jcode fork ACP interface contract
 
-Status: implementation target, 2026-11-08, revision 2 (amended the same day:
+Status: implementation target, 2026-11-08, revision 3. Revision 2 amended
 `mcpServers` handling, v2 close on shared sessions, the v2 rollout switch,
-pinned reference copies and the named consumer). This defines the interface
-after roadmap phases 1–5, before optional phase 6 features. It is a contract
-for the jcode fork and its consuming tool, Paseo, to implement independently,
-not a claim that the current binary implements the additions below. Baseline
-inspected: `f5e45624c`.
+pinned reference copies and the named consumer. Revision 3 makes **ACP v1
+with jcode extensions the primary target**, adds turn correlation on v1
+prompt responses, skill clear and the shared fixture corpus, and defines how
+consumers reference this document. It is a contract for the jcode fork and
+its consuming tool, Paseo, to implement independently, not a claim that the
+current binary implements the additions below. Baseline inspected:
+`f5e45624c`.
 
-Preserve existing v1 clients and ACP/TUI shared control. Add negotiated v2
-alongside v1, with explicit delivery and standard lifecycle semantics. Keep
-execution authority in the daemon and protocol presentation in the adapter.
-SDK adoption does not change this contract.
+Preserve existing v1 clients and ACP/TUI shared control. Complete the v1
+profile of this contract first. Negotiated v2 with explicit delivery is a
+later track that opens under the gate in the strategy; its sections below
+remain the target for that track and are not required for full v1 support.
+Keep execution authority in the daemon and protocol presentation in the
+adapter. SDK adoption does not change this contract.
 
 See the [full development strategy](ACP_FORK_STRATEGY.md) for architectural
 direction, sequential implementation, dependencies and completion criteria.
 
-Roadmap order: (1) repair existing shared control; (2) reduce the core carry;
-(3) improve v1 mappings/discovery; (4) separate version presentation and
-evaluate the SDK; (5) add v2 and explicit delivery; (6) optional new features.
-The SDK experiment may run alongside steps 1–3; production integration waits
-for compatibility evidence against the repaired baseline.
+Roadmap order: (0) verification baseline; (1) repair existing shared control
+and advertise capability metadata; (2) reduce the core carry; (3) complete
+the v1 target: mappings, detach, turn correlation, skill clear, fixture
+corpus; then, gated, (4) separate version presentation and evaluate the SDK
+and (5) add v2 and explicit delivery; (6) optional new features, which do not
+wait for the v2 track.
+
+## Referencing this contract
+
+The canonical copy is `docs/ACP_FORK_INTERFACE.md` on branch `custom` of
+`camerontaylor/jcode`:
+<https://github.com/camerontaylor/jcode/blob/custom/docs/ACP_FORK_INTERFACE.md>.
+Consumers link to that path and record the commit hash they built against;
+they do not keep a derived copy, because two hand-synchronized contracts
+drift. Where a consumer needs its own decisions written down, it keeps a
+short "choices" document that cites this one by commit. The pinned ACP
+references in `docs/acp-pins/` and the fixture corpus in `tests/fixtures/acp/`
+are versioned with this file; cite the same commit for all three.
+
+### What "v1 with jcode extensions" means
+
+The primary target is every row of this contract's v1 column plus the jcode
+extensions: capability metadata, `_jcode/turn` observation, implicit steering
+with turn correlation, `_jcode/detach`, config options with the legacy
+aliases, skill selection and clear, list metadata, and the fixture corpus.
+A consumer that implements only this is a complete consumer. It must not
+assume v2 exists, and nothing here may be specified so that v1 behavior only
+makes sense after v2 ships.
 
 ## Sources and precedence
 
@@ -65,13 +92,19 @@ update this contract, the pinned copies and both implementations together.
 | Reasoning, plans, tool metadata | Incomplete mapping | Surface data the daemon already provides |
 | Capability metadata described below | Mostly absent | Added in every profile |
 | Detach without cancelling owned work | Not a distinct operation | `_jcode/detach` |
-| ACP v2 and explicit steer/queue | Not implemented | Negotiated, initially behind the `[acp] v2` switch |
+| v1 prompt-response turn correlation | Not present | `_meta.jcode.turnId` and `role` on every v1 prompt response |
+| Skill clear | No operation | `skill: null` in prompt metadata |
+| Shared fixture corpus | None | `tests/fixtures/acp/`, replayed by both sides |
 | Client-supplied `mcpServers` | Accepted and silently ignored | Accepted, declared unsupported in metadata, reported by notice |
-| v2 turn attribution metadata | Not implemented | Added as specified below |
+| ACP v2 and explicit steer/queue | Not implemented | v2 track, gated; negotiated behind the `[acp] v2` switch when it opens |
+| v2 turn attribution metadata | Not implemented | v2 track; as specified below |
 
-The new client should implement v2 plus a v1 fallback. Full target support
-does not require porting explicit queueing back to v1. Legacy fallback must
-not assume a feature just because the executable is named jcode.
+The new client implements the v1 target first and completely. V2 support is
+added only when the v2 track opens, and then alongside v1, not instead of it.
+Full target support does not require explicit queueing: a client may hold
+unsent text locally and label it as local. The client must not assume a
+feature just because the executable is named jcode; it gates on the
+advertised metadata below.
 
 ## Transport and feature discovery
 
@@ -88,9 +121,13 @@ V2 negotiation is controlled by a rollout switch that follows the profile
 convention: configuration key `v2` in the `[acp]` table (boolean, default
 `false`) with environment override `JCODE_ACP_V2` (`1`/`true` enables). Off
 means the adapter negotiates v1 only, as today. On means v2 is offered and
-v1 remains available on the same executable. There is no CLI flag. Remove
+v1 remains available on the same executable. There is no CLI flag. A client
+that spawns `jcode acp` as a child process controls the switch per
+connection by setting the environment variable on the child, without
+touching the user's configuration. Remove
 the switch, defaulting v2 on, only when the pinned draft is superseded by a
-stable v2 and this contract is re-pinned.
+stable v2 and this contract is re-pinned. Until the v2 track opens, the
+switch does nothing because no v2 presentation exists.
 
 ### Jcode capability metadata
 
@@ -101,10 +138,21 @@ initialize result and `capabilities._meta.jcode` in v2. Example for v1:
 {
   "interfaceVersion": 1,
   "profile": "standard",
-  "extensions": ["shared_control", "peer_turns", "skill_selection"],
+  "extensions": ["shared_control", "peer_turns", "turn_correlation", "skill_selection"],
   "sessionMcpServers": false
 }
 ```
+
+Extension names and what each promises:
+
+| Name | Promise |
+| --- | --- |
+| `shared_control` | `result._meta.jcode.sharedControl` is present on new/load/resume and `_jcode/detach` exists when its field is true |
+| `peer_turns` | `_jcode/turn` notifications (v1 only) |
+| `turn_correlation` | `_meta.jcode.turnId` and `role` on every v1 prompt response |
+| `skill_selection` | `_meta.jcode.skill` on prompts, including `null` to clear |
+| `raw_server_event` | `_jcode/server_event` diagnostics (extended/full profiles) |
+| `turn_metadata` | v2 track only; replaces `peer_turns` on v2 connections |
 
 `interfaceVersion` versions the jcode extensions defined here, not ACP or
 the daemon protocol. `sessionMcpServers` states whether client-supplied
@@ -160,7 +208,12 @@ legacy behavior; new consumers must not send new extensions to those binaries.
 | Config | `session/set_config_option` | Standard v2 config route and typed selectors |
 | Detach view | `_jcode/detach` | `_jcode/detach` |
 
-For list entries, `_meta.jcode.live: boolean` remains advisory: omission means
+List entries carry `sessionId`, `cwd`, and when stored, `title` and
+`updatedAt` (RFC 3339), newest first. A consumer's import or picker should
+render previews from these fields and attach only to the session the user
+selects; probing each entry with `session/load` to build a preview is
+unnecessary and attaches to every probed session. For list entries,
+`_meta.jcode.live: boolean` remains advisory: omission means
 unknown, false means not live at the snapshot. It is not a running/idle flag.
 Working-directory filters use canonical paths. Treat pagination cursors as
 opaque and do not assume a fixed page size or a transactional listing.
@@ -188,6 +241,13 @@ active must not arm cancellation for future work.
 | Leave without stopping | `_jcode/detach` | `_jcode/detach` |
 | Close | Withdraw this attachment's waiting steers; cancel only its owned turn; adopted/peer turn continues | Sole live attachment: standard close, stopping all session work. Peers present: withdraw this attachment's pending input, cancel only work it originated, finish its final updates, detach; adopted/peer-origin turns continue |
 | Transport loss | Withdraw this connection's pending input; preserve already-inserted shared work as the target policy | Same |
+
+A client must not send `session/cancel` as a generic step before close or
+teardown. V1 close is already owner-aware: it cancels this attachment's own
+turn and leaves adopted and peer turns running. A cancel issued first turns
+that safe release into a stop of whatever turn the client was observing,
+which on a shared session is often another user's work. Cancel is for the
+user's explicit Stop, nothing else.
 
 ### V2 close on a shared session
 
@@ -264,6 +324,29 @@ adoption does not produce another start. Own prompt/steer text is not echoed
 by default in v1. The client retains its submitted text; other attachments
 receive peer-user updates. This deliberately defers the report's suggested
 own-echo change to v2 rather than creating another v1 behavior mode.
+
+### Turn correlation on prompt responses
+
+With `turn_correlation` advertised, every v1 `session/prompt` response
+carries, beside `stopReason`:
+
+```json
+{"stopReason":"end_turn","_meta":{"jcode":{"turnId":"opaque-turn-id","role":"origin"}}}
+```
+
+- `turnId` is the same opaque identity used in `_jcode/turn`.
+- `role` is `origin` when this request started the turn, `steer` when it was
+  inserted into a turn already running, or `none` when no turn ran (for
+  example a selection-only command or a rejected busy request).
+- Several responses with the same `turnId` describe one execution. The
+  consumer settles completion, usage and terminal display once per `turnId`;
+  the `origin` response is the natural place, and a `steer` response that
+  arrives first must not be treated as a second completion.
+- Responses finished by detach or local close still carry the `turnId` they
+  were following, with `stopReason: "cancelled"`; the shared turn may be
+  continuing.
+
+This is informational. A client that ignores it gets today's behavior.
 
 Without effective implicit steering, do not offer it. Busy requests may fail
 as in the legacy implementation. Do not introduce `delivery` or
@@ -403,7 +486,11 @@ v1 compatibility only. Unknown/path-like slash text remains conversational
 text; a leading space escapes command/skill interpretation. The adapter
 remembers the selected skill on its session attachment for subsequent prompts;
 this is not a shared, synchronized config option. Its use affects shared work.
-There is no new skill-clear API in this contract. A bare skill invocation
+Sending `{"_meta":{"jcode":{"skill":null}}}` clears the attachment's sticky
+selection before the prompt text is interpreted; with empty prompt text it is
+a selection-only action and starts no model turn, with text it clears and
+then submits that text unskilled. A missing `skill` key leaves the selection
+unchanged. A bare skill invocation
 selects it without requiring a model turn. A busy steer must not claim to
 change a sticky skill: if explicit selection cannot be honored, reject before
 insertion instead of silently
@@ -482,7 +569,29 @@ receive `-32601`. No parsing of human-readable error strings is required.
 
 ## Independent acceptance scenarios
 
-Both implementations should exercise the same observable scenarios:
+Both implementations should exercise the same observable scenarios. Scenarios
+1 through 5, 7 and 8 are the v1 target; scenario 6 and the v2 halves of 5 and
+8 belong to the v2 track.
+
+### Fixture corpus
+
+The executable form of these scenarios is the corpus in `tests/fixtures/acp/`
+of the jcode repository, versioned with this file:
+
+- One JSON Lines file per scenario and version, named
+  `<nn>-<scenario>-v1.jsonl`. Each line is an object with `seq` (monotonic
+  integer), `dir` (`c2a` or `a2c`), and `msg` (the framed JSON-RPC message
+  exactly as sent). Opaque identities are recorded as emitted; a replayer
+  treats them as opaque and matches structure, not values.
+- jcode records the files from its e2e shared-session scenarios against the
+  mock provider and checks them in CI: a replay through the adapter must
+  reproduce the `a2c` lines up to opaque values, so any wire change updates
+  the corpus in the same commit.
+- Paseo replays the `a2c` lines into its client and asserts the `c2a` lines
+  and its own resulting state. A consumer change that needs a different
+  exchange is a contract change and is made here first.
+- The corpus is the first thing to update when either side finds the prose
+  ambiguous; prose follows the recorded exchange.
 
 1. Create, list, replay and attach to a TUI session mid-turn; preserve ordering
    between replay and live events and show the current activity correctly.
@@ -520,7 +629,7 @@ approval process.
 
 ## SDK trial and build impact
 
-The bounded SDK trial can start immediately, independently of phases 1–3.
+The bounded SDK trial belongs to the v2 track and is scheduled when that track opens; it may be run earlier as unscheduled research.
 Use an isolated experimental checkout because the dependency graph and adapter
 will differ from active repair work. The trial produces evidence and a small
 representative prototype, not a second production adapter. Rebase/recheck

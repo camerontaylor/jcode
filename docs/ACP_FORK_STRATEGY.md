@@ -1,8 +1,14 @@
 # Maintainable fork and ACP development strategy
 
 Prepared 2026-11-08 against documentation commit `5e235215d`; amended the
-same day after a review of its process assumptions (revision 2).
+same day after a review of its process assumptions (revision 2) and again
+after reviewing the consumer's integration plan (revision 3: v1 with jcode
+extensions is the primary target, v2 is a gated later track).
 Status: implementation plan; the phases below are not claims of completed work.
+
+Canonical location: `docs/ACP_FORK_STRATEGY.md` on branch `custom` of
+`camerontaylor/jcode`. Consumers link to the interface contract beside it,
+not to a copy; see [Referencing this contract](ACP_FORK_INTERFACE.md#referencing-this-contract).
 
 ### Preconditions verified on 2026-11-08
 
@@ -38,10 +44,28 @@ defect of revision 1.
   Phase 3.
 
 Build a compatibility-first fork: one daemon-owned execution model, a
-fork-owned ACP adapter, and v1/v2 presentations of the same shared session.
-Preserve existing ACP/TUI capabilities first, reduce costly core changes next,
-then extend ACP. The consumer and jcode can develop independently against the
-[interface contract](ACP_FORK_INTERFACE.md).
+fork-owned ACP adapter, and presentations of the same shared session for ACP
+v1 now and v2 later. Preserve existing ACP/TUI capabilities first, reduce
+costly core changes next, then extend ACP. The consumer and jcode can develop
+independently against the [interface contract](ACP_FORK_INTERFACE.md).
+
+### Primary target: ACP v1 with jcode extensions
+
+The primary deliverable is the **v1 profile of the contract**: existing v1
+operations, capability metadata, peer-turn observation, implicit steering
+with turn correlation, `_jcode/detach`, config options, skill selection and
+clear, plus the shared fixture corpus. That is the end of Phase 3, and it is
+the milestone both sides build and test against first.
+
+Revision 2 treated negotiated v2 plus explicit delivery as the target with v1
+as a fallback. That put the largest costs on both sides, two version
+presentations here and entity reducers plus a pinned v2 transport in Paseo,
+against a draft that is still alpha and has no SDK support on the TypeScript
+side. The user-visible value is almost entirely available in v1: the only
+capability v1 lacks is a stop-surviving explicit queue, and the contract lets
+the consumer hold that locally. So v2 and explicit delivery become the **v2
+track**: Phases 4 and 5, which open only when the gate in Phase 5 is met.
+Nothing in the v1 target may be designed so that it only works once v2 ships.
 
 ## Document map
 
@@ -116,18 +140,20 @@ a new service or a large crate reorganization merely to enforce this boundary.
 | Phase | Deliverable | Dependency | Completion evidence |
 | --- | --- | --- | --- |
 | 0 | Verification baseline: CI on `custom`, budget decision, documents integrated | None | Quality and e2e jobs green on the `custom` head; planning documents present on `custom` |
-| 1 | Reliable existing shared control | Phase 0 | Race regressions and current ACP/TUI scenarios pass in CI on `custom` |
-| 2 | Reduced lifecycle/catalog core carry | Phase 1 for lifecycle removal | Same external behavior with less upstream-owned code changed |
-| 3 | Useful v1 mappings and discovery | Stable affected paths; low-risk mapping work can overlap 1–2 | Existing clients remain compatible; new data is usable |
-| 4 | Shared adapter with version-specific presentation; SDK decision | Repaired v1 baseline; SDK experiment can start immediately | v1 compatibility preserved with a measured dependency decision |
-| 5 | Negotiated v2, then explicit delivery | Phase 4 presentation boundary, not necessarily SDK adoption | Contract scenarios work across v1, v2 and TUI |
-| 6 | Optional expansion | Phases 1–5 and an actual consumer need | Each feature has a defined consumer and maintenance benefit |
+| 1 | Reliable existing shared control, plus capability metadata | Phase 0 | Race regressions and current ACP/TUI scenarios pass in CI on `custom`; a build advertises `interfaceVersion` and effective `sharedControl` |
+| 2 | Reduced lifecycle/catalog core carry (R1, R2) | Phase 1 for lifecycle removal | Same external behavior with less upstream-owned code changed |
+| 3 | **Primary target**: complete v1 extensions, mappings, detach, turn correlation, skill clear, fixture corpus | Stable affected paths; low-risk mapping work can overlap 1–2 | Existing clients remain compatible; Paseo passes the v1 acceptance scenarios against the fixtures and a real build |
+| 4 | v2 track: version boundary and SDK decision | Phase 3 and the Phase 5 gate | v1 compatibility preserved with a measured dependency decision |
+| 5 | v2 track: negotiated v2, then explicit delivery | Phase 4 presentation boundary, not necessarily SDK adoption | Contract scenarios work across v1, v2 and TUI |
+| 6 | Optional expansion | Phase 3 and an actual consumer need; does not wait for the v2 track | Each feature has a defined consumer and maintenance benefit |
 
-Default to sequential integration. Independent investigation, isolated SDK
-experiments and consumer fixtures can proceed alongside it. R2's catalog facade
+Default to sequential integration. Independent investigation and consumer
+fixtures can proceed alongside it. R2's catalog facade
 does not depend on R1's lifecycle removal. Minor R3–R6 cleanups need not block
-v2 if they are behaviorally independent. Upstream acceptance is never a
-dependency for local progress.
+Phase 3 if they are behaviorally independent. Upstream acceptance is never a
+dependency for local progress. Phase 6 items with a consumer need, such as
+connecting session-scoped MCP servers, may start after Phase 3 without
+waiting for the v2 track.
 
 ## Phase 0 Establish the verification baseline
 
@@ -217,6 +243,20 @@ and its signal, or a hook the mock-provider harness can block on at the turn
 claim. Prefer one seam reused by several tests over per-test sleeps. A test
 that passes only because of a sleep does not count as completion evidence.
 
+### Capability metadata lands in Phase 1
+
+Add the contract's capability metadata here rather than in Phase 3:
+`agentCapabilities._meta.jcode` on initialize and `result._meta.jcode` with
+effective `sharedControl` on every successful new/load/resume. It is additive
+adapter code with no core change, and it is the thing Paseo gates every jcode
+behavior on. Until a build advertises it, the consumer cannot start
+integration testing against a real binary, so shipping it early is worth more
+than keeping Phase 1 purely corrective. Advertise only what the repaired
+baseline actually honors: `detach` stays false until Phase 3 implements it,
+and `implicitSteering` reflects the daemon's real support, not the adapter
+version. The first build that advertises `interfaceVersion` is the build the
+consumer's plan calls "the installed build that first implements it".
+
 ## Phase 2 Reduce expensive core changes
 
 ### R1 Remove the competing lifecycle safely
@@ -268,14 +308,34 @@ Completion means the relevant behavior remains equivalent and the core diff
 is smaller or simpler to carry. The historical estimate of 800–900 remaining
 core lines is not a target that overrides correctness.
 
-## Phase 3 Improve the existing v1 experience
+## Phase 3 Complete the v1 target
+
+This phase ends at the primary target. Its output is a build that Paseo can
+integrate fully on v1, and a fixture corpus both sides test against.
 
 Deliver information the daemon already has: exposed reasoning, todos/plans,
 tool names and reliable locations/diffs. Do not synthesize structured metadata
 by guessing from display strings. Preserve existing usage and config updates.
 
-Add the interface contract's capability discovery in every profile, using
-effective daemon support rather than executable version.
+Capability discovery arrived in Phase 1; here, flip each `sharedControl`
+field to true as its behavior lands and keep the advertisement truthful in
+every profile.
+
+Add the three consumer-driven extensions the integration plan showed were
+missing, all specified in the contract:
+
+- **Turn correlation on v1 prompt responses.** With implicit steering,
+  several requests share one execution and each gets its own final response.
+  The consumer could not tell which responses belong to one turn without
+  heuristics. Put `_meta.jcode.turnId` and a role marker on every v1 prompt
+  response; it is a few adapter lines and removes a class of consumer
+  bookkeeping.
+- **Skill clear.** The sticky attachment-local skill had no clear operation.
+  `skill: null` in prompt metadata clears it.
+- **The fixture corpus.** Record JSON-RPC transcripts from the e2e
+  shared-session scenarios into `tests/fixtures/acp/` and keep them in CI.
+  They are the executable form of the contract and the consumer replays them
+  before testing against a live build. See the verification section.
 
 Keep tolerating client-supplied `mcpServers`. Revision 1 proposed rejecting
 nonempty input; that reverses upstream commit `0517f01f2`, which made session
@@ -308,11 +368,19 @@ Per-request withdrawal is part of v2 in the current contract. If an immediate
 v1 consumer need emerges, specify that extension before implementing it rather
 than adding an undocumented behavior mode.
 
-Completion means existing v1 clients still work and the new client can discover
-and consume the improvements. Each mapping can land independently; broad
-structural cleanup is not a prerequisite for a small, reliable mapping.
+Completion means existing v1 clients still work, Paseo passes the v1
+acceptance scenarios in the contract against both the fixture corpus and a
+real build on a dedicated socket, and every `sharedControl` field advertised
+true is exercised by one of those scenarios. Each mapping can land
+independently; broad structural cleanup is not a prerequisite for a small,
+reliable mapping. Reaching this point is the primary target; what follows is
+either the gated v2 track or consumer-driven Phase 6 work.
 
 ## Phase 4 Establish the version boundary and decide on the SDK
+
+Phases 4 and 5 are the v2 track. They start only when the gate in Phase 5 is
+met. The `src/cli/acp.rs` split from Phase 0 is not part of this phase; it
+happens earlier as budget debt and leaves the version boundary easier to add.
 
 Separate transport/schema handling from shared session behavior just enough
 to support two presentations. Avoid a speculative abstraction framework.
@@ -323,9 +391,12 @@ Prefer the official SDK if a bounded compatibility trial supports it. It can
 reduce protocol plumbing, but it does not replace shared-session semantics.
 Its adoption is not a prerequisite for v2 or a reason to rewrite working logic.
 
-The trial starts independently of phases 1–3 in an isolated experimental
-checkout. Its deliverables are a representative prototype, compatibility
-findings, build measurements and an adopt/defer recommendation. Do not let it
+The trial runs in an isolated experimental checkout. It is no longer
+scheduled alongside Phases 1–3: with v1 as the primary target the SDK's main
+benefit, its v2 types, is not needed until the v2 track opens, and the
+hand-written v1 transport is already working. Anyone may still run it as
+unscheduled research. Its deliverables are a representative prototype,
+compatibility findings, build measurements and an adopt/defer recommendation. Do not let it
 grow into a parallel production adapter. Integrate only after rechecking
 against the repaired v1 baseline, in a change separate from lifecycle and
 v2 behavior changes.
@@ -359,6 +430,22 @@ the benchmark host and toolchain at the start of the trial and keep them for
 every measurement; a comparison across hosts is not a result.
 
 ## Phase 5 Add v2 and then explicit delivery
+
+### Gate for the v2 track
+
+Open Phases 4 and 5 only when all of these hold:
+
+1. Phase 3 is complete and Paseo is shipping against the v1 target.
+2. Either the pinned draft has been superseded by a stable v2 release, or a
+   TypeScript transport exists that Paseo can use for the pinned revision
+   including request-ID cancellation. Without one of those, the consumer
+   would be hand-writing an alpha transport and the work would be redone.
+3. A consumer need exists that the v1 target cannot meet. Today the only
+   candidate is a stop-surviving explicit queue; the contract lets Paseo hold
+   that locally, so it is a need only if local holding proves insufficient.
+
+Record the gate decision in this document when it is taken. Until then the
+pinned references stay as they are; re-pin when the gate opens.
 
 ### First deliver the complete advertised baseline
 
@@ -467,8 +554,15 @@ Build on existing verification rather than adding a new approval system:
 - Configuration tests: `src/cli/acp/session_configuration.rs`.
 - Shared-session behavior: `tests/e2e/acp_shared_session.rs` and existing
   daemon ownership/cancellation/publication tests.
-- Consumer fixtures for the target contract, so each side can develop before
-  the other implementation lands.
+- The fixture corpus under `tests/fixtures/acp/`: one JSON Lines file per
+  acceptance scenario, each line a framed JSON-RPC message with direction
+  and a monotonic sequence number, recorded by the e2e scenarios against the
+  mock provider. A CI check replays each file through the adapter and fails
+  on drift, so a wire change must update the corpus in the same commit.
+  Paseo replays the same files through its client. The corpus is the
+  executable contract; prose in the interface document explains it.
+- Consumer fixtures on the Paseo side consume that corpus, so each side can
+  develop before the other implementation lands.
 
 Workers select named tests for their changed behavior, follow host memory and
 `nice` guidance, and leave full suites/heavy builds to appropriate hosts or CI.
@@ -526,7 +620,8 @@ freeze the base temporarily and select upstream changes deliberately; do not
 create another competing turn model to keep rebasing at any cost. Make that
 call from the recorded conflict counts, not from a single painful bump.
 
-The first implementation assignment is phase 0, then phase 1, with the SDK experiment and
-consumer contract fixtures available as independent tracks. Finish each useful
-slice before expanding scope; SDK adoption, upstream acceptance and optional
-features must not hold existing ACP/TUI reliability hostage.
+The first implementation assignment is phase 0, then phase 1, with consumer
+fixtures available as an independent track. The primary target is the end of
+phase 3. Finish each useful slice before expanding scope; the v2 track, SDK
+adoption, upstream acceptance and optional features must not hold existing
+ACP/TUI reliability hostage.
