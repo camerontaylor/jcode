@@ -1507,7 +1507,7 @@ fn close_withdraws_a_waiting_steer_without_cancelling_any_turn() {
     let actions = router.route(scoped(9, injected("steer 78", &[cid(78)])));
     assert!(actions.is_empty(), "{actions:?}");
     assert!(answered_cancelled(&drain(&mut late), 78));
-    assert_eq!(router.active_turn_identity(), Some(identity(9)));
+    assert_eq!(router.active_turn_identity(), None);
 }
 
 #[test]
@@ -1656,4 +1656,19 @@ fn correlation_survives_terminal_until_request_release() {
     assert_eq!(r.prompt_correlation(11), Some((tid(1), "steer")));
     r.unregister(10);
     assert_eq!(r.prompt_correlation(10), None);
+}
+
+#[test]
+fn observer_close_ends_local_bracket_without_cancel() {
+    let mut r = attached_router();
+    r.route(turn_started(1, peer(10), None));
+    let actions = r.close_view();
+    assert!(matches!(
+        actions.as_slice(),
+        [RouteAction::PeerTurnEnded {
+            status: TurnEndStatus::Cancelled,
+            ..
+        }]
+    ));
+    assert!(r.close_view().is_empty());
 }

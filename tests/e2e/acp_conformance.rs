@@ -210,7 +210,6 @@ async fn acp_conformance_shared_observe_steer() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract gap: observer close omits canceled peer bracket terminal"]
 async fn acp_conformance_observer_close_bracket_contract() -> Result<()> {
     shared_scenario(true).await
 }

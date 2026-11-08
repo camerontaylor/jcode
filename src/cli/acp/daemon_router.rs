@@ -601,6 +601,7 @@ impl RouterState {
     pub(super) fn close_view(&mut self) -> Vec<RouteAction> {
         self.view_closed = true;
         let mut actions = self.withdraw(Withdrawal::Close);
+        actions.extend(self.close_peer_turn(TurnEndStatus::Cancelled, None));
         let Some(own) = self.own_turn.as_ref() else {
             return actions;
         };
