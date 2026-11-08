@@ -551,10 +551,14 @@ standard field for declining the servers. The target behavior is:
   metadata, so Paseo and other jcode-aware clients can show the user that
   session-scoped servers are not in effect, and send them or not as they
   prefer.
-- When a nonempty array is ignored, send one informational session update on
-  that connection after the new/load/resume response, naming the ignored
-  server names and pointing at the daemon-side MCP configuration. It is a
-  notice, not an error, and it must not change the response.
+- When a nonempty array is ignored, send one `notice` session update
+  (`severity: "info"`) on that connection after the new/load/resume response,
+  naming the ignored server names and pointing at the daemon-side MCP
+  configuration: send it **when the client advertised
+  `clientCapabilities.session.notices`** at `initialize`, and otherwise send
+  none. V1 only permits `notice` updates to a client that advertised that
+  capability, and a message update is not a substitute. It is a notice, not an
+  error, and it must not change the response.
 - Daemon-configured MCP tools remain usable. Connecting client-supplied
   stdio servers for the session is a phase 6 item, to be taken up when a
   consumer needs it; flipping `sessionMcpServers` to true is how it is

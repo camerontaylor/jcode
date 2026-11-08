@@ -533,7 +533,13 @@ fn non_empty_mcp_servers_are_tolerated_until_session_scoped_mcp_is_supported() {
         json!({"mcpServers": "fs"}),
     ] {
         assert!(validate_acp_mcp_servers(&params).is_err(), "{params}");
-        assert_eq!(ignored_mcp_servers_notice("s1", &params), None, "{params}");
+        for advertised in [true, false] {
+            assert_eq!(
+                ignored_mcp_servers_notice("s1", &params, advertised),
+                None,
+                "{params} (notices advertised: {advertised})"
+            );
+        }
     }
 }
 
@@ -545,7 +551,8 @@ fn ignored_mcp_servers_produce_exactly_one_notice_naming_them() {
             {"name": "git", "url": "https://example.test/mcp", "type": "http"}
         ]
     });
-    let notice = ignored_mcp_servers_notice("s1", &params).expect("a nonempty array is reported");
+    let notice =
+        ignored_mcp_servers_notice("s1", &params, true).expect("a nonempty array is reported");
     assert_eq!(
         notice,
         json!({
@@ -561,12 +568,20 @@ fn ignored_mcp_servers_produce_exactly_one_notice_naming_them() {
     );
 
     // Nothing to report: an empty array, a missing field or an explicit null.
-    for params in [json!({"mcpServers": []}), json!({}), json!({"mcpServers": null})] {
-        assert_eq!(ignored_mcp_servers_notice("s1", &params), None, "{params}");
+    for params in [
+        json!({"mcpServers": []}),
+        json!({}),
+        json!({"mcpServers": null}),
+    ] {
+        assert_eq!(
+            ignored_mcp_servers_notice("s1", &params, true),
+            None,
+            "{params}"
+        );
     }
 
     // Unnamed entries are still reported, by count.
-    let notice = ignored_mcp_servers_notice("s1", &json!({"mcpServers": [{}, {}]}))
+    let notice = ignored_mcp_servers_notice("s1", &json!({"mcpServers": [{}, {}]}), true)
         .expect("a nonempty array is reported");
     assert!(
         notice["update"]["description"]
@@ -575,6 +590,41 @@ fn ignored_mcp_servers_produce_exactly_one_notice_naming_them() {
             .contains("2 client MCP server(s)"),
         "{notice}"
     );
+}
+
+#[test]
+fn a_notice_is_only_sent_to_a_client_that_advertised_session_notices() {
+    let params = json!({"mcpServers": [{"name": "fs", "command": "npx"}]});
+    assert!(
+        ignored_mcp_servers_notice("s1", &params, true).is_some(),
+        "an advertising client gets the notice"
+    );
+    assert_eq!(
+        ignored_mcp_servers_notice("s1", &params, false),
+        None,
+        "v1 forbids a notice to a client that did not advertise `session.notices`, \
+         and a message is not a substitute"
+    );
+
+    // The capability is an object marker under `clientCapabilities.session`.
+    for (spec, advertised) in [
+        (json!({"clientCapabilities": {"session": {"notices": {}}}}), true),
+        (
+            json!({"clientCapabilities": {"session": {"notices": {"custom": true}}}}),
+            true,
+        ),
+        (json!({"clientCapabilities": {"session": {}}}), false),
+        (json!({"clientCapabilities": {"session": {"notices": null}}}), false),
+        (json!({"clientCapabilities": {}}), false),
+        (json!({"clientCapabilities": null}), false),
+        (json!({}), false),
+    ] {
+        assert_eq!(
+            client_advertises_session_notices(&spec),
+            advertised,
+            "{spec}"
+        );
+    }
 }
 
 #[test]
@@ -737,7 +787,10 @@ fn skill_selection_reads_the_canonical_metadata_field() {
         skill_selection_from_params(&json!({"_meta": {}})),
         Ok(SkillSelection::Unchanged)
     );
-    assert_eq!(skill_selection_from_params(&json!({})), Ok(SkillSelection::Unchanged));
+    assert_eq!(
+        skill_selection_from_params(&json!({})),
+        Ok(SkillSelection::Unchanged)
+    );
     // Malformed extension parameters are rejected, never silently ignored.
     let err = skill_selection_from_params(&json!({"_meta": {"jcode": {"skill": 7}}}))
         .expect_err("a non-string, non-null skill is malformed");
@@ -792,8 +845,14 @@ fn a_clearing_prompt_clears_the_attachment_and_starts_no_turn() {
         false,
     )
     .unwrap();
-    assert!(plan.selection_only, "a bare clear starts no model turn: {plan:?}");
-    assert_eq!(plan.skill, None, "the prompt runs without the cleared skill");
+    assert!(
+        plan.selection_only,
+        "a bare clear starts no model turn: {plan:?}"
+    );
+    assert_eq!(
+        plan.skill, None,
+        "the prompt runs without the cleared skill"
+    );
     assert!(plan.attach, "the clear rewrites the sticky selection");
 
     // With text, the text is submitted unskilled exactly as written, even when
@@ -887,8 +946,14 @@ fn a_busy_session_rejects_an_explicit_skill_selection_before_insertion() {
     ] {
         let err = busy_skill_selection_error("s1", &selection, true)
             .unwrap_or_else(|| panic!("{selection:?} must be rejected while busy"));
-        assert!(err.starts_with("Session s1 is already processing a prompt"), "{err}");
-        assert!(err.contains("skill selection needs an idle session"), "{err}");
+        assert!(
+            err.starts_with("Session s1 is already processing a prompt"),
+            "{err}"
+        );
+        assert!(
+            err.contains("skill selection needs an idle session"),
+            "{err}"
+        );
         assert_eq!(
             busy_skill_selection_error("s1", &selection, false),
             None,
@@ -896,7 +961,10 @@ fn a_busy_session_rejects_an_explicit_skill_selection_before_insertion() {
         );
     }
     // A prompt that changes nothing is steered as before.
-    assert_eq!(busy_skill_selection_error("s1", &SkillSelection::Unchanged, true), None);
+    assert_eq!(
+        busy_skill_selection_error("s1", &SkillSelection::Unchanged, true),
+        None
+    );
 }
 
 #[test]

@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -659,6 +659,10 @@ struct AcpRuntime {
     /// Per-connection suffix for `instance_id`, so two sessions in one adapter
     /// process never mistake each other's turns for their own.
     connection_seq: Arc<AtomicU64>,
+    /// Whether this connection's client advertised `clientCapabilities.session
+    /// .notices` at `initialize`. ACP v1 forbids `notice` updates otherwise, so
+    /// informational notices are withheld rather than faked as messages.
+    client_session_notices: Arc<AtomicBool>,
 }
 
 impl AcpRuntime {
@@ -678,6 +682,7 @@ impl AcpRuntime {
             instance_id: format!("acp-{}", random_uuid_v4()),
             request_id_base: random_request_id_base(),
             connection_seq: Arc::new(AtomicU64::new(0)),
+            client_session_notices: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -728,6 +733,13 @@ impl AcpRuntime {
 
         match method {
             "initialize" => {
+                // Record what this connection may receive before answering: a
+                // v1 client that did not advertise `session.notices` must never
+                // see a `notice` update.
+                self.client_session_notices.store(
+                    client_advertises_session_notices(&message.params),
+                    Ordering::SeqCst,
+                );
                 if let Some(id) = message.id {
                     self.write_result(id, initialize_result(&message.params, self.profile))
                         .await?;
@@ -842,7 +854,8 @@ impl AcpRuntime {
         session_id: &str,
         params: &Value,
     ) -> Result<()> {
-        if let Some(notice) = ignored_mcp_servers_notice(session_id, params) {
+        let notices = self.client_session_notices.load(Ordering::SeqCst);
+        if let Some(notice) = ignored_mcp_servers_notice(session_id, params, notices) {
             self.write_notification("session/update", notice).await?;
         }
         Ok(())
@@ -958,7 +971,8 @@ impl AcpRuntime {
         // idle, instead of believing a selection that never applied.
         let busy = session.prompt_active() || session.router.lock().await.turn_open();
         if let Some(err) = busy_skill_selection_error(&session_id, &selection, busy) {
-            self.write_error_value(id, JSONRPC_SERVER_ERROR, err).await?;
+            self.write_error_value(id, JSONRPC_SERVER_ERROR, err)
+                .await?;
             return Ok(());
         }
 
@@ -981,14 +995,7 @@ impl AcpRuntime {
         tokio::spawn(async move {
             let mut ticket = PromptTicket::new(Arc::clone(&session));
             let result = runtime
-                .run_prompt(
-                    id.clone(),
-                    session,
-                    text,
-                    images,
-                    selection,
-                    &mut ticket,
-                )
+                .run_prompt(id.clone(), session, text, images, selection, &mut ticket)
                 .await;
             ticket.release().await;
             if let Err(err) = result {
@@ -3202,15 +3209,35 @@ fn required_session_id(params: &Value) -> std::result::Result<String, String> {
         .ok_or_else(|| "Missing required sessionId".to_string())
 }
 
+/// Whether the client advertised the ACP v1 `session.notices` capability, which
+/// is the only case in which an agent may send a `notice` session update. It is
+/// an object marker under `clientCapabilities.session`; `null` and a missing key
+/// both mean unsupported.
+fn client_advertises_session_notices(params: &Value) -> bool {
+    params
+        .get("clientCapabilities")
+        .and_then(|capabilities| capabilities.get("session"))
+        .and_then(|session| session.get("notices"))
+        .is_some_and(Value::is_object)
+}
+
 /// `session/update` notice for client-supplied `mcpServers` this adapter accepts
 /// but does not connect, or `None` when there is nothing to report (missing,
-/// `null` or empty array).
+/// `null` or empty array) or the client did not advertise `session.notices`.
 ///
 /// ACP v1 `notice` is the informational update for the user that is not part of
-/// session history and needs no client capability, so an attachment can say
-/// that session-scoped servers are ignored without faking an assistant message
-/// or changing the response.
-fn ignored_mcp_servers_notice(session_id: &str, params: &Value) -> Option<Value> {
+/// session history, and it may only be sent to a client that advertised it. When
+/// it is not advertised nothing is sent: `agent_message_chunk` would invent an
+/// assistant turn, and `sessionMcpServers: false` in the capability metadata
+/// already tells a jcode-aware client that session servers are not in effect.
+fn ignored_mcp_servers_notice(
+    session_id: &str,
+    params: &Value,
+    session_notices: bool,
+) -> Option<Value> {
+    if !session_notices {
+        return None;
+    }
     let servers = params.get("mcpServers")?.as_array()?;
     if servers.is_empty() {
         return None;

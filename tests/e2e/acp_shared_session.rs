@@ -1101,10 +1101,7 @@ fn is_notice(notification: &serde_json::Value) -> bool {
 
 /// Read messages for `window`, returning what arrived. Proves a notice is not
 /// sent after a response, without waiting on a later request to flush it.
-async fn drain_for(
-    client: &mut AcpClient,
-    window: Duration,
-) -> Result<Vec<serde_json::Value>> {
+async fn drain_for(client: &mut AcpClient, window: Duration) -> Result<Vec<serde_json::Value>> {
     let mut read = Vec::new();
     let deadline = Instant::now() + window;
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
@@ -1257,7 +1254,9 @@ async fn acp_skill_clear_round_trip() -> Result<()> {
             "the clearing prompt runs a model turn: {texts:?}"
         );
         assert!(
-            !texts.iter().any(|text| text.starts_with("Activated skill:")),
+            !texts
+                .iter()
+                .any(|text| text.starts_with("Activated skill:")),
             "the clear attaches nothing: {texts:?}"
         );
 
@@ -1369,8 +1368,16 @@ async fn acp_ignored_mcp_servers_notice_follows_the_response() -> Result<()> {
         wait_for_socket(&socket_path).await?;
         let cwd = std::env::current_dir()?;
         let mut acp = AcpClient::spawn()?;
-        acp.request("initialize", serde_json::json!({ "protocolVersion": 1 }))
-            .await?;
+        // A client that advertised the v1 `session.notices` capability: only
+        // then may an agent send a `notice` session update.
+        acp.request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "clientCapabilities": { "session": { "notices": {} } },
+            }),
+        )
+        .await?;
 
         // `session/new` with two client servers: the response comes first, then
         // exactly one notice naming both.
@@ -1508,6 +1515,47 @@ async fn acp_ignored_mcp_servers_notice_follows_the_response() -> Result<()> {
             !after.iter().any(is_notice) && !buffered.iter().any(is_notice),
             "a rejected shape reports no notice: {after:#?} {buffered:#?}"
         );
+
+        // A client that did not advertise `session.notices` gets nothing at all
+        // for the same nonempty array: v1 forbids the notice to that client, and
+        // a message update is not a substitute for it.
+        for client_capabilities in [
+            None,
+            Some(serde_json::json!({ "session": {} })),
+            Some(serde_json::json!({ "session": { "notices": null } })),
+        ] {
+            let mut quiet = AcpClient::spawn()?;
+            let mut params = serde_json::json!({ "protocolVersion": 1 });
+            if let Some(capabilities) = client_capabilities.clone() {
+                params["clientCapabilities"] = capabilities;
+            }
+            quiet.request("initialize", params.clone()).await?;
+            let quiet_id = quiet
+                .send_request(
+                    "session/new",
+                    serde_json::json!({ "cwd": cwd, "mcpServers": ignored }),
+                )
+                .await?;
+            let quiet_response = quiet.wait_for_response(quiet_id).await?;
+            assert!(
+                quiet_response["result"]["sessionId"].is_string(),
+                "an ignored array still creates the session: {quiet_response}"
+            );
+            let after = drain_for(&mut quiet, Duration::from_millis(300)).await?;
+            let buffered = quiet.take_notifications();
+            let updates: Vec<&serde_json::Value> = after.iter().chain(buffered.iter()).collect();
+            assert!(
+                !updates.iter().any(|message| is_notice(message)),
+                "no notice without the client capability {params}: {updates:#?}"
+            );
+            assert!(
+                !updates.iter().any(|message| {
+                    message["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+                }),
+                "no message update stands in for the notice {params}: {updates:#?}"
+            );
+            quiet.shutdown().await;
+        }
 
         acp.shutdown().await;
         Ok::<(), anyhow::Error>(())
