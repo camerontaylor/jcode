@@ -305,7 +305,6 @@ cache, mold, disabled compiler wrapper, `nice -n 10`, two jobs. No full suite.
 | `nice -n 10 cargo test -j 2 -p jcode-app-core agent::turn_ownership::tests --lib` | 3 passed |
 | `nice -n 10 cargo test -j 2 -p jcode-app-core server::client_session::tests --lib` | 44 passed |
 | `nice -n 10 cargo test -j 2 -p jcode-app-core tool::sdk::tests --lib` | 4 passed |
-
 | `nice -n 10 cargo test -j 2 -p jcode daemon_router::tests --lib` | 37 passed |
 | `nice -n 10 cargo test -j 2 -p jcode --test e2e acp_shared_session` | 1 passed, 7.21 seconds |
 
