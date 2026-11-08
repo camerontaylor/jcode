@@ -10,37 +10,13 @@ pub(super) fn reload_all(exe: &Path, reason: &str) {
             .enable_all()
             .build()?;
         let live = runtime.block_on(crate::server::live_daemon_sockets());
-        let mut found = false;
-        for socket in crate::server::daemon_socket_candidates() {
-            let owned_live = live.contains(&socket);
-            if !owned_live {
-                report(&format!(
-                    "update: {}: skipped (no responsive owned jcode server)",
-                    socket.display()
-                ));
-                continue;
-            }
-            found = true;
-            match reload_command(&exe, &socket).output() {
-                Ok(output) if output.status.success() => {
-                    report(&format!(
-                        "update: {} after {}: {}",
-                        socket.display(),
-                        reason,
-                        String::from_utf8_lossy(&output.stdout).trim()
-                    ));
-                }
-                Ok(output) => report(&format!(
-                    "update: {}: failed: {}",
-                    socket.display(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )),
-                Err(error) => report(&format!("update: {}: failed: {error}", socket.display())),
-            }
-        }
-        if !found {
-            report(NO_DAEMONS);
-        }
+        reload_candidates(
+            crate::server::daemon_socket_candidates(),
+            &live,
+            |socket| reload_command(&exe, socket).output(),
+            &reason,
+            report,
+        );
         Ok(())
     })
     .join();
@@ -48,6 +24,46 @@ pub(super) fn reload_all(exe: &Path, reason: &str) {
         Ok(Ok(())) => {}
         Ok(Err(error)) => report(&format!("update: daemon discovery failed: {error}")),
         Err(_) => report("update: daemon discovery thread failed"),
+    }
+}
+
+fn reload_candidates(
+    sockets: Vec<std::path::PathBuf>,
+    live: &[std::path::PathBuf],
+    mut run: impl FnMut(&Path) -> std::io::Result<std::process::Output>,
+    reason: &str,
+    mut report: impl FnMut(&str),
+) {
+    let mut found = false;
+    for socket in sockets {
+        let owned_live = live.contains(&socket);
+        if !owned_live {
+            report(&format!(
+                "update: {}: skipped (no responsive owned jcode server)",
+                socket.display()
+            ));
+            continue;
+        }
+        found = true;
+        match run(&socket) {
+            Ok(output) if output.status.success() => {
+                report(&format!(
+                    "update: {} after {}: {}",
+                    socket.display(),
+                    reason,
+                    String::from_utf8_lossy(&output.stdout).trim()
+                ));
+            }
+            Ok(output) => report(&format!(
+                "update: {}: failed: {}",
+                socket.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(error) => report(&format!("update: {}: failed: {error}", socket.display())),
+        }
+    }
+    if !found {
+        report(NO_DAEMONS);
     }
 }
 
@@ -88,6 +104,36 @@ mod tests {
                 "--force"
             ]
         );
+    }
+
+    #[test]
+    fn fallback_target_reaches_runner_and_empty_discovery_reports_nothing() {
+        let current = std::path::PathBuf::from("/test/current.sock");
+        let fallback = std::path::PathBuf::from("/test/fallback.sock");
+        let mut called = Vec::new();
+        let mut messages = Vec::new();
+        reload_candidates(
+            vec![current.clone(), fallback.clone()],
+            std::slice::from_ref(&fallback),
+            |path| {
+                called.push(path.to_path_buf());
+                Err(std::io::Error::other("injected"))
+            },
+            "test",
+            |message| messages.push(message.to_owned()),
+        );
+        assert_eq!(called, vec![fallback]);
+        assert!(messages[0].contains("skipped"));
+        assert!(messages[1].contains("failed"));
+        messages.clear();
+        reload_candidates(
+            vec![current],
+            &[],
+            |_| panic!("must never start a daemon"),
+            "test",
+            |message| messages.push(message.to_owned()),
+        );
+        assert_eq!(messages.last().unwrap(), NO_DAEMONS);
     }
 
     #[test]

@@ -74,3 +74,36 @@ async fn fallback_daemon_answers_when_current_socket_is_elsewhere() {
     assert!(is_live_daemon(&socket).await);
     responder.await.unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn candidates_dedupe_symlinked_parents_and_keep_explicit_override() {
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real");
+    let alias = temp.path().join("alias");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let custom = temp.path().join("custom.sock");
+    let paths = candidates(
+        real.join("jcode.sock"),
+        |key| match key {
+            "XDG_RUNTIME_DIR" => Some(alias.clone()),
+            "JCODE_SOCKET" => Some(custom.clone()),
+            _ => None,
+        },
+        temp.path().to_path_buf(),
+    );
+    assert!(!paths.contains(&alias.join("jcode.sock")));
+    assert!(paths.contains(&custom));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn candidates_include_macos_tmpdir_default() {
+    let paths = candidates(
+        PathBuf::from("/current.sock"),
+        |key| (key == "TMPDIR").then(|| PathBuf::from("/macos-temp")),
+        PathBuf::from("/other-temp"),
+    );
+    assert!(paths.contains(&PathBuf::from("/macos-temp/jcode.sock")));
+}
