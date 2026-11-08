@@ -383,8 +383,8 @@ impl AcpRuntime {
         // A steering daemon injects a second prompt into the running turn, so
         // prompts may overlap. Slash commands and legacy daemons still take
         // the session one prompt at a time.
-        let concurrent =
-            session.router.lock().await.steering() && parse_acp_slash_command(&text).is_none();
+        let concurrent = session.router.lock().await.steering()
+            && selected_slash_command(&text, &selection).is_none();
         if !session.try_begin_prompt(concurrent) {
             self.write_error_value(
                 id,

@@ -18,7 +18,7 @@ impl AcpRuntime {
         }
 
         let mut subagent = None;
-        if let Some(command) = parse_acp_slash_command(&text) {
+        if let Some(command) = selected_slash_command(&text, &selection) {
             if let Ok(AcpSlashCommand::Subagent(spec)) = command {
                 // A subagent launch is a streamed tool call, so it runs through
                 // the prompt event loop below instead of returning one message.

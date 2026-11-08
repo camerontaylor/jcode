@@ -684,3 +684,16 @@ fn context_limit_falls_back_to_default_for_unknown_models() {
 }
 
 // ACP shared sessions: peer gate, usage, close and message ids.
+
+#[test]
+fn explicit_skill_keeps_slash_commands_as_prompt_text() {
+    let (_dir, skills) = project_skills(&["x"]);
+    let selection = SkillSelection::Select("x".into());
+    assert!(selected_slash_command("/model foo", &selection).is_none());
+    let plan = plan_prompt_skill(&selection, None, &skills, "/model foo".into(), false).unwrap();
+    assert_eq!(plan.text, "/model foo");
+    assert_eq!(plan.skill.as_deref(), Some("x"));
+    for selection in [SkillSelection::Clear, SkillSelection::Unchanged] {
+        assert!(selected_slash_command("/model foo", &selection).is_some());
+    }
+}

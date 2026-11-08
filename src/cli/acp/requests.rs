@@ -572,6 +572,17 @@ pub(super) fn split_flag_value<'a>(flag: &str, after: &'a str) -> Result<(String
     Ok((value.to_string(), rest.trim_start()))
 }
 
+pub(super) fn selected_slash_command(
+    text: &str,
+    selection: &SkillSelection,
+) -> Option<Result<AcpSlashCommand>> {
+    if matches!(selection, SkillSelection::Select(_)) {
+        None
+    } else {
+        parse_acp_slash_command(text)
+    }
+}
+
 pub(super) fn parse_acp_slash_command(text: &str) -> Option<Result<AcpSlashCommand>> {
     // A leading space is the ACP client convention for escaping slash command
     // interpretation and sending the text to the model literally.
