@@ -493,22 +493,6 @@ pub(super) async fn cancel_processing_message_for_turn(
         },
         None => event,
     };
-    let signal_target = |notify_interrupted: bool| match &observer {
-        Some(observer) => identity.as_ref().and_then(|identity| {
-            observer
-                .cancel_active(Some(identity), || {
-                    // Retirement uses this same lock before publishing a terminal.
-                    // Queue Interrupted synchronously before firing and releasing
-                    // the lock, so it precedes Done even on cooperative completion.
-                    if notify_interrupted {
-                        let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
-                    }
-                    session_control.request_cancel()
-                })
-                .map(|(_, epoch)| epoch)
-        }),
-        None => Some(session_control.request_cancel()),
-    };
     let cancel_start = Instant::now();
     let session_label = state
         .session_id
@@ -542,6 +526,42 @@ pub(super) async fn cancel_processing_message_for_turn(
         state.task.is_some(),
         request_decoded_at.map(|instant| instant.elapsed().as_millis())
     ));
+    // Acquire the async fanout registry before taking the task or state lock.
+    // Validation below may reject the captured turn after this await.
+    let stopped_targets =
+        super::super::state::session_event_targets(swarm.members, &session_label).await;
+    let stopped = scoped(ServerEvent::TurnStopped {
+        reason: crate::protocol::TurnStopReason::Interrupted,
+        message: "The turn was interrupted by a cancellation request.".into(),
+        provider_stop_reason: None,
+    });
+    let signal_target = |notify_interrupted: bool| {
+        let effect = || {
+            // Retirement takes this same turn-state lock before publishing a
+            // terminal. All notification sends are synchronous and complete
+            // before signalling and unlocking; the terminal cannot overtake them.
+            super::super::live_status::observe(&session_label, &stopped);
+            let delivered = stopped_targets
+                .iter()
+                .filter(|sender| sender.send(stopped.clone()).is_ok())
+                .count();
+            if delivered == 0 {
+                let _ = client_event_tx.send(stopped.clone());
+            }
+            if notify_interrupted {
+                let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
+            }
+            session_control.request_cancel()
+        };
+        match &observer {
+            Some(observer) => identity.as_ref().and_then(|identity| {
+                observer
+                    .cancel_active(Some(identity), effect)
+                    .map(|(_, epoch)| epoch)
+            }),
+            None => Some(effect()),
+        }
+    };
     if let Some(mut handle) = state.task.take() {
         if handle.is_finished() {
             crate::logging::info(&format!(
@@ -554,25 +574,13 @@ pub(super) async fn cancel_processing_message_for_turn(
             *state.task = Some(handle);
             return;
         }
-        let stopped = ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::Interrupted,
-            message: "The turn was interrupted by a cancellation request.".into(),
-            provider_stop_reason: None,
-        };
-        // Publish before signalling: the worker can finish cooperatively and
-        // emit Done immediately after request_cancel. Scope it to the active
-        // turn so identity-aware attachments accept it; legacy transports
-        // unwrap the envelope.
-        let stopped = scoped(stopped);
-        if super::super::state::fanout_session_event(swarm.members, &session_label, stopped.clone())
-            .await
-            == 0
-        {
-            let _ = client_event_tx.send(stopped);
-        }
         let cancel_epoch = match signal_target(sessions.is_some()) {
             Some(epoch) => epoch,
-            None => return,
+            None => {
+                // Reconciliation still owns this task and its completion id.
+                *state.task = Some(handle);
+                return;
+            }
         };
         crate::logging::info(&format!(
             "SERVER_INTERRUPT_CANCEL_SIGNALLED request_id={:?} session={} message_id={:?} wait_ms=500",
@@ -662,7 +670,9 @@ pub(super) async fn cancel_processing_message_for_turn(
         // immediately, with no reply and no error. Report the interrupt and
         // stop. Sessions whose turn is owned by another connection still take
         // the signalling path, since the registry sees those turns.
-        if !crate::turn_cancel_registry::has_active_turn(&session_control.session_id) {
+        if observer.is_none()
+            && !crate::turn_cancel_registry::has_active_turn(&session_control.session_id)
+        {
             crate::logging::info(&format!(
                 "SERVER_INTERRUPT_CANCEL_IDLE_NOOP request_id={:?} session={}",
                 request_id, session_label
@@ -673,22 +683,6 @@ pub(super) async fn cancel_processing_message_for_turn(
                 let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
             }
             return;
-        }
-        let stopped = ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::Interrupted,
-            message: "The turn was interrupted by a cancellation request.".into(),
-            provider_stop_reason: None,
-        };
-        // Publish before signalling: the worker can finish cooperatively and
-        // emit Done immediately after request_cancel. Scope it to the active
-        // turn so identity-aware attachments accept it; legacy transports
-        // unwrap the envelope.
-        let stopped = scoped(stopped);
-        if super::super::state::fanout_session_event(swarm.members, &session_label, stopped.clone())
-            .await
-            == 0
-        {
-            let _ = client_event_tx.send(stopped);
         }
         let cancel_epoch = match signal_target(false) {
             Some(epoch) => epoch,
