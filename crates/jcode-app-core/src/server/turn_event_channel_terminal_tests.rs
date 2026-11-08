@@ -488,3 +488,54 @@ async fn assert_completed_turn_survives_late_stop(check_handle_first: bool) {
     assert!(state.session_id.is_none());
     drop(successor);
 }
+
+#[tokio::test]
+async fn peer_cancel_stays_armed_until_turn_retirement() {
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let harness =
+        TurnHarness::new("peer_cancel_persistent", 1, Arc::new(HangingStreamProvider)).await;
+    let guard = harness.agent.lock().await;
+    let lease = guard.claim_server_turn().unwrap();
+    let signal = guard.graceful_shutdown_signal();
+    let control = SessionControlHandle::cancel_only(
+        harness.session_id.clone(),
+        guard.soft_interrupt_queue(),
+        signal.clone(),
+    );
+    drop(guard);
+    let mut processing = false;
+    let mut message = None;
+    let mut session = None;
+    let mut task = None;
+    super::client_processing::cancel_processing_message_for_turn(
+        &mut ProcessingState {
+            client_is_processing: &mut processing,
+            message_id: &mut message,
+            session_id: &mut session,
+            task: &mut task,
+        },
+        &control,
+        &harness.senders[0],
+        &harness.swarm(),
+        Some(2),
+        None,
+        Some(&harness.sessions),
+        Some(lease.identity()),
+    )
+    .await;
+    // Bash handoff can wait 750 ms after observing shutdown. The old peer
+    // cancel timer cleared this same signal at 500 ms, turning Stop into Bg.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        signal.is_set(),
+        "a still-active turn must retain its Stop signal"
+    );
+    drop(lease);
+    let successor = harness.agent.lock().await.claim_server_turn().unwrap();
+    assert!(
+        !signal.is_set(),
+        "turn claim must clear earlier cancellation"
+    );
+    drop(successor);
+}
