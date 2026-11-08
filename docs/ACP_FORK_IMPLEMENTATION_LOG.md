@@ -65,7 +65,7 @@ observe it, plus a wire-level test:
 | P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | accepted; merged into stage `b1d801910`, compile verification assigned to `436bb2af` | `d94ec61af`: reasoning -> `agent_thought_chunk`; todo -> session `plan` via `GetTodos` snapshot; tool `name`, `locations` (read/edit/write), `diff` on edit/write; apply_patch paths/diffs and plan-on-load skipped (no structured data) |
 | P3-corpus | 3 | record scenarios 05 close owner-aware, 07 config/commands, 08 negotiation/legacy; branch `fork/acp-corpus-v1` off stage `76045f863` | Sol `e66fe5f0` (triton, `acp-corpus-v1`) | accepted (05/07/08 recorded; `25604eeaa`, `5dcce24f8`, `adfe0f4c7`); gap fixed `9bf7aaf25` (accepted) | conformance 20 pass + 1 ignored gap; shared 4; ACP unit 71; 5x replays each |
 | P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | done; in stage | `57bc78ce9`: budgets green, no ceiling raised; `ServerEvent::scoped` constructor; acp.rs 4182 -> 940; new modules transport/session/presentation/requests/prompt all < 1200; test names 71/45 unchanged; 123 ACP unit + 17 conformance + 4 shared pass |
-| R2-fix | 3 | queued review #2 fixes (F1 F2 F3 F6 F7); branch `fork/acp-review2-fixes` off stage `76045f863` | Sol `aa00969c` (triton, `acp-review2-fixes`) | running | |
+| R2-fix | 3 | queued review #2 fixes (F1 F2 F3 F6 F7); branch `fork/acp-review2-fixes` off stage `76045f863` | Sol `aa00969c` (triton, `acp-review2-fixes`) | accepted; merged into `fork/acp-stage-next` `e87becb75` | F1 `9f5c97299`, F2 `8ae2d0834`, F3 `af56fa992`, F6 `82965e1f0`, F7 `415e31f2c`; 126 ACP unit + 17 conformance + 4 shared pass |
 
 Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 
@@ -408,4 +408,19 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   - no fixture changed
   - the router regression test fails without the fix and passes with it
   - CI run 42463671628 is pending
+
+### 2026-11-08 — review #2 fixes accepted; stage-next integration
+
+- **F7:** prompt admission (`register_open_prompt`) and the daemon send now run under the router lock, the same lock `close_view`/`detach_view` take.
+  - A late prompt either registers before closure and is withdrawn, or settles `cancelled` without sending.
+  - The lock order is always router then writer; `session.send` takes only the writer lock, and sink actions are applied after the router lock is dropped.
+  - Regression `late_prompt_registration_after_detach_or_close_is_rejected`.
+- **Regressions:** F3 `closed_views_drop_todo_snapshots_and_refreshes`; F6 `explicit_skill_keeps_slash_commands_as_prompt_text`. Each failed with its guard removed.
+- **Integration branch:**
+  - Fork CI has `cancel-in-progress` per ref, and pushing `fork/acp-stage` would cancel the candidate run 42461964356. Integration therefore goes on `fork/acp-stage-next`: `76045f863` + `fork/acp-corpus-v1` (`9bf7aaf25`) + `fork/acp-review2-fixes` (`7c542190d`) = `e87becb75`.
+  - Both merges were clean. fmt-check, module and size budgets pass locally.
+  - CI run 42463885362.
+- **Plan:**
+  1. Fast-forward `custom` to `76045f863` on green 42461964356.
+  2. Then fast-forward `fork/acp-stage` and `custom` to `e87becb75` on green 42463885362.
 
