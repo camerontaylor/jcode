@@ -55,11 +55,11 @@ observe it, plus a wire-level test:
 | P0-record | 0 | first green run on `custom` recorded here | orchestrator | blocked on P0-ci | |
 | P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek `5365c86a` (atlas, `acp-p1-meta`) | running | |
 | P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | running | |
-| T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | running | |
+| T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | reviewed; follow-up (comparator collapse case, README trim) sent | `4df380b88`: 5 pass + 2 ignored contract gaps, 5/5 stable runs on triton |
 | P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs` | Sol | not started (after P1-race) | |
 | P2-R2 | 2 | catalog facade in `jcode-harness-api-server` | DeepSeek | not started | |
 | P3-corr | 3 | turn correlation `_meta.jcode.turnId` + `role` on prompt responses | Sol | not started | |
-| P3-detach | 3 | `_jcode/detach` | Sol | not started | |
+| P3-detach | 3 | `_jcode/detach`; also v1 observer close must end an open peer bracket with `canceled` (T-conf gap `acp_conformance_observer_close_bracket_contract`) | Sol | not started | |
 | P3-skill | 3 | `skill: null` clear | DeepSeek | not started | |
 | P3-mcp | 3 | ignored `mcpServers` notice | DeepSeek | not started | |
 | P3-map | 3 | reasoning/plans/tool metadata mappings | DeepSeek | not started | |
@@ -82,3 +82,14 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   contradictions `#[ignore = "contract gap: …"]` rather than changing code.
   Integration order once reviewed: P0-ci → P1-race → P1-meta → T-conf
   (re-record corpus after P1-meta, since metadata changes the wire).
+- 2026-11-08: T-conf finished (`d26d278a4`, `4df380b88`). Review: comparator
+  normalises opaque keys with a shared first-seen map (catches splits,
+  reorder, content drift); shared scenario gated on debug-socket queue
+  admission, no sleeps. Gaps found and pinned as ignored tests:
+  (a) capability metadata absent -> closes with P1-meta, un-ignore then;
+  (b) v1 observer `session/close` emits no `canceled` terminal for the open
+  peer bracket -> assigned to P3-detach (shared settle path). Integration
+  note: P1-meta changes the initialize wire, so re-record
+  `01-create-list-load-v1.jsonl` in the P1-meta integration commit.
+  Side effect: the worker installed `pkg-config libssl-dev` on triton via
+  `sudo apt-get` to build.
