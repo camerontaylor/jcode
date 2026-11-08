@@ -50,16 +50,16 @@ observe it, plus a wire-level test:
 | Id | Phase | Lane / branch | Worker | Status | Evidence |
 | --- | --- | --- | --- | --- | --- |
 | P0-docs | 0 | planning docs on `custom` | n/a | done | `docs/ACP_FORK_*`, `docs/acp-pins/` present at `a047a0c07` |
-| P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek `9a617f29` (atlas, `acp-p0-ci`) | running | |
+| P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek `9a617f29` (atlas, `acp-p0-ci`) | changes requested | revert `ee4f9f6a7` (reformatted 6 upstream-only files); port `fmt-check.sh` into `scripts/fork/`; keep `a47408ec1` |
 | P0-budget | 0 | same branch: fork budget baseline files + script flag | DeepSeek `9a617f29` | running | |
 | P0-record | 0 | first green run on `custom` recorded here | orchestrator | blocked on P0-ci | |
 | P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek `5365c86a` (atlas, `acp-p1-meta`) | accepted, awaiting integration | `d335f2e7d`: 5 unit + 1 e2e wire test pass; sharedControl derived from daemon Pong caps (`SharedControlSupport::from_router`) |
-| P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | review: changes requested | `69d85b2a4`; D1 `26ff594f2` on pr/turn-scoped-cancel, D2 `86db359cf` on pr/stale-cancel-flag; evidence `docs/verification/p1-cancel-race.md` |
+| P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | accepted, awaiting integration | `26c296a09` (review fixes: Interrupted queued inside locked revalidation, failing-first test `db810004f`); D1 `26ff594f2` on pr/turn-scoped-cancel, D2 `86db359cf` on pr/stale-cancel-flag; evidence `docs/verification/p1-cancel-race.md` |
 | T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | accepted, awaiting integration (after P0-ci green) | `4759e51b3`: 5 pass + 2 ignored contract gaps; 5/5 stable runs on triton |
 | P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs` | Sol | not started (after P1-race) | |
 | P2-R2 | 2 | catalog facade in `jcode-harness-api-server`; branch `fork/r2-catalog-facade` off `fork/acp-conformance` | DeepSeek `1334bb53` (triton, `acp-r2-catalog`) | running | |
-| P3-corr | 3 | turn correlation `_meta.jcode.turnId` + `role` on prompt responses | Sol | not started | |
-| P3-detach | 3 | `_jcode/detach`; also v1 observer close must end an open peer bracket with `canceled` (T-conf gap `acp_conformance_observer_close_bracket_contract`) | Sol | not started | |
+| P3-corr | 3 | turn correlation `_meta.jcode.turnId` + `role`; branch `fork/acp-turn-correlation-detach` off `fork/acp-stage` | Sol `05e7eb9f` (triton, `acp-p3-corr-detach`) | running | |
+| P3-detach | 3 | `_jcode/detach`; also v1 observer close must end an open peer bracket with `canceled` (T-conf gap `acp_conformance_observer_close_bracket_contract`); same lane as P3-corr | Sol `05e7eb9f` | running | |
 | P3-skill | 3 | `skill: null` clear + `skill_selection` ext; branch `fork/acp-skill-clear-mcp-notice` off `fork/acp-capability-metadata` | DeepSeek `8e023355` (triton, `acp-p3-skill-mcp`) | running | |
 | P3-mcp | 3 | ignored `mcpServers` notice (same branch/agent as P3-skill) | DeepSeek `8e023355` | running | |
 | P3-map | 3 | reasoning/plans/tool metadata mappings | DeepSeek | not started | |
@@ -114,3 +114,15 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   a turn that completes naturally in the gap is mislabelled as stopped; fix +
   failing-first test; (2) rustfmt violations; (3) Drop-side-effect idiom and
   thread-local seam note.
+- 2026-11-08: P1-race accepted at `26c296a09`. P0-ci review: `ee4f9f6a7`
+  reformatted six files with zero fork diff (would become permanent
+  carries); asked for a revert and a scoped fmt check in-repo
+  (`scripts/fork/fmt-check.sh`, base in a workflow env). `a47408ec1`
+  (`cloud_managed_tests` Path import, clippy failure at base) kept as an
+  upstreamable one-line carry.
+- 2026-11-08: Created `fork/acp-stage` = custom + p1-cancel-race +
+  acp-capability-metadata + acp-conformance (`2830da176`, textual merge
+  clean, uncompiled). It is the candidate integration for `custom` once P0
+  is green. P3-corr+detach (Sol, triton) branches from it; its step 0
+  reconciles the stage (compile, un-ignore metadata contract test,
+  re-record fixture 01).
