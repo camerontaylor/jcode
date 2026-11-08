@@ -525,6 +525,7 @@ struct TurnEventDrain {
     cancel: crate::agent::CancelProbe,
     terminal_id: u64,
     ended: bool,
+    terminal_published: bool,
 }
 
 impl TurnEventDrain {
@@ -537,6 +538,12 @@ impl TurnEventDrain {
     /// Forward one producer event in the turn's scope. The first terminal is
     /// preceded by `turn_ended`.
     async fn forward(&mut self, event: ServerEvent) {
+        if is_turn_terminal(&event) {
+            if self.terminal_published {
+                return;
+            }
+            self.terminal_published = true;
+        }
         if !self.ended && is_turn_terminal(&event) {
             let (status, message) = match &event {
                 ServerEvent::Error { message, .. } => (
@@ -642,6 +649,7 @@ impl TurnEventChannel {
             cancel: lease.cancel_probe(),
             terminal_id,
             ended: false,
+            terminal_published: false,
         };
         let task = tokio::spawn(async move {
             drain

@@ -630,15 +630,13 @@ pub(super) async fn cancel_processing_message_for_turn(
             .await;
         }
         if let Some(message_id) = state.message_id.take() {
-            let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
-            let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
-            crate::logging::info(&format!(
-                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
-                request_id,
-                session_label,
-                message_id,
-                cancel_start.elapsed().as_millis()
-            ));
+            // Real producers own an ordered TurnEventChannel, including after
+            // abort. A direct terminal here duplicates (or overtakes) its drain.
+            // Keep the fallback for callers without a runtime publication channel.
+            if sessions.is_none() {
+                let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
+                let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
+            }
         }
     } else {
         crate::logging::warn(&format!(
