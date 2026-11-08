@@ -165,8 +165,9 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   reach agents on other hosts (no serverId); answer remote questions via
   `send_agent_prompt` steer.
   Remote permission/question requests can also be answered on the agent's
-  host: `ssh <host> paseo permit allow <agentId> <reqId> --input '{"answers":{"0":"..."}}'`
-  (answer values are strings).
+  host: `ssh <host> paseo permit allow <agentId> <reqId> --input '{"answers":{"<header>":"..."}}'`
+  (answer values are strings). Key by the question's `header` (e.g. `"Question 1"`); for Codex
+  questions keyed `"0"` was rejected with "Answer Question 1 before submitting" (2026-11-09).
 - 2026-11-08: P3-corr+detach accepted at `104604e23`. Contract amended
   in-branch: correlation applies to successful results; `role: none` has
   `turnId: null`; busy keeps the JSON-RPC error.
@@ -603,3 +604,4 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   - E2E-fix (Sol `498cce41`, medium, full-access, atlas `wks_a35147bda358546d`, branch `fork/acp-e2e-defects`): localize Stop / reverse steer / duplicate at the ACP wire (jcode vs Paseo), fix jcode-side with router regression tests; Paseo-side causes documented for a Paseo lane.
 - 2026-11-09: REL-reexec delivered `1b7209d87` (CI 42523842597 green): hidden `update-post-install [--probe]`; probe exits 73 = supported, clap exit 2 / spawn failure = fall back to in-process `reload_all`; once the reload child starts, no fallback (no double reload); `JCODE_POST_INSTALL_REEXEC` recursion marker; bounded waits (10 s probe, 120 s reload). Sent back: (1) revert formatting churn in upstream-owned `args.rs`/`dispatch.rs`; (2) skip the `unshare -Urnm` integration test when namespaces are unavailable; (3) Fork CI never runs root-crate unit tests or `tests/*` (only `--lib --bins --no-run`), so add a targeted step running `update_post_install`/`update_reload` bin tests and `--test update_post_install`.
   - REL-cache test run 42523722074: native ubuntu-24.04 Linux x86_64 and aarch64 builds green; macOS + manual compat still running.
+- 2026-11-09: REL-reexec worker asked: pure-additions `args.rs` exceeds code-size budget 1298 -> 1306; answered: raise that one file entry only, no blanket update.
