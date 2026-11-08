@@ -345,6 +345,11 @@ pub(super) enum RouteAction {
         turn_id: String,
     },
     SessionState(SessionStateChange),
+    /// The daemon's structured todo snapshot, rendered as a full-replacement
+    /// `plan` update. A plan is session state, so this is not turn-scoped.
+    Plan {
+        payload: String,
+    },
     /// Send this request to the daemon.
     Send(Request),
     /// Call [`RouterState::wake`] with `token` once `after` has passed.
@@ -872,9 +877,34 @@ impl RouterState {
     /// registered channels; the returned actions are what the adapter must
     /// render for other clients' activity.
     pub(super) fn route(&mut self, event: ServerEvent) -> Vec<RouteAction> {
-        if !self.turn_origin {
-            return self.route_legacy(event);
+        // A todo snapshot is session state, not turn output: the daemon writes
+        // the reply on the connection's event channel, which can drain after
+        // the turn that produced it ended. Render it whenever it arrives.
+        if let ServerEvent::Todos { payload, .. } = event {
+            return vec![RouteAction::Plan { payload }];
         }
+        // A completed todo write invalidates the session's plan snapshot. The
+        // todo tool's own output is a rendered card, so the adapter asks the
+        // daemon for the structured list instead of parsing it.
+        let refresh_plan = matches!(
+            inner_event(&event),
+            ServerEvent::ToolDone { name, .. } if is_todo_tool(name)
+        );
+        let mut actions = if !self.turn_origin {
+            self.route_legacy(event)
+        } else {
+            self.route_attributed(event)
+        };
+        if refresh_plan {
+            actions.push(RouteAction::Send(Request::GetTodos {
+                id: self.next_request_id(),
+            }));
+        }
+        actions
+    }
+
+    /// Route one event on a daemon that advertises turn identity.
+    fn route_attributed(&mut self, event: ServerEvent) -> Vec<RouteAction> {
         match event {
             ServerEvent::TurnState {
                 session_id,
@@ -1550,6 +1580,15 @@ fn flatten_scope(mut event: ServerEvent) -> Option<ServerEvent> {
             event => return Some(event),
         };
     }
+}
+
+/// The innermost event of a (possibly nested) turn envelope, by reference, so
+/// the caller can inspect an event it is about to route.
+fn inner_event(mut event: &ServerEvent) -> &ServerEvent {
+    while let ServerEvent::TurnEvent { event: inner, .. } = event {
+        event = inner.as_ref();
+    }
+    event
 }
 
 /// How many trailing history messages are searched for the running turn's

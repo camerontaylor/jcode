@@ -556,6 +556,110 @@ fn event_mapper_emits_no_thought_chunk_without_daemon_reasoning() {
     );
 }
 
+fn todo_snapshot(todos: Value) -> String {
+    json!({"todos": todos, "plan": {}, "goals": []}).to_string()
+}
+
+#[test]
+fn plan_update_replaces_the_whole_plan_each_time() {
+    let mut last = None;
+    let first = plan_update(
+        &mut last,
+        &todo_snapshot(json!([
+            {"content": "Audit the adapter", "status": "completed", "priority": "high"},
+            {"content": "Map reasoning", "status": "in_progress", "priority": "medium"},
+            {"content": "Map plans", "status": "pending", "priority": "low"},
+        ])),
+    )
+    .expect("first plan");
+    assert_eq!(first["sessionUpdate"], "plan");
+    assert_eq!(
+        first["entries"],
+        json!([
+            {"content": "Audit the adapter", "priority": "high", "status": "completed"},
+            {"content": "Map reasoning", "priority": "medium", "status": "in_progress"},
+            {"content": "Map plans", "priority": "low", "status": "pending"},
+        ])
+    );
+    // Every update carries the whole list, never a delta of it.
+    let second = plan_update(
+        &mut last,
+        &todo_snapshot(json!([
+            {"content": "Map plans", "status": "in_progress", "priority": "low"},
+        ])),
+    )
+    .expect("replacement plan");
+    assert_eq!(
+        second["entries"],
+        json!([{"content": "Map plans", "priority": "low", "status": "in_progress"}])
+    );
+    // An unchanged snapshot is not re-sent as if it were a new plan.
+    assert!(
+        plan_update(
+            &mut last,
+            &todo_snapshot(json!([
+                {"content": "Map plans", "status": "in_progress", "priority": "low"},
+            ])),
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn plan_update_drops_cancelled_todos_and_defaults_required_fields() {
+    let update = plan_update(
+        &mut None,
+        &todo_snapshot(json!([
+            {"content": "cancelled work", "status": "cancelled", "priority": "high"},
+            {"content": "unknown status", "status": "blocked", "priority": "urgent"},
+            {"content": "no status", "priority": ""},
+        ])),
+    )
+    .expect("plan update");
+    // ACP has no cancelled state, so cancelled work is not part of the plan;
+    // the required priority and status default instead of being guessed.
+    assert_eq!(
+        update["entries"],
+        json!([
+            {"content": "unknown status", "priority": "medium", "status": "pending"},
+            {"content": "no status", "priority": "medium", "status": "pending"},
+        ])
+    );
+}
+
+#[test]
+fn plan_update_reports_an_emptied_list_as_a_replacement() {
+    let mut last = None;
+    plan_update(
+        &mut last,
+        &todo_snapshot(json!([
+            {"content": "one", "status": "pending", "priority": "high"},
+        ])),
+    )
+    .expect("plan update");
+    let cleared = plan_update(&mut last, &todo_snapshot(json!([]))).expect("cleared plan");
+    assert_eq!(cleared["sessionUpdate"], "plan");
+    assert_eq!(cleared["entries"], json!([]));
+}
+
+#[test]
+fn plan_update_ignores_a_payload_that_is_not_a_todo_snapshot() {
+    // Absence is legitimate: a malformed or unrelated payload yields an empty
+    // plan, never entries invented from text.
+    let update = plan_update(&mut None, "not json").expect("empty plan");
+    assert_eq!(update["entries"], json!([]));
+}
+
+#[test]
+fn todo_tool_names_are_the_daemons_canonical_name_and_aliases() {
+    for name in ["todo", "todo_read", "todo_write", "todoread", "todowrite"] {
+        assert!(is_todo_tool(name), "{name}");
+    }
+    for name in ["read", "bash", "todos", "todo_list"] {
+        assert!(!is_todo_tool(name), "{name}");
+    }
+}
+
 #[test]
 fn non_empty_mcp_servers_are_tolerated_until_session_scoped_mcp_is_supported() {
     let params = json!({"mcpServers": [{"name": "fs"}]});
@@ -775,6 +879,7 @@ fn config_options_include_model_selector_and_effort_ladder() {
         available_models: vec!["gpt-5.2".to_string(), "gpt-5.2-codex".to_string()],
         reasoning_effort: Some("high".to_string()),
         available_reasoning_efforts: None,
+        last_plan: None,
     };
     let options = session_config_options(&state);
     assert_eq!(options.len(), 2);
@@ -811,6 +916,7 @@ fn config_options_current_model_prepended_when_not_listed() {
         available_models: vec!["claude-sonnet-4-5".to_string()],
         reasoning_effort: None,
         available_reasoning_efforts: None,
+        last_plan: None,
     };
     let options = session_config_options(&state);
     let model_values: Vec<&str> = options[0]["options"]
@@ -831,6 +937,7 @@ fn legacy_models_catalog_is_emitted_alongside_config_options() {
         available_models: vec!["deepseek-v4-pro".to_string()],
         reasoning_effort: Some("high".to_string()),
         available_reasoning_efforts: None,
+        last_plan: None,
     };
     let mut result = json!({"sessionId": "s1"});
     insert_session_configuration(&mut result, &state);
@@ -860,6 +967,7 @@ fn context_limit_falls_back_to_default_for_unknown_models() {
         available_models: Vec::new(),
         reasoning_effort: None,
         available_reasoning_efforts: None,
+        last_plan: None,
     };
     assert_eq!(
         state.context_limit(),
@@ -914,6 +1022,7 @@ fn action_label(action: &RouteAction) -> String {
         RouteAction::PeerTurnEnded { turn_id, .. } => format!("ended {turn_id}"),
         RouteAction::PeerPromptReplayed { turn_id } => format!("replayed {turn_id}"),
         RouteAction::SessionState(change) => format!("state {change:?}"),
+        RouteAction::Plan { .. } => "plan".to_string(),
         RouteAction::PeerSteer { turn_id, index, .. } => format!("steer {turn_id} {index}"),
         RouteAction::PeerTurnAdopted { turn_id } => format!("adopted {turn_id}"),
         RouteAction::Send(request) => format!("send {request:?}"),
@@ -1076,6 +1185,7 @@ fn usage_updates_carry_the_session_context_gauge() {
         available_models: Vec::new(),
         reasoning_effort: None,
         available_reasoning_efforts: None,
+        last_plan: None,
     };
     let payload = usage_update_payload("session-1", &state, 1_000, Some(4_000), None);
     assert_eq!(payload["sessionId"], "session-1");

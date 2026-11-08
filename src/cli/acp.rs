@@ -316,6 +316,9 @@ struct SessionUiState {
     available_models: Vec<String>,
     reasoning_effort: Option<String>,
     available_reasoning_efforts: Option<Vec<String>>,
+    /// The plan entries this connection last sent. A plan is session state, so
+    /// the dedup lives here rather than in a per-turn mapper.
+    last_plan: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Default)]
@@ -429,6 +432,7 @@ impl SessionUiState {
             available_models,
             reasoning_effort,
             available_reasoning_efforts,
+            last_plan: None,
         }
     }
 
@@ -2094,6 +2098,19 @@ impl AcpRuntime {
                 crate::logging::debug(&format!("acp: prompt adopted peer turn {turn_id}"));
                 *peer_mapper.lock().await = None;
             }
+            RouteAction::Plan { payload } => {
+                let update = {
+                    let mut state = ui_state.lock().await;
+                    plan_update(&mut state.last_plan, &payload)
+                };
+                if let Some(update) = update {
+                    self.write_notification(
+                        "session/update",
+                        json!({ "sessionId": session_id, "update": update }),
+                    )
+                    .await?;
+                }
+            }
             // Executed by `RouteSink::apply`, never rendered.
             RouteAction::Send(_) | RouteAction::Wake { .. } => {}
             RouteAction::SessionState(change) => {
@@ -2832,6 +2849,76 @@ fn parse_json_object(input: &str) -> Option<Value> {
     let value: Value = serde_json::from_str(input).ok()?;
     value.as_object()?;
     Some(value)
+}
+
+/// The tools whose writes change the session plan. Aliases match the daemon's
+/// own name resolution (`todo_read`/`todo_write`/`todoread`/`todowrite`).
+fn is_todo_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "todo" | "todo_read" | "todo_write" | "todoread" | "todowrite"
+    )
+}
+
+/// Structured input fields that name the file a tool call works on/// The `plan` update for a todo snapshot, or `None` when it repeats the plan
+/// this connection already sent.
+///
+/// A plan is session state, not turn output, so it is rendered whenever the
+/// daemon's snapshot arrives — including after the turn that wrote it ended.
+/// Each update carries the complete list, as v1 requires; an emptied list is a
+/// real replacement and is still sent.
+fn plan_update(last: &mut Option<Vec<Value>>, payload: &str) -> Option<Value> {
+    let entries = plan_entries(payload);
+    if last.as_ref() == Some(&entries) {
+        return None;
+    }
+    *last = Some(entries.clone());
+    Some(json!({
+        "sessionUpdate": "plan",
+        "entries": entries,
+    }))
+}
+
+/// ACP `plan` entries from the daemon's todo snapshot payload.
+///
+/// The payload is the structured todo card (`todos`, `plan`, `goals`); only the
+/// todo list is a plan. ACP requires every entry to carry a `high`/`medium`/
+/// `low` priority and a `pending`/`in_progress`/`completed` status, so jcode's
+/// free-form priority defaults to `medium` and an unrecognized status to
+/// `pending`. Cancelled todos are not plan entries: ACP has no cancelled state
+/// and cancelled work is not part of the plan.
+fn plan_entries(payload: &str) -> Vec<Value> {
+    let Ok(snapshot) = serde_json::from_str::<Value>(payload) else {
+        return Vec::new();
+    };
+    snapshot
+        .get("todos")
+        .and_then(Value::as_array)
+        .map(|todos| {
+            todos
+                .iter()
+                .filter_map(|todo| {
+                    let content = todo.get("content").and_then(Value::as_str)?;
+                    let status = match todo.get("status").and_then(Value::as_str) {
+                        Some("in_progress") => "in_progress",
+                        Some("completed") => "completed",
+                        Some("cancelled") => return None,
+                        _ => "pending",
+                    };
+                    let priority = match todo.get("priority").and_then(Value::as_str) {
+                        Some("high") => "high",
+                        Some("low") => "low",
+                        _ => "medium",
+                    };
+                    Some(json!({
+                        "content": content,
+                        "priority": priority,
+                        "status": status,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn compatibility_option_value(
