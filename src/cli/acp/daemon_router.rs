@@ -470,7 +470,8 @@ impl RouterState {
     }
 
     /// Whether any turn is open on this view.
-    fn turn_open(&self) -> bool {
+    /// Whether a turn this connection sees is running: our own, or a peer's.
+    pub(super) fn turn_open(&self) -> bool {
         self.own_turn.is_some() || self.peer_turn.is_some()
     }
 
