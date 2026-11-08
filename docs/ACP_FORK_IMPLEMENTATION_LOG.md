@@ -54,7 +54,7 @@ observe it, plus a wire-level test:
 | P0-budget | 0 | same branch: fork budget baseline files + script flag | DeepSeek `9a617f29` | running | |
 | P0-record | 0 | first green run on `custom` recorded here | orchestrator | blocked on P0-ci | |
 | P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek `5365c86a` (atlas, `acp-p1-meta`) | accepted, awaiting integration | `d335f2e7d`: 5 unit + 1 e2e wire test pass; sharedControl derived from daemon Pong caps (`SharedControlSupport::from_router`) |
-| P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | running | |
+| P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | review: changes requested | `69d85b2a4`; D1 `26ff594f2` on pr/turn-scoped-cancel, D2 `86db359cf` on pr/stale-cancel-flag; evidence `docs/verification/p1-cancel-race.md` |
 | T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | accepted, awaiting integration (after P0-ci green) | `4759e51b3`: 5 pass + 2 ignored contract gaps; 5/5 stable runs on triton |
 | P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs` | Sol | not started (after P1-race) | |
 | P2-R2 | 2 | catalog facade in `jcode-harness-api-server`; branch `fork/r2-catalog-facade` off `fork/acp-conformance` | DeepSeek `1334bb53` (triton, `acp-r2-catalog`) | running | |
@@ -104,3 +104,13 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   Wave 2 dispatched on triton: P2-R2 and P3-skill+mcp (DeepSeek). Holding
   P3-corr and P3-detach (Sol) until P1-race lands, since both touch turn
   identity and prompt settlement.
+- 2026-11-08: P1-race finished at `69d85b2a4`. D1: identity revalidation +
+  signal under the ownership state lock (`TurnObserver::cancel_active`); idle
+  snapshot never arms. D2: discard + epoch capture inside `claim_after`
+  before identity exposure. Terminal audit fixed duplicate producer terminals
+  and duplicate requester `Done` (drain is sole `Done` publisher). D3 left for
+  R1 (no per-variant capability). Extra: SDK callback ownership released on
+  resume. Review requested: (1) `Interrupted` is sent before revalidation, so
+  a turn that completes naturally in the gap is mislabelled as stopped; fix +
+  failing-first test; (2) rustfmt violations; (3) Drop-side-effect idiom and
+  thread-local seam note.
