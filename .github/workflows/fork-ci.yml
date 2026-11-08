@@ -368,6 +368,12 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu --test provider_matrix
 
+      - name: Run ACP adapter contract unit tests
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu -p jcode --lib cli::acp:: -- --nocapture
+
       - name: Run e2e tests
         shell: bash
         run: |

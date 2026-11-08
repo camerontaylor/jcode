@@ -969,15 +969,23 @@ mod known_defects;
 async fn wait_for_steer_admission(runtime: &std::path::Path) -> Result<()> {
     timeout(Duration::from_secs(10), async {
         loop {
-            let state = debug_run_command_json(runtime.join("debug.sock"), "server:memory", None).await?;
-            if state["interrupts"]["pending_interrupts"].as_u64().unwrap_or(0) > 0 {
+            let state =
+                debug_run_command_json(runtime.join("debug.sock"), "server:memory", None).await?;
+            if state["interrupts"]["pending_interrupts"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+            {
                 return Ok::<(), anyhow::Error>(());
             }
             tokio::task::yield_now().await;
         }
-    }).await?
+    })
+    .await?
 }
 
 mod seeded;
 
 mod tool_wait;
+
+mod clause_index;

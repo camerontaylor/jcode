@@ -66,3 +66,8 @@ the deferred v2 delivery track, not a missing v1 recording.
 - `09-midturn-attach-v1.jsonl`: observer attaches to a gated active turn;
   exactly one start/terminal pair preserves its identity. Replayed by the
   exhaustive 12-case interleaving test.
+
+- `10-reverse-steer-v1.jsonl`: actual raw-daemon SoftInterrupt into an
+  ACP-owned turn; peer user chunk and its message identity precede affected output.
+- `11-import-repeated-user-replay-v1.jsonl`: two deliberately equal stored
+  user rows imported and loaded twice; distinct IDs and grouping stay stable.
