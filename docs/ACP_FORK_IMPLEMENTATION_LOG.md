@@ -50,7 +50,7 @@ observe it, plus a wire-level test:
 | Id | Phase | Lane / branch | Worker | Status | Evidence |
 | --- | --- | --- | --- | --- | --- |
 | P0-docs | 0 | planning docs on `custom` | n/a | done | `docs/ACP_FORK_*`, `docs/acp-pins/` present at `a047a0c07` |
-| P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek `9a617f29` (atlas, `acp-p0-ci`) | changes requested | revert `ee4f9f6a7` (reformatted 6 upstream-only files); port `fmt-check.sh` into `scripts/fork/`; keep `a47408ec1` |
+| P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek `9a617f29` (atlas, `acp-p0-ci`) | Quality green; Build&Test red on stdin-forwarding (fork-caused, upstream passes) — diagnosing | revert `ee4f9f6a7` (reformatted 6 upstream-only files); port `fmt-check.sh` into `scripts/fork/`; keep `a47408ec1` |
 | P0-budget | 0 | same branch: fork budget baseline files + script flag | DeepSeek `9a617f29` | running | |
 | P0-record | 0 | first green run on `custom` recorded here | orchestrator | blocked on P0-ci | |
 | P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek `5365c86a` (atlas, `acp-p1-meta`) | accepted, awaiting integration | `d335f2e7d`: 5 unit + 1 e2e wire test pass; sharedControl derived from daemon Pong caps (`SharedControlSupport::from_router`) |
@@ -63,7 +63,7 @@ observe it, plus a wire-level test:
 | P3-skill | 3 | `skill: null` clear + `skill_selection` ext; branch `fork/acp-skill-clear-mcp-notice` off `fork/acp-capability-metadata` | DeepSeek `8e023355` (triton, `acp-p3-skill-mcp`) | accepted, awaiting integration | `5ca728de0`; 57 `cli::acp::tests` + 3 e2e wire tests pass |
 | P3-mcp | 3 | ignored `mcpServers` notice (same branch/agent as P3-skill) | DeepSeek `8e023355` | accepted, awaiting integration | `5ca728de0`: notice only when client advertised `session.notices`; contract bullet amended on the branch |
 | P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | running | |
-| P3-corpus | 3 | record scenarios 1–5, 7, 8 (v1) into corpus; CI replay | Sol | not started (needs T-conf) | |
+| P3-corpus | 3 | record scenarios 1–5, 7, 8 (v1) into corpus; CI replay | Sol | partial: 01 create/list/load, 02 shared observe/steer, 03 stop-then-prompt, 04 detach recorded; remaining: 05 close owner-aware, 07 config/commands, 08 negotiation/legacy | |
 | P0-split | 0/4 | split `src/cli/acp.rs` into transport/session/presentation | Sol | not started (after P3 adapter churn settles) | |
 
 Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
@@ -221,3 +221,18 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   type; delete `ServerEvent::TurnEnded` (removes D3) and translate.rs lines;
   rewrite router test helper; full equivalence gate; checkpoint if context
   is tight.
+- 2026-11-08: Queued review result: `jcode-acp-p3-corr-detach-104604e23`
+  completed, outcome `findings`, receipt `f61b12cc…`, report at triton
+  `~/.cache/jcode-review-104604e23/.cq/queue-evidence/results/f61b12ccde951a3e58ce141c016d263a2f64637b343a1af7a0654d2823474fad/report.md`.
+  Verified against stage `47a130e98`, all valid:
+  F1 major: `cancel_processing_message_for_turn` drops the taken task handle
+  on `signal_target -> None` early return (was introduced by P1-race review
+  fix). Orchestrator found sibling: `TurnStopped` still published before
+  revalidation (same misclassification class as `Interrupted`). -> P1-race
+  worker `9008bf12`, branch `fork/p1-cancel-race`.
+  F3 major: `_jcode/detach` propagates PrepareDisconnect send/wait errors
+  out of handle_message; loop ignores Error reply. F4 minor: legacy
+  unattributed turns report role none (proposed: omit correlation; contract
+  sentence). F2 minor: normalise `agentInfo.version` in fixture comparator.
+  -> corr-detach worker `05e7eb9f`, branch `fork/acp-turn-correlation-detach`
+  (not pushing stage; orchestrator merges both).
