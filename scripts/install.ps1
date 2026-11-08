@@ -158,7 +158,7 @@ function Get-JcodeReleaseDownloadBases([string]$ReleaseTag) {
         }
     } catch {}
 
-    $githubBase = "https://github.com/$Repo/releases/download/$ReleaseTag"
+    $githubBase = "https://github.com/$Repo/releases/download/$([Uri]::EscapeDataString($ReleaseTag))"
     if (-not $bases.Contains($githubBase)) { $bases.Add($githubBase) }
     return $bases.ToArray()
 }
@@ -185,7 +185,7 @@ function Get-ReleaseChecksum([string]$ReleaseTag, [string]$AssetName) {
     $lastError = $null
     foreach ($checksumUrl in @(
         "$ReleaseMetadataBase/$ReleaseTag/SHA256SUMS",
-        "https://github.com/$Repo/releases/download/$ReleaseTag/SHA256SUMS"
+        "https://github.com/$Repo/releases/download/$([Uri]::EscapeDataString($ReleaseTag))/SHA256SUMS"
     )) {
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Uri $checksumUrl

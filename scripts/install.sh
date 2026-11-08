@@ -160,7 +160,7 @@ if [ -z "$VERSION" ]; then
   LATEST_RELEASE_URL=$(curl -fsSIL --retry 2 --connect-timeout 10 \
     -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null || true)
   case "$LATEST_RELEASE_URL" in
-    */releases/tag/*) GITHUB_VERSION="${LATEST_RELEASE_URL##*/}" ;;
+    */releases/tag/*) GITHUB_VERSION=$(printf '%s' "${LATEST_RELEASE_URL##*/}" | sed 's/%2[Bb]/+/g') ;;
     *) GITHUB_VERSION="" ;;
   esac
   if valid_release_tag "$GITHUB_VERSION"; then
@@ -173,7 +173,8 @@ fi
 valid_release_tag "$VERSION" || err "Failed to determine latest version"
 INSTALL_VERSION="${VERSION#v}"
 
-GITHUB_RELEASE_BASE="https://github.com/$REPO/releases/download/$VERSION"
+URL_VERSION=$(printf '%s' "$VERSION" | sed 's/+/%2B/g')
+GITHUB_RELEASE_BASE="https://github.com/$REPO/releases/download/$URL_VERSION"
 
 if [ "$IS_WINDOWS" = true ]; then
   EXE=".exe"

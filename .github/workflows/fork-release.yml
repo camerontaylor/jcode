@@ -6,10 +6,10 @@ name: Fork release
 # `jcode update`, auto-update and the agents repo's harness-update all read
 # this fork's latest release (GITHUB_REPO in crates/jcode-app-core/src/update.rs).
 #
-# Tag scheme: upstream patch * 1000 + fork build, e.g. v0.99.1001 is upstream
-# v0.99.1 plus fork build 1. jcode compares versions numerically, so the patch
-# must stay numeric. Upstream's release.yml is gated to 1jehuang/jcode and
-# skips itself here.
+# Tag scheme: vMAJOR.MINOR.PATCH+fork.pN, where PATCH is upstream patch *
+# 1000 + fork build and N identifies upstream v1.0.0-preview.N.
+# Example: v0.99.1004+fork.p199. Build metadata preserves numeric precedence.
+# Upstream's release.yml is gated to 1jehuang/jcode and skips itself here.
 
 env:
   JCODE_CI: "1"
@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing fork tag (vMAJOR.MINOR.PATCH)
+        description: Existing fork tag (vMAJOR.MINOR.PATCH+fork.pN)
         required: true
         type: string
 
@@ -64,6 +64,15 @@ jobs:
             target: x86_64-apple-darwin
             artifact: jcode-macos-x86_64
     steps:
+      - name: Validate fork release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\+fork\.p([1-9][0-9]*)$ ]]; then
+            echo "Expected vMAJOR.MINOR.PATCH+fork.pN, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
@@ -152,6 +161,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -167,7 +180,21 @@ jobs:
           done
           sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
+          version=${RELEASE_TAG#v}
+          version=${version%%+*}
+          preview=${RELEASE_TAG##*+fork.p}
+          upstream_tag="v1.0.0-preview.$preview"
+          tagged_sha=$(git rev-parse HEAD)
+          upstream_sha=$(git rev-parse "refs/tags/$upstream_tag^{commit}")
+          custom_sha=$(git merge-base refs/remotes/origin/custom "$tagged_sha")
+          cat > release-notes.txt <<EOF
+          Fork release $RELEASE_TAG
+
+          Tagged commit: $tagged_sha
+          Upstream base: $upstream_tag ($upstream_sha)
+          Custom base SHA: $custom_sha
+          EOF
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "$RELEASE_TAG" --latest \
-            --notes "Fork build of upstream jcode with Paseo ACP commands (/compact, /subagent). Branch: ct/paseo-acp." \
+            --title "jcode fork $version (upstream $upstream_tag)" --latest \
+            --notes-file release-notes.txt \
             ./*.tar.gz SHA256SUMS
