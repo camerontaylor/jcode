@@ -58,8 +58,8 @@ observe it, plus a wire-level test:
 | T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | accepted, awaiting integration (after P0-ci green) | `4759e51b3`: 5 pass + 2 ignored contract gaps; 5/5 stable runs on triton |
 | P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs` | Sol | held until P3-corr-detach lands (both rework adapter lifecycle in `daemon_router.rs`) | |
 | P2-R2 | 2 | catalog facade in `jcode-harness-api-server`; branch `fork/r2-catalog-facade` off `fork/acp-conformance` | DeepSeek `1334bb53` (triton, `acp-r2-catalog`) | accepted, awaiting integration | `8a9e9e499`: catalog-path diff vs base 1,242 -> 113 lines (`translate.rs` 5/1, `session_files.rs` 0); fixture 01 replays unmodified; 199 harness + 92 acp lib + 5 conformance pass |
-| P3-corr | 3 | turn correlation `_meta.jcode.turnId` + `role`; branch `fork/acp-turn-correlation-detach` off `fork/acp-stage` | Sol `05e7eb9f` (triton, `acp-p3-corr-detach`) | running | |
-| P3-detach | 3 | `_jcode/detach`; also v1 observer close must end an open peer bracket with `canceled` (T-conf gap `acp_conformance_observer_close_bracket_contract`); same lane as P3-corr | Sol `05e7eb9f` | running | |
+| P3-corr | 3 | turn correlation `_meta.jcode.turnId` + `role`; branch `fork/acp-turn-correlation-detach` off `fork/acp-stage` | Sol `05e7eb9f` (triton, `acp-p3-corr-detach`) | accepted; in stage | `104604e23`: 100 ACP unit/router + 2 shared-session + 12 conformance pass; new fixtures 03, 04; 5x stable |
+| P3-detach | 3 | `_jcode/detach`; also v1 observer close must end an open peer bracket with `canceled` (T-conf gap `acp_conformance_observer_close_bracket_contract`); same lane as P3-corr | Sol `05e7eb9f` | accepted; in stage | core hook: `PrepareDisconnect.preserve_work` + capability `detach_preserve_work` (additive) |
 | P3-skill | 3 | `skill: null` clear + `skill_selection` ext; branch `fork/acp-skill-clear-mcp-notice` off `fork/acp-capability-metadata` | DeepSeek `8e023355` (triton, `acp-p3-skill-mcp`) | accepted, awaiting integration | `5ca728de0`; 57 `cli::acp::tests` + 3 e2e wire tests pass |
 | P3-mcp | 3 | ignored `mcpServers` notice (same branch/agent as P3-skill) | DeepSeek `8e023355` | accepted, awaiting integration | `5ca728de0`: notice only when client advertised `session.notices`; contract bullet amended on the branch |
 | P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | running | |
@@ -162,3 +162,14 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   Remote permission/question requests can also be answered on the agent's
   host: `ssh <host> paseo permit allow <agentId> <reqId> --input '{"answers":{"0":"..."}}'`
   (answer values are strings).
+- 2026-11-08: P3-corr+detach accepted at `104604e23`. Contract amended
+  in-branch: correlation applies to successful results; `role: none` has
+  `turnId: null`; busy keeps the JSON-RPC error.
+- 2026-11-08: Stage rebuilt: `fork/acp-stage` = previous stage + corr-detach
+  (ff) + skill-mcp (merge `557b5d9d1`, conflicts resolved by orchestrator:
+  extension list in contract order; obsolete "not advertised yet" loop
+  replaced by a positive assertion; rerere recorded) + R2 (`c2342437a`,
+  clean). Uncompiled. Known mismatch: skill selection-only results lack
+  `_meta.jcode` role none. Reconciliation assigned to `05e7eb9f`
+  (pushes ff-only to `fork/acp-stage`). R1 starts after that, from the
+  reconciled stage.
