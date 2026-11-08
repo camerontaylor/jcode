@@ -316,3 +316,10 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 - 2026-11-08: `1f8a9aff` acknowledged the false positive and is investigating
   narrow scanner exceptions. Instruction: leave the source comment
   unchanged, do NOT resubmit review #2 until it reports a fix.
+- 2026-11-08: Scanner root cause (per `1f8a9aff`): legacy denylist class
+  `token-ssh-plumbing` matched the bare filename `id_rsa`/`id_ed25519` as key
+  material. Fix: cq-toolkit PR #1226 (`bac3b296e`) removes only that
+  filename alternative (no repo/path/comment allowlist), with regressions
+  for both diff signs and real key shapes. `1f8a9aff` will redeploy ceres
+  and re-scan the exact diff, then ask for resubmission
+  (`--supersedes=jcode-acp-r1-stage-38fa8f3ee`). No jcode edit needed.
