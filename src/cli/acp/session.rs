@@ -707,6 +707,39 @@ impl AcpRuntime {
         cwd: PathBuf,
         replay_history: bool,
     ) -> Result<Arc<DaemonSession>> {
+        let existing = self.sessions.lock().await.get(&target_session_id).cloned();
+        if let Some(session) = existing.filter(|session| {
+            // A completed reader has already rendered its closing bracket;
+            // preserve session/load's ability to reconnect a dead transport.
+            session
+                .reader_task
+                .lock()
+                .is_ok_and(|task| task.as_ref().is_some_and(|task| !task.is_finished()))
+        }) {
+            // Loading an attached view must retain its router and open peer
+            // bracket. A second socket would announce the same active turn
+            // again before dropping the first attachment.
+            if replay_history {
+                session.peer_gate.lock().await.ready = false;
+                let replay = async {
+                    if let ServerEvent::History {
+                        session_id,
+                        messages,
+                        ..
+                    } = request_history(&session).await?
+                    {
+                        self.replay_history(&session_id, messages).await?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                // Release even when requesting/replaying history failed.
+                let released = self.release_peer_actions(&session).await;
+                replay?;
+                released?;
+            }
+            return Ok(session);
+        }
         let (reader, writer) = self.connect_daemon().await?;
         self.attach_existing_session_connected(
             target_session_id,
