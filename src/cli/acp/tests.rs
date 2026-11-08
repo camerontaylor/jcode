@@ -523,6 +523,58 @@ fn non_empty_mcp_servers_are_tolerated_until_session_scoped_mcp_is_supported() {
 
     let params = json!({"mcpServers": []});
     assert!(validate_acp_mcp_servers(&params).is_ok());
+
+    for params in [json!({}), json!({"mcpServers": null})] {
+        assert!(validate_acp_mcp_servers(&params).is_ok(), "{params}");
+    }
+    // A non-array shape stays a parameter error, and reports no notice.
+    for params in [
+        json!({"mcpServers": {"name": "fs"}}),
+        json!({"mcpServers": "fs"}),
+    ] {
+        assert!(validate_acp_mcp_servers(&params).is_err(), "{params}");
+        assert_eq!(ignored_mcp_servers_notice("s1", &params), None, "{params}");
+    }
+}
+
+#[test]
+fn ignored_mcp_servers_produce_exactly_one_notice_naming_them() {
+    let params = json!({
+        "mcpServers": [
+            {"name": "fs", "command": "npx", "args": ["-y", "fs"]},
+            {"name": "git", "url": "https://example.test/mcp", "type": "http"}
+        ]
+    });
+    let notice = ignored_mcp_servers_notice("s1", &params).expect("a nonempty array is reported");
+    assert_eq!(
+        notice,
+        json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "notice",
+                "severity": "info",
+                "title": "Client MCP servers not connected",
+                "description": "This session ignores the ACP mcpServers it was given (fs, git): jcode runs the MCP servers configured daemon-side, not per session.",
+            }
+        }),
+        "a notice is informational, names the ignored servers and points at daemon-side MCP"
+    );
+
+    // Nothing to report: an empty array, a missing field or an explicit null.
+    for params in [json!({"mcpServers": []}), json!({}), json!({"mcpServers": null})] {
+        assert_eq!(ignored_mcp_servers_notice("s1", &params), None, "{params}");
+    }
+
+    // Unnamed entries are still reported, by count.
+    let notice = ignored_mcp_servers_notice("s1", &json!({"mcpServers": [{}, {}]}))
+        .expect("a nonempty array is reported");
+    assert!(
+        notice["update"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("2 client MCP server(s)"),
+        "{notice}"
+    );
 }
 
 #[test]

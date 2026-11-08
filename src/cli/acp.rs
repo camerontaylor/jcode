@@ -819,6 +819,8 @@ impl AcpRuntime {
                     .insert(session_id.clone(), session);
                 self.write_result(id, result).await?;
                 self.write_available_commands(&session_id).await?;
+                self.write_ignored_mcp_servers_notice(&session_id, &message.params)
+                    .await?;
             }
             Err(err) => {
                 self.write_error_value(
@@ -828,6 +830,20 @@ impl AcpRuntime {
                 )
                 .await?;
             }
+        }
+        Ok(())
+    }
+
+    /// Report the client-supplied `mcpServers` this attachment ignores, once,
+    /// after the response that created or attached the session. A notice never
+    /// changes the response and an empty list says nothing.
+    async fn write_ignored_mcp_servers_notice(
+        &self,
+        session_id: &str,
+        params: &Value,
+    ) -> Result<()> {
+        if let Some(notice) = ignored_mcp_servers_notice(session_id, params) {
+            self.write_notification("session/update", notice).await?;
         }
         Ok(())
     }
@@ -879,6 +895,8 @@ impl AcpRuntime {
                 self.sessions.lock().await.insert(attached_id, session);
                 self.write_result(id, result).await?;
                 self.write_available_commands(&session_id).await?;
+                self.write_ignored_mcp_servers_notice(&session_id, &message.params)
+                    .await?;
             }
             Err(err) => {
                 self.write_error_value(
@@ -3182,6 +3200,43 @@ fn required_session_id(params: &Value) -> std::result::Result<String, String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .ok_or_else(|| "Missing required sessionId".to_string())
+}
+
+/// `session/update` notice for client-supplied `mcpServers` this adapter accepts
+/// but does not connect, or `None` when there is nothing to report (missing,
+/// `null` or empty array).
+///
+/// ACP v1 `notice` is the informational update for the user that is not part of
+/// session history and needs no client capability, so an attachment can say
+/// that session-scoped servers are ignored without faking an assistant message
+/// or changing the response.
+fn ignored_mcp_servers_notice(session_id: &str, params: &Value) -> Option<Value> {
+    let servers = params.get("mcpServers")?.as_array()?;
+    if servers.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = servers
+        .iter()
+        .filter_map(|server| server.get("name").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    let ignored = if names.is_empty() {
+        format!("{} client MCP server(s)", servers.len())
+    } else {
+        names.join(", ")
+    };
+    Some(json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "notice",
+            "severity": "info",
+            "title": "Client MCP servers not connected",
+            "description": format!(
+                "This session ignores the ACP mcpServers it was given ({ignored}): jcode runs the MCP servers configured daemon-side, not per session."
+            ),
+        }
+    }))
 }
 
 fn validate_acp_mcp_servers(params: &Value) -> std::result::Result<(), String> {
