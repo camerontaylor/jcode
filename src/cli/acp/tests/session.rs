@@ -845,6 +845,7 @@ async fn repeated_load_reuses_attachment_and_active_peer_identity() {
         .await
         .insert("existing".into(), session.clone());
     session.spawn_reader(reader, runtime.clone());
+    let (cancel_seen, cancel_received) = tokio::sync::oneshot::channel();
     let daemon = tokio::spawn(async move {
         let (reader, mut writer) = server.into_split();
         let mut reader = BufReader::new(reader);
@@ -861,7 +862,13 @@ async fn repeated_load_reuses_attachment_and_active_peer_identity() {
                 .await
                 .unwrap();
         }
-        // Retain the fake daemon until the attachment assertions finish.
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let Request::Cancel { turn, .. } = serde_json::from_str(&line).unwrap() else {
+            panic!("Stop after repeated load must still reach the daemon");
+        };
+        assert_eq!(turn.unwrap().turn_id, 1);
+        cancel_seen.send(()).unwrap();
         std::future::pending::<()>().await;
     });
     for _ in 0..2 {
@@ -884,5 +891,71 @@ async fn repeated_load_reuses_attachment_and_active_peer_identity() {
         assert!(loaded.peer_gate.lock().await.ready);
     }
     assert_eq!(runtime.connection_seq.load(Ordering::SeqCst), 0);
+    runtime
+        .handle_session_cancel(
+            JsonRpcMessage::parse(
+                r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"existing"}}"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    cancel_received.await.unwrap();
+    // EOF finishes the old reader and its local bracket before reconnect.
     daemon.abort();
+    let _ = daemon.await;
+    let old_reader = session.reader_task.lock().unwrap().take().unwrap();
+    old_reader.await.unwrap();
+    let listener = tokio::net::UnixListener::bind(temp.path().join("absent.sock")).unwrap();
+    let replacement = tokio::spawn(async move {
+        // ensure_daemon first probes listener liveness without a handshake.
+        let (probe, _) = listener.accept().await.unwrap();
+        drop(probe);
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let Request::Ping { id } = serde_json::from_str(&line).unwrap() else {
+            panic!("expected capability probe on replacement connection");
+        };
+        let pong = serde_json::to_string(&ServerEvent::Pong {
+            id,
+            native_ssh_protocol: None,
+            capabilities: crate::protocol::server_capabilities(),
+            user_connected_session_ids: None,
+        })
+        .unwrap();
+        writer
+            .write_all(format!("{pong}\n").as_bytes())
+            .await
+            .unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let Request::Subscribe {
+            id,
+            target_session_id,
+            ..
+        } = serde_json::from_str(&line).unwrap()
+        else {
+            panic!("dead attachment must subscribe again");
+        };
+        assert_eq!(target_session_id.as_deref(), Some("existing"));
+        let history = json!({"type":"history", "id":id,
+            "session_id":"existing", "messages":[], "all_sessions":["existing"]});
+        writer
+            .write_all(format!("{history}\n{}\n", json!({"type":"done","id":id})).as_bytes())
+            .await
+            .unwrap();
+    });
+    let reconnected = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        runtime.attach_existing_session("existing".into(), temp.path().to_owned(), false),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!Arc::ptr_eq(&reconnected, &session));
+    assert_eq!(runtime.connection_seq.load(Ordering::SeqCst), 1);
+    replacement.await.unwrap();
 }
