@@ -1870,7 +1870,7 @@ fn cancel_after_turn_claim_is_preserved() -> anyhow::Result<()> {
         // 500 ms window before the deferred reset.
         drop(peer_turn);
         while client_event_rx.try_recv().is_ok() {}
-        let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+        let (processing_done_tx, _processing_done_rx) = mpsc::unbounded_channel();
         let claimed_signal = agent_stop_signal.clone();
         super::client_processing::TURN_CLAIM_HOOK.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || { claimed_signal.fire(); }));

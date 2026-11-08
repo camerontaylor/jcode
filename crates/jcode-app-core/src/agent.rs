@@ -386,7 +386,9 @@ impl Agent {
     }
 
     pub(crate) fn claim_server_turn(&self) -> Result<TurnLease> {
-        self.turn_ownership.claim()
+        self.turn_ownership.claim_after(|| {
+            self.discard_cancel_armed_before_turn();
+        })
     }
 
     pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {

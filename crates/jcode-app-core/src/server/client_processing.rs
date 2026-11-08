@@ -220,14 +220,6 @@ pub(super) async fn start_processing_message(
             callback();
         }
     });
-    // The claim makes this the session's only turn, so a cancel still armed
-    // now targeted an earlier turn and must not abort this one.
-    if agent_guard.discard_cancel_armed_before_turn() {
-        crate::logging::info(&format!(
-            "SERVER_TURN_DISCARDED_STALE_CANCEL session={} message_id={}",
-            client_session_id, id
-        ));
-    }
     if let Some(reminder) = system_reminder.as_deref() {
         match super::super::reload_recovery::is_delivered_continuation(client_session_id, reminder)
         {
