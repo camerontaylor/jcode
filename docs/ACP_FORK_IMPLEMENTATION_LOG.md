@@ -50,9 +50,9 @@ observe it, plus a wire-level test:
 | Id | Phase | Lane / branch | Worker | Status | Evidence |
 | --- | --- | --- | --- | --- | --- |
 | P0-docs | 0 | planning docs on `custom` | n/a | done | `docs/ACP_FORK_*`, `docs/acp-pins/` present at `a047a0c07` |
-| P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek `9a617f29` (atlas, `acp-p0-ci`) | Quality green; Build&Test red on stdin-forwarding (fork-caused, upstream passes) — diagnosing | revert `ee4f9f6a7` (reformatted 6 upstream-only files); port `fmt-check.sh` into `scripts/fork/`; keep `a47408ec1` |
-| P0-budget | 0 | same branch: fork budget baseline files + script flag | DeepSeek `9a617f29` | running | |
-| P0-record | 0 | first green run on `custom` recorded here | orchestrator | blocked on P0-ci | |
+| P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek `9a617f29` (atlas, `acp-p0-ci`) | done (green) | run 42458512159 @ `a7a3c29d0` | revert `ee4f9f6a7` (reformatted 6 upstream-only files); port `fmt-check.sh` into `scripts/fork/`; keep `a47408ec1` |
+| P0-budget | 0 | same branch: fork budget baseline files + `JCODE_*_BUDGET` env overrides | DeepSeek `9a617f29` | done | ceilings = upstream's, current size only where failing; ratchet teeth verified |
+| P0-record | 0 | first green run on `custom` recorded here | orchestrator | awaiting user authorization to fast-forward `custom`; candidate = `fork/acp-stage` `76045f863`, Fork CI run 42461964356 | |
 | P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek `5365c86a` (atlas, `acp-p1-meta`) | accepted, awaiting integration | `d335f2e7d`: 5 unit + 1 e2e wire test pass; sharedControl derived from daemon Pong caps (`SharedControlSupport::from_router`) |
 | P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | accepted, awaiting integration | `26c296a09` (review fixes: Interrupted queued inside locked revalidation, failing-first test `db810004f`); D1 `26ff594f2` on pr/turn-scoped-cancel, D2 `86db359cf` on pr/stale-cancel-flag; evidence `docs/verification/p1-cancel-race.md` |
 | T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | accepted, awaiting integration (after P0-ci green) | `4759e51b3`: 5 pass + 2 ignored contract gaps; 5/5 stable runs on triton |
@@ -64,7 +64,7 @@ observe it, plus a wire-level test:
 | P3-mcp | 3 | ignored `mcpServers` notice (same branch/agent as P3-skill) | DeepSeek `8e023355` | accepted, awaiting integration | `5ca728de0`: notice only when client advertised `session.notices`; contract bullet amended on the branch |
 | P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | accepted; merged into stage `b1d801910`, compile verification assigned to `436bb2af` | `d94ec61af`: reasoning -> `agent_thought_chunk`; todo -> session `plan` via `GetTodos` snapshot; tool `name`, `locations` (read/edit/write), `diff` on edit/write; apply_patch paths/diffs and plan-on-load skipped (no structured data) |
 | P3-corpus | 3 | record scenarios 1–5, 7, 8 (v1) into corpus; CI replay | Sol | partial: 01 create/list/load, 02 shared observe/steer, 03 stop-then-prompt, 04 detach recorded; remaining: 05 close owner-aware, 07 config/commands, 08 negotiation/legacy | |
-| P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | ACP split accepted (`a2900422e`); clearing 4 remaining budget failures | acp.rs 4182 -> 940; new modules transport/session/presentation/requests/prompt all < 1200; test names 71/45 unchanged; 123 ACP unit + 17 conformance + 4 shared pass |
+| P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | done; in stage | `57bc78ce9`: budgets green, no ceiling raised; `ServerEvent::scoped` constructor; acp.rs 4182 -> 940; new modules transport/session/presentation/requests/prompt all < 1200; test names 71/45 unchanged; 123 ACP unit + 17 conformance + 4 shared pass |
 
 Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 
@@ -331,3 +331,24 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   `client_lifecycle_tests.rs` 1942 > 1939, `turn_event_channel_tests.rs`
   1617, `tests/e2e/acp_shared_session.rs` 1431 -> pure-move test splits.
   No ceilings raised.
+- 2026-11-08: P0 DONE: first green Fork CI, run 42458512159 on
+  `fork/ci-baseline` @ `a7a3c29d0` (Quality 3m35s warm; Build&Test 36m24s).
+  Env overrides `JCODE_{CODE_SIZE,TEST_SIZE,PANIC,SWALLOWED_ERROR}_BUDGET`.
+- 2026-11-08: Split budget follow-up done (`57bc78ce9`): `ServerEvent::scoped`
+  constructor (2 production literals), test-file pure-move splits (19/14/4
+  test names preserved); all gates green, fixtures unmodified.
+- 2026-11-08: Stage = previous + ci-baseline merge (`9190fb8ea`) + split
+  (merge) + `76045f863` ratcheting fork-owned ACP budget entries down
+  (acp.rs, acp/tests.rs, daemon_router_tests.rs, test_support/mod.rs leave
+  the baseline; daemon_router.rs 1617 -> 1307). Rejected a blanket
+  `--update` (would have tightened upstream-owned ceilings, making base
+  bumps fail on upstream growth). Local budget checks exit 0. Pushed; Fork
+  CI run 42461964356 on `fork/acp-stage` in progress = the candidate.
+- 2026-11-08: Asked the user (AskUserQuestion) for authorization to
+  fast-forward `custom` (repo rule: authorization before merging); no answer
+  yet, `custom` untouched.
+- 2026-11-08: Review #2 resubmitted after scanner fix (cq-toolkit #1226 =
+  `18896829a`, deployed on ceres): `jcode-acp-r1-stage-38fa8f3ee-r2`,
+  `--repeat --supersedes`, item `lr-b26eef738617-g2`, generation 2, head
+  `38fa8f3ee`. First try `indeterminate` (queue lock busy), same-id retry
+  admitted. Polling.
