@@ -53,7 +53,6 @@ impl RouterState {
         actions
     }
 
-
     /// Called with the router lock held through the daemon send, so closure
     /// cannot slip between admission and submission.
     pub(super) fn register_open_prompt(&mut self, id: u64) -> Option<RoutedReceiver> {
