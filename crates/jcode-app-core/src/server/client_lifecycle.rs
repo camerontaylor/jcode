@@ -1529,7 +1529,10 @@ pub(super) async fn handle_client(
                 }
             }
 
-            Request::PrepareDisconnect { id } => {
+            Request::PrepareDisconnect { id, preserve_work } => {
+                if preserve_work {
+                    continue_on_disconnect = true;
+                }
                 crate::tool::sdk::release_connection(&client_connection_id);
                 let json = encode_event(&ServerEvent::Done { id });
                 let mut w = writer.lock().await;

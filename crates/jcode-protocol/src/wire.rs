@@ -216,7 +216,12 @@ pub enum Request {
     /// closes. Retained for compatibility with older servers that use
     /// `crash_on_disconnect` for idle sessions too.
     #[serde(rename = "prepare_disconnect")]
-    PrepareDisconnect { id: u64 },
+    PrepareDisconnect {
+        id: u64,
+        /// Preserve inserted execution after this attachment leaves.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        preserve_work: bool,
+    },
 
     /// Get full conversation history (for TUI sync on connect)
     #[serde(rename = "get_history")]

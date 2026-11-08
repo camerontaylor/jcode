@@ -1672,3 +1672,28 @@ fn observer_close_ends_local_bracket_without_cancel() {
     ));
     assert!(r.close_view().is_empty());
 }
+
+#[test]
+fn detach_releases_owned_turn_without_cancel() {
+    let mut r = steering_router();
+    let mut prompt = steer(&mut r, 10);
+    r.route(turn_started(1, ours(10), None));
+    assert!(r.detach_view().is_empty());
+    assert!(answered_cancelled(&drain(&mut prompt), 10));
+    assert_eq!(r.prompt_correlation(10), Some((tid(1), "origin")));
+    assert!(r.detach_view().is_empty());
+}
+
+#[test]
+fn detach_observer_closes_bracket_before_release() {
+    let mut r = steering_router();
+    r.route(turn_started(1, peer(10), None));
+    assert!(matches!(
+        r.detach_view().as_slice(),
+        [RouteAction::PeerTurnEnded {
+            status: TurnEndStatus::Cancelled,
+            ..
+        }]
+    ));
+    assert!(r.detach_view().is_empty());
+}

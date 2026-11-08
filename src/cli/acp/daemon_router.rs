@@ -384,6 +384,8 @@ pub(super) struct RouterState {
     probes: HashSet<u64>,
     /// `session/close` ran: nothing may start or adopt a turn for this view.
     view_closed: bool,
+    detached: bool,
+    pub(super) preserve_work: bool,
 }
 
 impl RouterState {
@@ -405,6 +407,8 @@ impl RouterState {
             waiting: BTreeMap::new(),
             probes: HashSet::new(),
             view_closed: false,
+            detached: false,
+            preserve_work: false,
         }
     }
 
@@ -598,6 +602,14 @@ impl RouterState {
     /// `session/close`: withdraw waiting prompts, cancel this view's own
     /// running turn, and release an adopted peer turn without cancelling it.
     /// From now on nothing starts or adopts a turn for this view.
+    pub(super) fn detach_view(&mut self) -> Vec<RouteAction> {
+        self.detached = true;
+        if let Some(own) = self.own_turn.as_mut() {
+            own.adopted = true;
+        }
+        self.close_view()
+    }
+
     pub(super) fn close_view(&mut self) -> Vec<RouteAction> {
         self.view_closed = true;
         let mut actions = self.withdraw(Withdrawal::Close);
@@ -1006,7 +1018,7 @@ impl RouterState {
             // ran at once because the session was idle).
             let request_id = origin.request_id.unwrap_or_default();
             self.waiting.remove(&request_id);
-            if self.view_closed {
+            if self.view_closed && !self.detached {
                 // Sent before `session/close` and started after it: the close
                 // rule cancels this view's own turn.
                 actions.push(RouteAction::Send(Request::Cancel {
@@ -1016,7 +1028,11 @@ impl RouterState {
             }
             self.correlations
                 .insert(request_id, (turn_id_string(&identity), "origin"));
-            self.own_turn = Some(OwnTurn::started(identity, request_id));
+            if self.detached {
+                self.resolve_cancelled(request_id);
+            } else {
+                self.own_turn = Some(OwnTurn::started(identity, request_id));
+            }
         } else {
             actions.extend(self.open_peer_turn(identity, origin, user_content));
         }
@@ -1482,6 +1498,9 @@ impl RouterState {
         origin: TurnOrigin,
         user_content: Option<String>,
     ) -> Vec<RouteAction> {
+        if self.view_closed {
+            return Vec::new();
+        }
         let unreplayed_prompt = if self.history_seen {
             None
         } else {

@@ -916,8 +916,8 @@ fn attachment_instance(result: &serde_json::Value, method: &str) -> Result<Strin
         );
     }
     assert_eq!(
-        shared["detach"], false,
-        "{method} must not advertise detach before _jcode/detach exists"
+        shared["detach"], true,
+        "{method} advertises effective detach support"
     );
     Ok(instance.to_string())
 }

@@ -88,6 +88,7 @@ pub const SERVER_CAPABILITY_TURN_ORIGIN: &str = "turn_origin";
 pub const SERVER_CAPABILITIES: &[&str] = &[
     "session_tools",
     "soft_interrupt_ids",
+    "detach_preserve_work",
     "runtime_commands",
     "session_connections",
     SERVER_CAPABILITY_TURN_ORIGIN,

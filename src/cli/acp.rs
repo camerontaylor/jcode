@@ -99,6 +99,8 @@ struct DaemonSession {
     /// `session/prompt` requests in progress. A steering daemon takes several
     /// at once (each joins the running turn); otherwise at most one.
     prompts: AtomicUsize,
+    prompt_tasks: AtomicUsize,
+    prompt_tasks_done: tokio::sync::Notify,
     catalog_refresh: Mutex<()>,
     ui_state: Arc<Mutex<SessionUiState>>,
     /// Workspace root reported by the ACP client, used to compose the
@@ -114,6 +116,7 @@ struct DaemonSession {
     /// attach flush so a tool call spanning that boundary keeps its input.
     peer_mapper: Arc<Mutex<Option<EventMapper>>>,
     reader_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    catalog_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Peer actions buffered while a session attach is replaying history.
@@ -463,6 +466,8 @@ impl DaemonSession {
             instance_id: instance_id.clone(),
             router: Arc::new(Mutex::new(router)),
             prompts: AtomicUsize::new(0),
+            prompt_tasks: AtomicUsize::new(0),
+            prompt_tasks_done: tokio::sync::Notify::new(),
             catalog_refresh: Mutex::new(()),
             ui_state: Arc::new(Mutex::new(SessionUiState::default())),
             working_dir,
@@ -470,6 +475,7 @@ impl DaemonSession {
             peer_gate: Arc::new(Mutex::new(PeerActionGate::default())),
             peer_mapper: Arc::new(Mutex::new(None)),
             reader_task: std::sync::Mutex::new(None),
+            catalog_task: std::sync::Mutex::new(None),
         }
     }
 
@@ -576,7 +582,7 @@ impl DaemonSession {
         let session = Arc::downgrade(self);
         let (catalog_tx, mut catalog_rx) = tokio::sync::watch::channel(());
         let catalog_acp = acp.clone();
-        tokio::spawn(async move {
+        let catalog_handle = tokio::spawn(async move {
             while catalog_rx.changed().await.is_ok() {
                 let Some(session) = session.upgrade() else {
                     break;
@@ -593,6 +599,9 @@ impl DaemonSession {
                 }
             }
         });
+        if let Ok(mut slot) = self.catalog_task.lock() {
+            *slot = Some(catalog_handle);
+        }
         let handle = tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
@@ -633,6 +642,11 @@ impl DaemonSession {
 
 impl Drop for DaemonSession {
     fn drop(&mut self) {
+        if let Ok(mut slot) = self.catalog_task.lock()
+            && let Some(handle) = slot.take()
+        {
+            handle.abort();
+        }
         if let Ok(mut slot) = self.reader_task.lock()
             && let Some(handle) = slot.take()
         {
@@ -739,6 +753,7 @@ impl AcpRuntime {
             "session/resume" => self.handle_session_load(message, false).await?,
             "session/prompt" => self.handle_session_prompt(message).await?,
             "session/cancel" => self.handle_session_cancel(message).await?,
+            "_jcode/detach" => self.handle_session_detach(message).await?,
             "session/close" => self.handle_session_close(message).await?,
             "session/list" => self.handle_session_list(message).await?,
             "session/set_config_option" => self.handle_set_config_option(message).await?,
@@ -943,8 +958,10 @@ impl AcpRuntime {
             return Ok(());
         }
 
+        session.prompt_tasks.fetch_add(1, Ordering::SeqCst);
         let runtime = self.clone();
         tokio::spawn(async move {
+            let completed_session = Arc::clone(&session);
             let mut ticket = PromptTicket::new(Arc::clone(&session));
             let result = runtime
                 .run_prompt(
@@ -966,6 +983,10 @@ impl AcpRuntime {
                     )
                     .await;
             }
+            completed_session
+                .prompt_tasks
+                .fetch_sub(1, Ordering::SeqCst);
+            completed_session.prompt_tasks_done.notify_one();
         });
         Ok(())
     }
@@ -1010,6 +1031,70 @@ impl AcpRuntime {
             self.write_result(id, json!({})).await?;
         }
         Ok(())
+    }
+
+    async fn handle_session_detach(&self, message: JsonRpcMessage) -> Result<()> {
+        let Some(id) = message.id else {
+            return Ok(());
+        };
+        let session_id = match required_session_id(&message.params) {
+            Ok(session_id) => session_id,
+            Err(err) => {
+                return self
+                    .write_error_value(id, JSONRPC_INVALID_PARAMS, err)
+                    .await;
+            }
+        };
+        let session = self.sessions.lock().await.get(&session_id).cloned();
+        if let Some(session) = session {
+            if !session.shared_control_support().await.detach {
+                return self
+                    .write_error_value(
+                        id,
+                        JSONRPC_METHOD_NOT_FOUND,
+                        "Detach is unavailable on this daemon".into(),
+                    )
+                    .await;
+            }
+            // Acknowledged before releasing the socket: dropping the adapter
+            // alone would otherwise invoke owner disconnect cancellation.
+            let prepare_id = session.next_id();
+            let mut reply = session.register(prepare_id, PendingKind::Reply).await;
+            session
+                .send(&Request::PrepareDisconnect {
+                    id: prepare_id,
+                    preserve_work: true,
+                })
+                .await?;
+            loop {
+                if matches!(next_routed(&mut reply).await?, ServerEvent::Done { id } if id == prepare_id)
+                {
+                    break;
+                }
+            }
+            session.unregister(prepare_id).await;
+            self.sessions.lock().await.remove(&session_id);
+            let actions = session.router.lock().await.detach_view();
+            session.sink(self.clone()).apply(actions).await;
+            loop {
+                let notified = session.prompt_tasks_done.notified();
+                if session.prompt_tasks.load(Ordering::SeqCst) == 0 {
+                    break;
+                }
+                notified.await;
+            }
+            // Join both writers before answering, including catalog refreshes
+            // that already upgraded their weak session reference.
+            for task in [&session.catalog_task, &session.reader_task] {
+                let handle = task.lock().ok().and_then(|mut slot| slot.take());
+                if let Some(handle) = handle {
+                    handle.abort();
+                    let _ = handle.await;
+                }
+            }
+            session.router.lock().await.close();
+        }
+        self.write_result(id, json!({})).await
     }
 
     async fn handle_session_close(&self, message: JsonRpcMessage) -> Result<()> {
@@ -1302,6 +1387,7 @@ impl AcpRuntime {
         session.spawn_reader(reader, self.clone());
         let capabilities = probe_capabilities(&session).await?;
         let mut router = session.router.lock().await;
+        router.preserve_work = capabilities.preserve_work;
         router.set_turn_origin(capabilities.turn_origin);
         router.set_soft_interrupt_ids(capabilities.soft_interrupt_ids);
         drop(router);
@@ -2426,6 +2512,7 @@ fn prompt_request(
 /// The daemon capabilities the adapter adapts to, from `Pong`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct DaemonCapabilities {
+    preserve_work: bool,
     /// Turns are attributed (`turn_origin`).
     turn_origin: bool,
     /// Soft interrupts carry client ids (`soft_interrupt_ids`); with
@@ -2437,6 +2524,7 @@ impl DaemonCapabilities {
     fn from_pong(capabilities: &[String]) -> Self {
         let has = |name: &str| capabilities.iter().any(|capability| capability == name);
         Self {
+            preserve_work: has("detach_preserve_work"),
             turn_origin: has(crate::protocol::SERVER_CAPABILITY_TURN_ORIGIN),
             soft_interrupt_ids: has("soft_interrupt_ids"),
         }
@@ -2862,6 +2950,7 @@ fn jcode_capability_meta(profile: AcpProfile) -> Value {
 /// a client-id-carrying soft interrupt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SharedControlSupport {
+    detach: bool,
     observe: bool,
     stop_observed_turn: bool,
     implicit_steering: bool,
@@ -2877,6 +2966,7 @@ impl SharedControlSupport {
     fn from_router(router: &RouterState) -> Self {
         let turn_origin = router.supports_turn_origin();
         Self {
+            detach: router.preserve_work && router.steering(),
             observe: turn_origin,
             stop_observed_turn: turn_origin,
             implicit_steering: router.steering(),
@@ -2886,15 +2976,14 @@ impl SharedControlSupport {
 
 /// `_meta.jcode` of a successful new/load/resume result.
 ///
-/// `detach` stays false: `_jcode/detach` does not exist in this build, so the
-/// whole behavior is not usable and must not be advertised.
+/// Detach requires negotiated daemon work preservation and input withdrawal.
 fn jcode_session_meta(instance_id: &str, support: SharedControlSupport) -> Value {
     json!({
         "clientInstanceId": instance_id,
         "sharedControl": {
             "observe": support.observe,
             "stopObservedTurn": support.stop_observed_turn,
-            "detach": false,
+            "detach": support.detach,
             "implicitSteering": support.implicit_steering,
         },
     })

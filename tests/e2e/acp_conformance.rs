@@ -261,6 +261,17 @@ async fn shared_scenario(check_close: bool) -> Result<()> {
             .expect("peer start before text");
         let turn = observed[start]["params"]["turnId"].clone();
         assert!(turn.is_string());
+        // Control prompts cannot implicitly steer. A busy rejection remains
+        // a JSON-RPC error, never a successful role-none result.
+        let busy = a
+            .send_request(
+                "session/prompt",
+                json!({"sessionId":id,"prompt":[{"type":"text","text":"/model"}]}),
+            )
+            .await?;
+        let rejected = a.wait_for_response(busy).await?;
+        assert!(rejected.get("error").is_some());
+        assert!(rejected.get("result").is_none());
         let steer = b
             .send_request(
                 "session/prompt",
@@ -436,6 +447,140 @@ async fn acp_conformance_capability_metadata_contract() -> Result<()> {
     assert_eq!(meta["interfaceVersion"], 1);
     assert_eq!(meta["sessionMcpServers"], false);
     assert_eq!(meta["profile"], "standard");
+    c.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn acp_conformance_detach_originator() -> Result<()> {
+    detach_scenario(true, false, false).await
+}
+
+#[tokio::test]
+async fn acp_conformance_detach_observer() -> Result<()> {
+    detach_scenario(false, false, false).await
+}
+
+#[tokio::test]
+async fn acp_conformance_detach_withdraws_pending_steer() -> Result<()> {
+    detach_scenario(false, true, false).await
+}
+
+#[tokio::test]
+async fn acp_conformance_detach_adopted_steer() -> Result<()> {
+    detach_scenario(false, true, true).await
+}
+
+async fn detach_scenario(originator: bool, pending: bool, inserted: bool) -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime = tempfile::Builder::new()
+        .prefix("acp-detach-")
+        .tempdir_in("/tmp")?;
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", runtime.path());
+    let socket = runtime.path().join("jcode.sock");
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let provider = Arc::new(GatedProvider {
+        gate: gate.clone(),
+        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    });
+    let server =
+        server::Server::new_with_paths(provider, socket.clone(), runtime.path().join("debug.sock"));
+    let task = tokio::spawn(async move { server.run().await });
+    let result = async {
+        wait_for_socket(&socket).await?;
+        let mut a = AcpClient::spawn()?;
+        let mut b = AcpClient::spawn()?;
+        initialize(&mut a).await?;
+        initialize(&mut b).await?;
+        let cwd = std::env::current_dir()?;
+        let created = a.request("session/new", json!({"cwd":cwd})).await?;
+        assert_eq!(created["_meta"]["jcode"]["sharedControl"]["detach"], true);
+        let id = &created["sessionId"];
+        b.request("session/resume", json!({"sessionId":id,"cwd":cwd})).await?;
+        let first = a.send_request("session/prompt", json!({"sessionId":id,"prompt":[{"type":"text","text":"continue after departure"}]})).await?;
+        let started = b.wait_for_notification(|m| m["method"] == "_jcode/turn" && m["params"]["state"] == "started").await?;
+        let turn = &started["params"]["turnId"];
+        b.wait_for_notification(|m| m["params"]["update"]["content"]["text"] == "answer-0").await?;
+        let steer = if pending {
+            let request = b.send_request("session/prompt", json!({"sessionId":id,"prompt":[{"type":"text","text":"withdraw me"}]})).await?;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let state = debug_run_command_json(runtime.path().join("debug.sock"), "server:memory", None).await?;
+                    if state["interrupts"]["pending_interrupts"].as_u64().unwrap_or(0) > 0 { break; }
+                }
+                Ok::<_, anyhow::Error>(())
+            }).await??;
+            Some(request)
+        } else { None };
+        if inserted {
+            gate.add_permits(1);
+            b.wait_for_notification(|m| m["params"]["update"]["content"]["text"] == "answer-1").await?;
+        }
+        let departing = if originator { &mut a } else { &mut b };
+        assert_eq!(departing.request("_jcode/detach", json!({"sessionId":id})).await?, json!({}));
+        let detach_boundary = departing.tape.len();
+        if originator {
+            let response = departing.wait_for_response(first).await?;
+            assert_eq!(response["result"]["stopReason"], "cancelled");
+            assert_eq!(response["result"]["_meta"]["jcode"], json!({"turnId":turn,"role":"origin"}));
+        } else {
+            if let Some(steer) = steer {
+                let response = departing.wait_for_response(steer).await?;
+                assert_eq!(response["result"]["stopReason"], "cancelled");
+                assert_eq!(response["result"]["_meta"]["jcode"], if inserted { json!({"turnId":turn,"role":"steer"}) } else { json!({"turnId":null,"role":"none"}) });
+            }
+            let terminal = departing.take_notifications();
+            assert_eq!(terminal.iter().filter(|m| m["method"] == "_jcode/turn" && m["params"]["state"] == "canceled").count(), 1);
+        }
+        assert_eq!(departing.request("_jcode/detach", json!({"sessionId":id})).await?, json!({}));
+        assert_eq!(departing.tape.len(), detach_boundary + 2, "pending prompt settled before detach response; only repeated detach added messages");
+        departing.take_notifications();
+        gate.add_permits(1);
+        if originator {
+            b.wait_for_notification(|m| m["method"] == "_jcode/turn" && m["params"]["state"] == "completed").await?;
+            initialize(&mut b).await?;
+            assert!(!b.take_notifications().iter().any(|m| m["method"] == "_jcode/turn" && m["params"]["state"] == "completed"));
+            initialize(&mut a).await?;
+            assert!(a.take_notifications().is_empty(), "no session notifications after detach response");
+            acp_fixture::check("04-detach-v1.jsonl", &a.tape)?;
+        } else {
+            let response = a.wait_for_response(first).await?;
+            assert_eq!(response["result"]["stopReason"], "end_turn");
+            assert_eq!(texts(&a.take_notifications()), if inserted { vec!["answer-0", "answer-1"] } else { vec!["answer-0"] });
+            initialize(&mut b).await?;
+            assert!(b.take_notifications().is_empty(), "no session notifications after detach response");
+        }
+        a.shutdown().await;
+        b.shutdown().await;
+        Ok(())
+    }.await;
+    task.abort();
+    result
+}
+
+#[tokio::test]
+async fn acp_conformance_detach_params_and_idempotency() -> Result<()> {
+    let _env = setup_test_env()?;
+    let mut c = AcpClient::spawn()?;
+    initialize(&mut c).await?;
+    for params in [
+        json!(null),
+        json!([]),
+        json!({}),
+        json!({"sessionId":null}),
+        json!({"sessionId":7}),
+        json!({"sessionId":""}),
+    ] {
+        let id = c.send_request("_jcode/detach", params).await?;
+        assert_eq!(c.wait_for_response(id).await?["error"]["code"], -32602);
+    }
+    for _ in 0..2 {
+        assert_eq!(
+            c.request("_jcode/detach", json!({"sessionId":"already-gone"}))
+                .await?,
+            json!({})
+        );
+    }
     c.shutdown().await;
     Ok(())
 }

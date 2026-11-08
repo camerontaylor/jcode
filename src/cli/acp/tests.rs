@@ -291,6 +291,7 @@ fn initialize_meta_ignores_unknown_and_absent_params() {
 #[test]
 fn session_meta_reports_the_attachment_and_effective_shared_control() {
     let support = SharedControlSupport {
+        detach: false,
         observe: true,
         stop_observed_turn: true,
         implicit_steering: true,
@@ -311,6 +312,7 @@ fn session_meta_reports_the_attachment_and_effective_shared_control() {
     // `_jcode/detach` does not exist, so detach stays false even where every
     // other behavior is available.
     let legacy = SharedControlSupport {
+        detach: false,
         observe: false,
         stop_observed_turn: false,
         implicit_steering: false,
@@ -331,6 +333,7 @@ fn session_meta_reports_the_attachment_and_effective_shared_control() {
 #[test]
 fn session_meta_merges_without_clobbering_existing_meta() {
     let support = SharedControlSupport {
+        detach: false,
         observe: true,
         stop_observed_turn: true,
         implicit_steering: true,
@@ -368,6 +371,7 @@ fn shared_control_follows_the_daemon_not_the_adapter() {
     assert_eq!(
         SharedControlSupport::from_router(&router(false, false)),
         SharedControlSupport {
+            detach: false,
             observe: false,
             stop_observed_turn: false,
             implicit_steering: false,
@@ -379,6 +383,7 @@ fn shared_control_follows_the_daemon_not_the_adapter() {
     assert_eq!(
         SharedControlSupport::from_router(&router(true, false)),
         SharedControlSupport {
+            detach: false,
             observe: true,
             stop_observed_turn: true,
             implicit_steering: false,
@@ -389,6 +394,7 @@ fn shared_control_follows_the_daemon_not_the_adapter() {
     assert_eq!(
         SharedControlSupport::from_router(&router(false, true)),
         SharedControlSupport {
+            detach: false,
             observe: false,
             stop_observed_turn: false,
             implicit_steering: false,
@@ -399,6 +405,7 @@ fn shared_control_follows_the_daemon_not_the_adapter() {
     assert_eq!(
         SharedControlSupport::from_router(&router(true, true)),
         SharedControlSupport {
+            detach: false,
             observe: true,
             stop_observed_turn: true,
             implicit_steering: true,
@@ -1550,6 +1557,7 @@ fn prompts_steer_only_on_a_daemon_that_advertises_it() {
         DaemonCapabilities::default(),
         old,
         DaemonCapabilities {
+            preserve_work: false,
             turn_origin: true,
             soft_interrupt_ids: false,
         },
@@ -1569,4 +1577,28 @@ fn steer_messages_carry_turn_scoped_ids() {
     assert_eq!(chunk["update"]["messageId"], "s1:gen:4:steer:0");
     assert_eq!(chunk["update"]["content"]["text"], "also this");
     assert_eq!(turn_end_state(TurnEndStatus::Cancelled), "canceled");
+}
+
+#[test]
+fn detach_support_requires_work_preservation_and_withdrawal() {
+    let mut router = RouterState::new("test", "session");
+    router.preserve_work = true;
+    assert!(!SharedControlSupport::from_router(&router).detach);
+    router.set_turn_origin(true);
+    assert!(!SharedControlSupport::from_router(&router).detach);
+    router.set_soft_interrupt_ids(true);
+    assert!(SharedControlSupport::from_router(&router).detach);
+    assert_eq!(
+        jcode_session_meta("test", SharedControlSupport::from_router(&router))["sharedControl"]["detach"],
+        true
+    );
+    let legacy: Request =
+        serde_json::from_value(json!({"type":"prepare_disconnect","id":1})).unwrap();
+    assert!(matches!(
+        legacy,
+        Request::PrepareDisconnect {
+            preserve_work: false,
+            ..
+        }
+    ));
 }
