@@ -1,5 +1,7 @@
-use super::provider_init::ProviderChoice;
 use clap::{Parser, Subcommand, ValueEnum};
+
+use super::provider_init::ProviderChoice;
+
 mod cloud_env;
 pub(crate) use cloud_env::CloudEnvCommand;
 mod cloud_ephemeral;
@@ -11,6 +13,7 @@ pub(crate) use cloud_runtime::CloudRuntimeCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TranscriptModeArg {
     Insert,
@@ -18,6 +21,7 @@ pub(crate) enum TranscriptModeArg {
     Replace,
     Send,
 }
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum ProviderAuthArg {
     /// Send the API key as Authorization: Bearer <key> (OpenAI-compatible default)
@@ -27,6 +31,7 @@ pub(crate) enum ProviderAuthArg {
     /// Do not send authentication, useful for localhost model servers
     None,
 }
+
 #[derive(Parser, Debug)]
 #[command(name = "jcode")]
 #[command(version = jcode_build_meta::version())]
@@ -35,12 +40,15 @@ pub(crate) struct Args {
     /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, conifer, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, grok-build, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
     #[arg(short, long, default_value = "auto", global = true)]
     pub(crate) provider: ProviderChoice,
+
     /// Working directory for the local client process
     #[arg(short = 'C', long, global = true)]
     pub(crate) cwd: Option<String>,
+
     /// Working directory to send to a remote server when using --socket
     #[arg(long, global = true)]
     pub(crate) remote_working_dir: Option<String>,
+
     /// Run the UI locally and attach to the persistent Jcode server on this SSH host
     #[arg(long, global = true, conflicts_with = "socket", value_name = "HOST")]
     pub(crate) ssh: Option<String>,

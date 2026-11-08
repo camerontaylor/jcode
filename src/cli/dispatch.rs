@@ -1,22 +1,25 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
+
+use anyhow::{Context, Result};
+use std::io::IsTerminal;
+use std::process::{Command as ProcessCommand, Stdio};
+use std::time::Instant;
+
 use super::args::{
     AmbientCommand, Args, AuthCommand, CloudCommand, CloudSessionsCommand, Command, MemoryCommand,
     ModelCommand, ProviderCommand, RestartCommand, ServerCommand, SessionCommand,
     TranscriptModeArg,
 };
-use super::{
-    account, acp, commands, debug, hot_exec, login, output, provider_init, selfdev, terminal,
-    tui_launch,
-};
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
     tui,
 };
-use anyhow::{Context, Result};
+
+use super::{
+    account, acp, commands, debug, hot_exec, login, output, provider_init, selfdev, terminal,
+    tui_launch,
+};
 use provider_init::ProviderChoice;
-use std::io::IsTerminal;
-use std::process::{Command as ProcessCommand, Stdio};
-use std::time::Instant;
 
 #[cfg(any(target_os = "linux", test))]
 fn is_file_controlled_debug_client() -> bool {
