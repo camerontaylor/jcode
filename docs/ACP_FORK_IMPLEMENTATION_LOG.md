@@ -236,3 +236,10 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   sentence). F2 minor: normalise `agentInfo.version` in fixture comparator.
   -> corr-detach worker `05e7eb9f`, branch `fork/acp-turn-correlation-detach`
   (not pushing stage; orchestrator merges both).
+- 2026-11-08: Review F2/F3/F4 fixed by `05e7eb9f` (`6f181c53f`,
+  `8841ffa93`): detach prepare failure -> `-32603`, waiter unregistered,
+  attachment preserved (wire regression); unattributed work omits
+  correlation (contract sentence added); only `result.agentInfo.version`
+  normalised, no re-record. 59 ACP unit, 41 router, 14 conformance,
+  4 shared-session, 199 harness lib. Orchestrator spot-checked F3 and
+  fast-forwarded `fork/acp-stage` to `8841ffa93`. F1 (core) pending.
