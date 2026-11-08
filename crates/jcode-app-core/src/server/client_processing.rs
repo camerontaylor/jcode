@@ -567,6 +567,11 @@ pub(super) async fn cancel_processing_message_for_turn(
         {
             let _ = client_event_tx.send(stopped);
         }
+        if sessions.is_some() {
+            // Preserve the Stop notification, ahead of cooperative completion.
+            // Done itself belongs exclusively to the ordered publication drain.
+            let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
+        }
         let cancel_epoch = match signal_target() {
             Some(epoch) => epoch,
             None => return,
