@@ -205,3 +205,19 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   "Run stdin-forwarding cohort (all platforms)"; Quality green. Second run
   42455789393 (scoped fmt check) in progress; P0 worker owns diagnosis.
 - 2026-11-08: R1 dispatched (Sol, triton) from stage `47a130e98`.
+- 2026-11-08 (session restart): background review poller was lost and
+  restarted; review `jcode-acp-p3-corr-detach-104604e23` state `running`.
+- 2026-11-08: Fork CI run 2 (42455789393) failed again in Build & Test,
+  `tool::bash::tests::test_stdin_forwarding_{single_line,multiple_lines}`
+  ("timed out waiting for stdin request"). NOT pre-existing upstream:
+  upstream CI on base 7fd42339c (1jehuang/jcode run 42225693659) passed
+  that step; it failed only Quality/Format. Steered P0 worker to diff the
+  workflow steps against upstream and reproduce locally; no skip/ignore.
+- 2026-11-08: R1 worker stopped early with prep only: inventory
+  (`6ca19f953`), pure-move router split (`36d16910e`, `daemon_router.rs`
+  -> 1,270 lines), notes (`ed7c5521b`). Core diff unchanged. Sent design
+  decision and asked it to continue: optional `end: Option<TurnEndStatus>`
+  on the scoped terminal set by `TurnEventDrain`; adapter-owned local end
+  type; delete `ServerEvent::TurnEnded` (removes D3) and translate.rs lines;
+  rewrite router test helper; full equivalence gate; checkpoint if context
+  is tight.
