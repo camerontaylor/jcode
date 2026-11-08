@@ -1111,7 +1111,7 @@ async fn turn_is_attributed_before_turn_started_is_announced() {
 async fn cancellation_dispatch_cannot_signal_a_successor() {
     let _lock = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
-    let harness =
+    let mut harness =
         TurnHarness::new("dispatch_replacement", 2, Arc::new(HangingStreamProvider)).await;
     let mut requester = harness.take_receiver(0);
     for mode in 0..3 {
