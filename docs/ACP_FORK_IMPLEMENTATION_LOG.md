@@ -249,3 +249,12 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   mappings; git dropped a `}`/`#[test]` at the seam, fixed; rerere
   recorded). acp.rs auto-merged, uncompiled -> `436bb2af` verifies and
   pushes ff-only.
+- 2026-11-08: Review F1 + TurnStopped sibling fixed by `9008bf12`
+  (`fork/p1-cancel-race` b5384ff29, `pr/turn-scoped-cancel` e25ef4005):
+  fanout targets snapshotted before the lock (`session_event_targets`),
+  TurnStopped/Interrupted sent synchronously inside `cancel_active` after
+  revalidation, task handle restored on rejection; failing-first run
+  reproduced all three. Accepted edge: a subscriber joining between snapshot
+  and send misses that TurnStopped (live_status still observed). Merged
+  into stage cleanly: `b034aad96`. All four review findings are now fixed
+  in the stage.
