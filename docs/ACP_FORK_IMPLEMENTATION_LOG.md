@@ -159,3 +159,6 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   already uses the `-32000` busy error. Note: `respond_to_permission` cannot
   reach agents on other hosts (no serverId); answer remote questions via
   `send_agent_prompt` steer.
+  Remote permission/question requests can also be answered on the agent's
+  host: `ssh <host> paseo permit allow <agentId> <reqId> --input '{"answers":{"0":"..."}}'`
+  (answer values are strings).
