@@ -934,3 +934,20 @@ fn late_prompt_registration_after_detach_or_close_is_rejected() {
         assert!(!router.pending.contains_key(&99));
     }
 }
+
+#[test]
+fn stop_preserves_observed_turn_until_daemon_terminal() {
+    let mut router = steering_router();
+    router.route(turn_started(9, peer(5), Some("peer prompt")));
+    assert!(router.stop().is_empty());
+    assert_eq!(router.active_turn_identity(), Some(identity(9)));
+    let actions = router.route(scoped_terminal(9, TurnEndStatus::Cancelled));
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        RouteAction::PeerTurnEnded {
+            status: TurnEndStatus::Cancelled,
+            ..
+        }
+    )));
+    assert_eq!(router.active_turn_identity(), None);
+}

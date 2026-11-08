@@ -677,17 +677,17 @@ pub(super) async fn cancel_processing_message_for_turn(
             Some(epoch) => epoch,
             None => return,
         };
-        let reset_control = session_control.clone();
-        tokio::spawn(async move {
-            // The running turn is not owned by this connection (post-reload
-            // recovery, server-initiated turn, or attach), so we cannot await
-            // it. Clear the flag later so the *next* turn is not aborted by a
-            // stale cancel, but only if no newer cancel fired in the meantime:
-            // an unconditional reset here used to erase rapid repeated Esc
-            // cancels before the busy turn observed them (issue #428).
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            reset_control.reset_cancel_if_epoch(cancel_epoch);
-        });
+        // Identity-aware turns clear old cancellation when claiming their
+        // successor. Keep Stop armed until then: bash's shutdown handoff may
+        // wait 750 ms, so a 500 ms reset can turn cancellation into backgrounding.
+        if observer.is_none() {
+            let reset_control = session_control.clone();
+            tokio::spawn(async move {
+                // Legacy callers have no turn-claim reset. Preserve newer fires.
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                reset_control.reset_cancel_if_epoch(cancel_epoch);
+            });
+        }
         *state.client_is_processing = false;
         let status_session_id = state
             .session_id
