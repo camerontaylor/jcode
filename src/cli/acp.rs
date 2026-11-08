@@ -419,6 +419,25 @@ fn prompt_response(stop_reason: &str, usage: &TurnUsage) -> Value {
     response
 }
 
+/// Missing attribution on streamed work means unknown, not a turnless action.
+fn streamed_prompt_response(
+    stop_reason: &str,
+    usage: &TurnUsage,
+    correlation: Option<(String, &'static str)>,
+    turnless: bool,
+) -> Value {
+    let mut response = prompt_response(stop_reason, usage);
+    if let Some((turn_id, role)) = correlation {
+        response["_meta"]["jcode"] = json!({"turnId":turn_id,"role":role});
+    } else if !turnless {
+        response
+            .as_object_mut()
+            .expect("prompt response is an object")
+            .remove("_meta");
+    }
+    response
+}
+
 impl SessionUiState {
     fn from_history_fields(
         provider_name: Option<String>,
@@ -1102,19 +1121,26 @@ impl AcpRuntime {
             // alone would otherwise invoke owner disconnect cancellation.
             let prepare_id = session.next_id();
             let mut reply = session.register(prepare_id, PendingKind::Reply).await;
-            session
-                .send(&Request::PrepareDisconnect {
-                    id: prepare_id,
-                    preserve_work: true,
-                })
-                .await?;
-            loop {
-                if matches!(next_routed(&mut reply).await?, ServerEvent::Done { id } if id == prepare_id)
-                {
-                    break;
-                }
+            let prepared = async {
+                session
+                    .send(&Request::PrepareDisconnect {
+                        id: prepare_id,
+                        preserve_work: true,
+                    })
+                    .await?;
+                wait_for_done(&mut reply, prepare_id).await
             }
+            .await;
             session.unregister(prepare_id).await;
+            if let Err(err) = prepared {
+                return self
+                    .write_error_value(
+                        id,
+                        JSONRPC_INTERNAL_ERROR,
+                        format!("Failed to prepare detach: {err:#}"),
+                    )
+                    .await;
+            }
             self.sessions.lock().await.remove(&session_id);
             let actions = session.router.lock().await.detach_view();
             session.sink(self.clone()).apply(actions).await;
@@ -1867,10 +1893,14 @@ impl AcpRuntime {
             }
         }
 
-        let mut response = prompt_response(&stop_reason, &turn_usage);
-        if let Some((turn_id, role)) = session.router.lock().await.prompt_correlation(prompt_id) {
-            response["_meta"]["jcode"] = json!({"turnId": turn_id, "role": role});
-        }
+        let router = session.router.lock().await;
+        let response = streamed_prompt_response(
+            &stop_reason,
+            &turn_usage,
+            router.prompt_correlation(prompt_id),
+            router.prompt_was_turnless(prompt_id),
+        );
+        drop(router);
         ticket.release().await;
         self.write_result(rpc_id, response).await?;
         Ok(())

@@ -599,3 +599,75 @@ async fn acp_conformance_detach_params_and_idempotency() -> Result<()> {
     c.shutdown().await;
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_conformance_detach_prepare_error_preserves_attachment() -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let _env = setup_test_env()?;
+    let runtime = tempfile::Builder::new()
+        .prefix("acp-prepare-error-")
+        .tempdir_in("/tmp")?;
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", runtime.path());
+    let listener = tokio::net::UnixListener::bind(runtime.path().join("jcode.sock"))?;
+    let daemon = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            connections.spawn(async move {
+                let (read, mut write) = socket.into_split();
+                let mut lines = BufReader::new(read).lines();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let id = &request["id"];
+                    let response = match request["type"].as_str().unwrap() {
+                        "ping" => json!({"type":"pong","id":id,"capabilities":["turn_origin","soft_interrupt_ids","detach_preserve_work"]}),
+                        "subscribe" => json!({"type":"done","id":id}),
+                        "get_history" => json!({"type":"history","id":id,"session_id":"prepare-test","messages":[],"all_sessions":["prepare-test"]}),
+                        "prepare_disconnect" => json!({"type":"error","id":id,"message":"prepare rejected"}),
+                        _ => panic!("unexpected request: {request}"),
+                    };
+                    write.write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                }
+            });
+        }
+    });
+    let result = async {
+        let mut client = AcpClient::spawn()?;
+        initialize(&mut client).await?;
+        let created = client
+            .request("session/new", json!({"cwd":std::env::current_dir()?}))
+            .await?;
+        let session = &created["sessionId"];
+        assert_eq!(session, "prepare-test");
+        assert_eq!(created["_meta"]["jcode"]["sharedControl"]["detach"], true);
+        for _ in 0..2 {
+            let id = client
+                .send_request("_jcode/detach", json!({"sessionId":session}))
+                .await?;
+            let failed = client.wait_for_response(id).await?;
+            assert_eq!(failed["error"]["code"], -32603);
+            assert!(
+                failed["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("prepare rejected")
+            );
+            assert!(failed.get("result").is_none());
+            initialize(&mut client).await?;
+            // Still attached: local commands can address the original session.
+            let selected = client
+                .request(
+                    "session/prompt",
+                    json!({"sessionId":session,"prompt":[{"type":"text","text":"/model"}]}),
+                )
+                .await?;
+            assert_eq!(selected["stopReason"], "end_turn");
+        }
+        client.shutdown().await;
+        Ok(())
+    }
+    .await;
+    daemon.abort();
+    result
+}

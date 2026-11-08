@@ -327,8 +327,8 @@ own-echo change to v2 rather than creating another v1 behavior mode.
 
 ### Turn correlation on prompt responses
 
-With `turn_correlation` advertised, every successful v1 `session/prompt` result
-carries, beside `stopReason`:
+With `turn_correlation` advertised, successful v1 `session/prompt` results
+carry, beside `stopReason`:
 
 ```json
 {"stopReason":"end_turn","_meta":{"jcode":{"turnId":"opaque-turn-id","role":"origin"}}}
@@ -346,6 +346,10 @@ carries, beside `stopReason`:
 - Responses finished by detach or local close still carry the `turnId` they
   were following, with `stopReason: "cancelled"`; the shared turn may be
   continuing.
+
+When work runs without a daemon turn identity (including legacy daemons without
+`turn_origin`), omit `_meta.jcode` turn correlation: absence means unknown,
+whereas `role: "none"` means no turn ran.
 
 Busy rejections keep the legacy JSON-RPC error: there is no result, so no
 `_meta` turn correlation.

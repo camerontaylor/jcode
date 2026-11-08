@@ -1920,3 +1920,24 @@ fn detach_support_requires_work_preservation_and_withdrawal() {
         }
     ));
 }
+
+#[test]
+fn unattributed_model_work_is_unknown_not_turnless() {
+    let usage = TurnUsage::default();
+    let unknown = streamed_prompt_response("end_turn", &usage, None, false);
+    assert_eq!(unknown, json!({"stopReason":"end_turn"}));
+    let turnless = streamed_prompt_response("cancelled", &usage, None, true);
+    assert_eq!(
+        turnless["_meta"]["jcode"],
+        json!({"turnId":null,"role":"none"})
+    );
+    assert_eq!(
+        prompt_response("end_turn", &usage)["_meta"]["jcode"],
+        json!({"turnId":null,"role":"none"})
+    );
+    assert_eq!(
+        streamed_prompt_response("end_turn", &usage, Some(("t1".into(), "origin")), false)["_meta"]
+            ["jcode"],
+        json!({"turnId":"t1","role":"origin"})
+    );
+}
