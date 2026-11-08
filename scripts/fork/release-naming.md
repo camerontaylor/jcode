@@ -32,3 +32,11 @@ legal in these filesystem paths. No asset lookup depends on the release tag.
 Regression tests: `release_identity_preserves_build_metadata`,
 `update_versions_follow_semver_precedence_not_build_metadata`, and
 `fork_release_metadata_preserves_update_identity_and_assets`.
+
+Release preflight runs before the build matrix. It validates the tag format,
+resolves the preview tag directly from upstream (preferring annotated tags'
+peeled commit), fetches that commit with `--no-tags`, and verifies it is an
+ancestor of the tagged fork commit. Missing upstream tags and mismatched bases
+stop the workflow before compilation. The publish job consumes the verified
+SHAs as job outputs rather than looking for upstream tags on the fork remote.
+Build checkouts retain full history for the embedded 700-commit changelog.

@@ -41,8 +41,59 @@ permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: Validate release provenance
+    if: github.repository == 'camerontaylor/jcode'
+    runs-on: ubuntu-latest
+    outputs:
+      tagged_sha: ${{ steps.provenance.outputs.tagged_sha }}
+      upstream_sha: ${{ steps.provenance.outputs.upstream_sha }}
+      custom_sha: ${{ steps.provenance.outputs.custom_sha }}
+    steps:
+      - name: Validate fork release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\+fork\.p([1-9][0-9]*)$ ]]; then
+            echo "Expected vMAJOR.MINOR.PATCH+fork.pN, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+      - name: Verify upstream base
+        id: provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream=https://github.com/1jehuang/jcode
+          preview=${RELEASE_TAG##*+fork.p}
+          upstream_tag="v1.0.0-preview.$preview"
+          refs=$(git ls-remote "$upstream" "refs/tags/$upstream_tag" "refs/tags/$upstream_tag^{}")
+          upstream_sha=$(printf '%s\n' "$refs" | awk '$2 ~ /\^\{\}$/ { print $1; exit }')
+          if [ -z "$upstream_sha" ]; then
+            upstream_sha=$(printf '%s\n' "$refs" | awk 'NF == 2 { print $1; exit }')
+          fi
+          if [ -z "$upstream_sha" ]; then
+            echo "Upstream tag $upstream_tag does not exist in $upstream" >&2
+            exit 1
+          fi
+          # Fetch the commit without importing upstream tags into the fork.
+          git fetch --no-tags "$upstream" "$upstream_sha"
+          tagged_sha=$(git rev-parse HEAD)
+          if ! git merge-base --is-ancestor "$upstream_sha" "$tagged_sha"; then
+            echo "tag p$preview does not match the fork's upstream base" >&2
+            exit 1
+          fi
+          custom_sha=$(git merge-base refs/remotes/origin/custom "$tagged_sha")
+          printf 'tagged_sha=%s\nupstream_sha=%s\ncustom_sha=%s\n' \
+            "$tagged_sha" "$upstream_sha" "$custom_sha" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build (${{ matrix.artifact }})
+    needs: preflight
     if: github.repository == 'camerontaylor/jcode'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
@@ -64,18 +115,10 @@ jobs:
             target: x86_64-apple-darwin
             artifact: jcode-macos-x86_64
     steps:
-      - name: Validate fork release tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\+fork\.p([1-9][0-9]*)$ ]]; then
-            echo "Expected vMAJOR.MINOR.PATCH+fork.pN, got: $RELEASE_TAG" >&2
-            exit 1
-          fi
-
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
+          # build-meta and build_linux_compat.sh embed git log -700 for /changelog.
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
@@ -158,13 +201,9 @@ jobs:
 
   release:
     name: Publish release
-    needs: build
+    needs: [preflight, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -172,6 +211,9 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAGGED_SHA: ${{ needs.preflight.outputs.tagged_sha }}
+          UPSTREAM_SHA: ${{ needs.preflight.outputs.upstream_sha }}
+          CUSTOM_SHA: ${{ needs.preflight.outputs.custom_sha }}
         run: |
           set -euo pipefail
           cd dist
@@ -184,15 +226,12 @@ jobs:
           version=${version%%+*}
           preview=${RELEASE_TAG##*+fork.p}
           upstream_tag="v1.0.0-preview.$preview"
-          tagged_sha=$(git rev-parse HEAD)
-          upstream_sha=$(git rev-parse "refs/tags/$upstream_tag^{commit}")
-          custom_sha=$(git merge-base refs/remotes/origin/custom "$tagged_sha")
           cat > release-notes.txt <<EOF
           Fork release $RELEASE_TAG
 
-          Tagged commit: $tagged_sha
-          Upstream base: $upstream_tag ($upstream_sha)
-          Custom base SHA: $custom_sha
+          Tagged commit: $TAGGED_SHA
+          Upstream base: $upstream_tag ($UPSTREAM_SHA)
+          Custom base SHA: $CUSTOM_SHA
           EOF
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --title "jcode fork $version (upstream $upstream_tag)" --latest \
