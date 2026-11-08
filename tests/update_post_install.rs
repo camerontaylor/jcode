@@ -7,6 +7,31 @@ fn hidden_post_install_reports_ran_without_daemons() {
     let help = Command::new(binary).arg("--help").output().unwrap();
     assert!(help.status.success());
     assert!(!String::from_utf8_lossy(&help.stdout).contains("update-post-install"));
+    let probe = Command::new(binary)
+        .args([
+            "--no-update",
+            "update-post-install",
+            "--reason",
+            "test",
+            "--probe",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(probe.status.code(), Some(73));
+    match Command::new("unshare").args(["-Urnm", "true"]).output() {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            eprintln!(
+                "skip: unprivileged user/mount namespaces unavailable: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        Err(error) => {
+            eprintln!("skip: cannot probe unprivileged user/mount namespaces: {error}");
+            return;
+        }
+    }
     let dir = tempfile::tempdir().unwrap();
     // Discovery deliberately includes /tmp regardless of runtime env overrides.
     // A private mount namespace prevents even probing the host fallback socket.
@@ -23,15 +48,4 @@ fn hidden_post_install_reports_ran_without_daemons() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("no running jcode daemon found"));
-    let probe = Command::new(binary)
-        .args([
-            "--no-update",
-            "update-post-install",
-            "--reason",
-            "test",
-            "--probe",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(probe.status.code(), Some(73));
 }
