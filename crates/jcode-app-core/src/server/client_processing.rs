@@ -455,8 +455,17 @@ pub(super) async fn cancel_processing_message(
     request_decoded_at: Option<Instant>,
     sessions: Option<&SessionAgents>,
 ) {
-    cancel_processing_message_for_turn(state, session_control, client_event_tx, swarm,
-        request_id, request_decoded_at, sessions, None).await;
+    cancel_processing_message_for_turn(
+        state,
+        session_control,
+        client_event_tx,
+        swarm,
+        request_id,
+        request_decoded_at,
+        sessions,
+        None,
+    )
+    .await;
 }
 
 pub(super) async fn cancel_processing_message_for_turn(
@@ -469,26 +478,36 @@ pub(super) async fn cancel_processing_message_for_turn(
     sessions: Option<&SessionAgents>,
     expected: Option<&crate::protocol::TurnIdentity>,
 ) {
-    let observer = sessions.and_then(|sessions| sessions.turn_observer(&session_control.session_id));
+    let observer =
+        sessions.and_then(|sessions| sessions.turn_observer(&session_control.session_id));
     let identity = observer.as_ref().and_then(|observer| observer.snapshot().1);
     if expected.is_some_and(|expected| identity.as_ref() != Some(expected)) {
         return;
     }
     // Revalidate and signal together, after publication awaits. Even an
     // unscoped Stop targets the turn observed at dispatch, never its successor.
-    let signal_target = || match &observer {
-        Some(observer) => identity.as_ref().and_then(|identity| {
-            observer.cancel_active(Some(identity), || session_control.request_cancel())
-                .map(|(_, epoch)| epoch)
-        }),
-        None => Some(session_control.request_cancel()),
-    };
     let scoped = |event| match &identity {
         Some(identity) => ServerEvent::TurnEvent {
             identity: identity.clone(),
             event: Box::new(event),
         },
         None => event,
+    };
+    let signal_target = |notify_interrupted: bool| match &observer {
+        Some(observer) => identity.as_ref().and_then(|identity| {
+            observer
+                .cancel_active(Some(identity), || {
+                    // Retirement uses this same lock before publishing a terminal.
+                    // Queue Interrupted synchronously before firing and releasing
+                    // the lock, so it precedes Done even on cooperative completion.
+                    if notify_interrupted {
+                        let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
+                    }
+                    session_control.request_cancel()
+                })
+                .map(|(_, epoch)| epoch)
+        }),
+        None => Some(session_control.request_cancel()),
     };
     let cancel_start = Instant::now();
     let session_label = state
@@ -551,7 +570,7 @@ pub(super) async fn cancel_processing_message_for_turn(
         {
             let _ = client_event_tx.send(stopped);
         }
-        let cancel_epoch = match signal_target() {
+        let cancel_epoch = match signal_target(sessions.is_some()) {
             Some(epoch) => epoch,
             None => return,
         };
@@ -668,7 +687,7 @@ pub(super) async fn cancel_processing_message_for_turn(
         {
             let _ = client_event_tx.send(stopped);
         }
-        let cancel_epoch = match signal_target() {
+        let cancel_epoch = match signal_target(false) {
             Some(epoch) => epoch,
             None => return,
         };

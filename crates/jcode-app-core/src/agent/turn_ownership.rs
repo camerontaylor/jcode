@@ -35,7 +35,10 @@ impl TurnObserver {
         expected: Option<&TurnIdentity>,
         signal: impl FnOnce() -> u64,
     ) -> Option<(TurnIdentity, u64)> {
-        let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let active = state.active.as_ref()?;
         if expected.is_some_and(|expected| expected != active) {
             return None;
