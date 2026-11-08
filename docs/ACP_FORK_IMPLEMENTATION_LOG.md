@@ -15,7 +15,8 @@ at `a047a0c07`.
 - **Sol** = Paseo `codex/gpt-6.1-sol`, thinking `medium`: critical work, i.e.
   daemon concurrency/cancellation, lifecycle (R1), protocol test
   infrastructure and anything the consumer gates on.
-- **DeepSeek** = Paseo `dsh` (DeepSeek V4.1 Flash), thinking `high`: additive,
+- **DeepSeek** = Paseo `pi/opencode-go/deepseek-v4.1-flash`, thinking `high`
+  (the `dsh` route failed with "Insufficient Balance" on 2026-11-08): additive,
   mechanical or well-specified work such as the CI workflow, metadata fields,
   docs and fixture plumbing that already has a design.
 - Every lane gets its own Paseo worktree on a topic branch off `origin/custom`
@@ -49,12 +50,12 @@ observe it, plus a wire-level test:
 | Id | Phase | Lane / branch | Worker | Status | Evidence |
 | --- | --- | --- | --- | --- | --- |
 | P0-docs | 0 | planning docs on `custom` | n/a | done | `docs/ACP_FORK_*`, `docs/acp-pins/` present at `a047a0c07` |
-| P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek | pending | |
-| P0-budget | 0 | same branch: fork budget baseline files + script flag | DeepSeek | pending | |
+| P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek `9a617f29` (atlas, `acp-p0-ci`) | running | |
+| P0-budget | 0 | same branch: fork budget baseline files + script flag | DeepSeek `9a617f29` | running | |
 | P0-record | 0 | first green run on `custom` recorded here | orchestrator | blocked on P0-ci | |
-| P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek | pending | |
-| P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward | Sol | pending | |
-| T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol | pending | |
+| P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek `5365c86a` (atlas, `acp-p1-meta`) | running | |
+| P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | running | |
+| T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | running | |
 | P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs` | Sol | not started (after P1-race) | |
 | P2-R2 | 2 | catalog facade in `jcode-harness-api-server` | DeepSeek | not started | |
 | P3-corr | 3 | turn correlation `_meta.jcode.turnId` + `role` on prompt responses | Sol | not started | |
@@ -76,3 +77,8 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   concurrently on separate topic branches. Phase 1 lanes may develop before
   P0 is green but are not integrated into `custom` until the fork workflow
   runs on their head (strategy: until then claims are named local tests).
+- 2026-11-08: Wave 1 dispatched (P0-ci, P1-meta, P1-race, T-conf). Agent ids
+  above are Paseo agent ids (prefix). T-conf writes to the contract and marks
+  contradictions `#[ignore = "contract gap: …"]` rather than changing code.
+  Integration order once reviewed: P0-ci → P1-race → P1-meta → T-conf
+  (re-record corpus after P1-meta, since metadata changes the wire).
