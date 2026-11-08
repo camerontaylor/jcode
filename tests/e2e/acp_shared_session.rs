@@ -1152,9 +1152,13 @@ async fn acp_skill_clear_round_trip() -> Result<()> {
 
     let provider: Arc<dyn Provider> = Arc::new(ScriptedTurnProvider {
         words: Arc::new(Mutex::new(
-            ["alpha", "bravo"].into_iter().map(str::to_string).collect(),
+            ["alpha", "bravo", "charlie"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         )),
-        pause: Duration::from_millis(10),
+        // Long enough to hold a turn open while the test sends a second prompt.
+        pause: Duration::from_millis(700),
     });
     let server_instance =
         server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
@@ -1276,6 +1280,53 @@ async fn acp_skill_clear_round_trip() -> Result<()> {
                 .iter()
                 .any(|text| text.starts_with("Activated skill:")),
             "a missing skill key must not reselect the cleared skill: {updates:#?}"
+        );
+
+        // A skill change cannot ride a steer: while a turn runs, an explicit
+        // selection (here the clear) is rejected before insertion, and the
+        // running prompt is untouched.
+        let running_id = acp
+            .send_request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "prompt": [{ "type": "text", "text": "Reply with exactly the word: charlie" }],
+                }),
+            )
+            .await?;
+        acp.wait_for_notification(|notification| is_agent_text(notification, "charlie"))
+            .await?;
+        let busy_id = acp
+            .send_request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "prompt": [{ "type": "text", "text": "a steer that must not land" }],
+                    "_meta": { "jcode": { "skill": null } },
+                }),
+            )
+            .await?;
+        let rejected = acp.wait_for_response(busy_id).await?;
+        assert_eq!(
+            rejected["error"]["code"], -32000,
+            "a busy session rejects the skill change the way it rejects a busy prompt: {rejected}"
+        );
+        let message = rejected["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("already processing a prompt")
+                && message.contains("a skill selection needs an idle session"),
+            "the rejection says why and what to do: {message}"
+        );
+        let running = acp.wait_for_response(running_id).await?;
+        assert_eq!(
+            running["result"]["stopReason"], "end_turn",
+            "the rejected steer left the running turn alone: {running}"
+        );
+        assert!(
+            !agent_texts(&acp.take_notifications())
+                .iter()
+                .any(|text| text.contains("must not land")),
+            "the rejected text was never delivered"
         );
 
         acp.shutdown().await;
