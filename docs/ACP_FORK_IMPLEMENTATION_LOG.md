@@ -69,7 +69,7 @@ observe it, plus a wire-level test:
 | CI-guard | 0 | clear clippy/warning/panic/swallowed-error ratchet failures; branch `fork/acp-ci-guardrails` off `fork/acp-stage-next` `e87becb75` | Sol `ae3f6bd4` (triton, `acp-ci-guardrails`) | done; is the new `custom`/stage head `bf9f0b22f` | run 42465256663 green; panic totals 8 -> 8, swallowed 17 -> 17 across split families; 3 swallowed + 1 panic genuinely removed |
 | REL-name | rel | fork release naming `vX.Y.Z+fork.pNNN` (user-approved): build-meta `release_semver` accepts `+build`, updater tests, `fork-release.yml` tag check/title/notes; branch `fork/release-fork-naming` off `custom` | Sol `68a66c4c` (triton, `release-fork-naming`) | running | |
 | REL-reload | rel | `jcode update` reloads every reachable shared daemon (socket-env mismatch), plus a `server reload` hint; branch `fork/update-reload-all-daemons` off `custom` | Sol `bcab9716` (triton, `update-reload-all-daemons`) | running | |
-| REL-agents | rel | agents repo `harness-update.py`: ignore `+build` in `version_key`, percent-encode the tag in the download URL; PR camerontaylor/agents#56 | orchestrator | PR open, CI running | 11/11 tests |
+| REL-agents | rel | agents repo `harness-update.py`: ignore `+build` in `version_key`, percent-encode the tag in the download URL; PR camerontaylor/agents#56 | orchestrator | merged `f70952f38` (CI green ubuntu+macos) | 11/11 tests; hosts pick it up on next agents deploy (needed before cutting v0.99.1004+fork.p199) |
 
 Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 
