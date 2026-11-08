@@ -1,56 +1,9 @@
 // Turn lifecycle routing. Included in daemon_router to preserve its private scope.
 impl RouterState {
-    /// Release this view's own turn without cancelling it by marking it adopted,
-    /// so the daemon keeps running the work. Otherwise follow `close_view`'s
-    /// prompt-withdrawal and peer-bracket behaviour.
-    pub(super) fn detach_view(&mut self) -> Vec<RouteAction> {
-        self.detached = true;
-        if let Some(own) = self.own_turn.as_mut() {
-            own.adopted = true;
-        }
-        self.close_view()
-    }
-
-    /// `session/close`: withdraw waiting prompts, cancel this view's own
-    /// running turn, and release an adopted peer turn without cancelling it.
-    /// From now on nothing starts or adopts a turn for this view.
-    pub(super) fn close_view(&mut self) -> Vec<RouteAction> {
-        self.view_closed = true;
-        let mut actions = self.withdraw(Withdrawal::Close);
-        actions.extend(self.close_peer_turn(TurnEndStatus::Cancelled, None));
-        let Some(own) = self.own_turn.as_ref() else {
-            return actions;
-        };
-        if !own.adopted {
-            // Scoped, so a cancel that arrives after the turn ended cannot hit
-            // a peer's turn that began in the meantime.
-            actions.push(RouteAction::Send(Request::Cancel {
-                id: self.next_request_id(),
-                turn: Some(own.identity.clone()),
-            }));
-            return actions;
-        }
-        // Another client started it: let it run, but stop answering our
-        // prompts with it. Its remaining events are dropped as not open.
-        let own = self.own_turn.take().expect("checked above");
-        if own.bracket_open {
-            self.deliver_local_end(
-                own.request_id,
-                RoutedEvent::LocalTurnEnd {
-                    identity: own.identity.clone(),
-                    status: TurnEndStatus::Cancelled,
-                    message: Some(
-                        "The session was closed; the turn continues for the client that started it."
-                            .to_string(),
-                    ),
-                },
-            );
-        }
-        for member in own.members() {
-            self.deliver(member, ServerEvent::Interrupted);
-            self.deliver(member, ServerEvent::Done { id: member });
-        }
-        actions
+    /// `session/cancel`: withdraw every prompt still waiting for a turn. The
+    /// caller still cancels the running turn.
+    pub(super) fn stop(&mut self) -> Vec<RouteAction> {
+        self.withdraw(Withdrawal::Stop)
     }
 
     /// Called with the router lock held through the daemon send, so closure
