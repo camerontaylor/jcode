@@ -792,3 +792,97 @@ fn unattributed_model_work_is_unknown_not_turnless() {
         json!({"turnId":"t1","role":"origin"})
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn repeated_load_reuses_attachment_and_active_peer_identity() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => crate::env::set_var(key, value),
+                    None => crate::env::remove_var(key),
+                }
+            }
+        }
+    }
+    let _restore = Restore(
+        ["JCODE_SOCKET", "JCODE_RUNTIME_DIR"]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect(),
+    );
+    crate::env::set_var("JCODE_SOCKET", temp.path().join("absent.sock"));
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    let runtime = AcpRuntime::new(AcpProfile::Standard, ProviderChoice::Claude, None, None);
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let (reader, writer) = client.into_split();
+    let session = Arc::new(DaemonSession::new(
+        "existing",
+        None,
+        writer,
+        "observer".into(),
+        1,
+    ));
+    session.router.lock().await.set_turn_origin(true);
+    let identity = crate::protocol::TurnIdentity {
+        runtime_generation: "load-test".into(),
+        turn_id: 1,
+    };
+    session.router.lock().await.route(ServerEvent::TurnStarted {
+        identity: identity.clone(),
+        origin: Some(TurnOrigin::client(Some("peer".into()), 9)),
+        user_content: Some("running".into()),
+    });
+    session.peer_gate.lock().await.ready = true;
+    *session.active_skill.lock().await = Some("keep-skill".into());
+    runtime
+        .sessions
+        .lock()
+        .await
+        .insert("existing".into(), session.clone());
+    session.spawn_reader(reader, runtime.clone());
+    let daemon = tokio::spawn(async move {
+        let (reader, mut writer) = server.into_split();
+        let mut reader = BufReader::new(reader);
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let Request::GetHistory { id } = serde_json::from_str(&line).unwrap() else {
+                panic!("repeated load must reuse the socket, not subscribe again");
+            };
+            let history = json!({"type":"history", "id":id,
+                "session_id":"existing", "messages":[], "all_sessions":["existing"]});
+            writer
+                .write_all(format!("{history}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        // Retain the fake daemon until the attachment assertions finish.
+        std::future::pending::<()>().await;
+    });
+    for _ in 0..2 {
+        let loaded = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            runtime.attach_existing_session("existing".into(), PathBuf::from("/unused"), true),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(Arc::ptr_eq(&loaded, &session));
+        assert_eq!(
+            loaded.router.lock().await.active_turn_identity(),
+            Some(identity.clone())
+        );
+        assert_eq!(
+            loaded.active_skill.lock().await.as_deref(),
+            Some("keep-skill")
+        );
+        assert!(loaded.peer_gate.lock().await.ready);
+    }
+    assert_eq!(runtime.connection_seq.load(Ordering::SeqCst), 0);
+    daemon.abort();
+}
