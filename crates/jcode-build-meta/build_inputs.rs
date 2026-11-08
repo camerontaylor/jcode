@@ -4,9 +4,22 @@ use std::path::Path;
 /// Accept release identities without accepting arbitrary environment text.
 pub fn release_semver(value: &str) -> Option<String> {
     let value = value.trim().strip_prefix('v').unwrap_or(value.trim());
-    let (core, prerelease) = match value.split_once('-') {
+    let (release, build) = value
+        .split_once('+')
+        .map_or((value, None), |(r, b)| (r, Some(b)));
+    if let Some(build) = build
+        && !build.split('.').all(|id| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return None;
+    }
+    let (core, prerelease) = match release.split_once('-') {
         Some((core, suffix)) => (core, Some(suffix)),
-        None => (value, None),
+        None => (release, None),
     };
     let components: Vec<_> = core.split('.').collect();
     if components.len() != 3 || components.iter().any(|part| !numeric_component(part)) {
@@ -106,6 +119,31 @@ mod tests {
             "1.2.3-rc.1\nINJECT=1",
             "01.0.0",
             "1.0.0\nINJECT=1",
+        ] {
+            assert_eq!(release_semver(value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn release_identity_preserves_build_metadata() {
+        for value in [
+            "0.99.1004+fork.p199",
+            "1.2.3+0.001.a-b",
+            "1.2.3-rc.1+fork.p199",
+        ] {
+            assert_eq!(release_semver(value).as_deref(), Some(value));
+        }
+        assert_eq!(
+            release_semver(" v0.99.1004+fork.p199 ").as_deref(),
+            Some("0.99.1004+fork.p199")
+        );
+        for value in [
+            "1.2.3+",
+            "1.2.3+a..b",
+            "1.2.3+a+z",
+            "1.2.3+a_b",
+            "1.2.3+a\nINJECT=1",
+            "1.2.3-rc.01+ok",
         ] {
             assert_eq!(release_semver(value), None, "{value}");
         }

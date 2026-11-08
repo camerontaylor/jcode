@@ -151,3 +151,30 @@ fn preview_download_requires_checksums_even_if_called_directly() {
         .expect_err("preview download must never silently skip checksums");
     assert!(error.to_string().contains("missing SHA256SUMS"));
 }
+
+#[test]
+fn fork_release_metadata_preserves_update_identity_and_assets() {
+    let tag = "v0.99.1004+fork.p199";
+    for (release, current, expected) in [
+        (tag, "0.99.1003", true),
+        (tag, "0.99.1004+fork.p199", false),
+        ("v0.99.1004", "0.99.1004+fork.p199", false),
+        ("v0.99.1003", "0.99.1004+fork.p199", false),
+    ] {
+        assert_eq!(
+            release_is_update_with(release, current, true, || panic!("release build")).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(release_identity(tag), release_identity("v0.99.1004"));
+    assert!(!explicit_stable_is_update(tag, "0.99.1004+fork.p199", true));
+    let mut fixture = preview_fixture(tag);
+    let url = format!(
+        "https://github.com/camerontaylor/jcode/releases/download/v0.99.1004%2Bfork.p199/{}.tar.gz",
+        get_asset_name()
+    );
+    fixture.release.assets[0].browser_download_url = url.clone();
+    let asset = platform_asset(&fixture.release).unwrap();
+    assert_eq!(asset.name, format!("{}.tar.gz", get_asset_name()));
+    assert_eq!(asset.browser_download_url, url);
+}

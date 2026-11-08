@@ -444,6 +444,7 @@ mod tests {
     #[test]
     fn update_versions_follow_semver_precedence_not_build_metadata() {
         for (release, current) in [
+            ("v0.99.1004+fork.p199", "0.99.1003"),
             ("v1.0.0-preview.10", "1.0.0-preview.9"),
             ("v1.0.0", "1.0.0-preview.10"),
             ("v1.0.0-preview.1", "0.99.999"),
@@ -457,6 +458,8 @@ mod tests {
             ("v1.0.0-preview.9+build.2", "1.0.0-preview.9+build.1"),
             ("v1.0.0-preview.9", "1.0.0-preview.9+abc"),
             ("v1.0.0+build.2", "1.0.0+build.1"),
+            ("v0.99.1004+fork.p199", "0.99.1004+fork.p199"),
+            ("v0.99.1004", "0.99.1004+fork.p199"),
         ] {
             assert!(!version_is_newer(release, current));
             assert!(!version_is_newer(current, release));
