@@ -50,7 +50,7 @@
     "crates/jcode-harness-api-server/src/translate.rs": 3620,
     "crates/jcode-import-core/src/lib.rs": 1645,
     "crates/jcode-provider-anthropic-runtime/src/lib.rs": 2788,
-    "crates/jcode-provider-anthropic/src/lib.rs": 1270,
+    "crates/jcode-provider-anthropic/src/lib.rs": 1267,
     "crates/jcode-provider-bedrock/src/lib.rs": 1612,
     "crates/jcode-provider-copilot-runtime/src/lib.rs": 1201,
     "crates/jcode-provider-core/src/lib.rs": 1625,
