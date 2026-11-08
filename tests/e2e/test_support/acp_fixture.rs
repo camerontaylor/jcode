@@ -102,6 +102,9 @@ fn acp_conformance_comparator_identity_drift_and_order() {
     };
     assert!(compare(&tape("a", "a"), &tape("b", "b")).is_ok());
     assert!(compare(&tape("a", "a"), &tape("b", "c")).is_err());
+    assert!(compare(&tape("a", "b"), &tape("c", "c")).is_err());
+    let prose = |text: &str| vec![json!({"dir":"a2c","msg":{"text":text}})];
+    assert!(compare(&prose("<opaque-0>"), &prose("<opaque-1>")).is_err());
     let mut reversed = tape("a", "a");
     reversed.reverse();
     assert!(compare(&tape("a", "a"), &reversed).is_err());
