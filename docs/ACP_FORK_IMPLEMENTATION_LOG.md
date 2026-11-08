@@ -52,7 +52,7 @@ observe it, plus a wire-level test:
 | P0-docs | 0 | planning docs on `custom` | n/a | done | `docs/ACP_FORK_*`, `docs/acp-pins/` present at `a047a0c07` |
 | P0-ci | 0 | `fork/ci-baseline`: fork-owned workflow (quality + ubuntu build/e2e) on `custom` and `fork/**` | DeepSeek `9a617f29` (atlas, `acp-p0-ci`) | done (green) | run 42458512159 @ `a7a3c29d0` | revert `ee4f9f6a7` (reformatted 6 upstream-only files); port `fmt-check.sh` into `scripts/fork/`; keep `a47408ec1` |
 | P0-budget | 0 | same branch: fork budget baseline files + `JCODE_*_BUDGET` env overrides | DeepSeek `9a617f29` | done | ceilings = upstream's, current size only where failing; ratchet teeth verified |
-| P0-record | 0 | first green run on `custom` recorded here | orchestrator | user AUTHORIZED merges for this plan (2026-11-08); fast-forward `custom` to `76045f863` once Fork CI run 42461964356 is green on that SHA | |
+| P0-record | 0 | first green run on `custom` recorded here | orchestrator | done: `custom` fast-forwarded `a047a0c07` -> `bf9f0b22f` (2026-11-08) on green run 42465256663 (exact SHA); confirmation run on `custom`: 42467221310 | user authorized merges |
 | P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek `5365c86a` (atlas, `acp-p1-meta`) | accepted, awaiting integration | `d335f2e7d`: 5 unit + 1 e2e wire test pass; sharedControl derived from daemon Pong caps (`SharedControlSupport::from_router`) |
 | P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | accepted, awaiting integration | `26c296a09` (review fixes: Interrupted queued inside locked revalidation, failing-first test `db810004f`); D1 `26ff594f2` on pr/turn-scoped-cancel, D2 `86db359cf` on pr/stale-cancel-flag; evidence `docs/verification/p1-cancel-race.md` |
 | T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | accepted, awaiting integration (after P0-ci green) | `4759e51b3`: 5 pass + 2 ignored contract gaps; 5/5 stable runs on triton |
@@ -66,7 +66,7 @@ observe it, plus a wire-level test:
 | P3-corpus | 3 | record scenarios 05 close owner-aware, 07 config/commands, 08 negotiation/legacy; branch `fork/acp-corpus-v1` off stage `76045f863` | Sol `e66fe5f0` (triton, `acp-corpus-v1`) | accepted (05/07/08 recorded; `25604eeaa`, `5dcce24f8`, `adfe0f4c7`); gap fixed `9bf7aaf25` (accepted) | conformance 20 pass + 1 ignored gap; shared 4; ACP unit 71; 5x replays each |
 | P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | done; in stage | `57bc78ce9`: budgets green, no ceiling raised; `ServerEvent::scoped` constructor; acp.rs 4182 -> 940; new modules transport/session/presentation/requests/prompt all < 1200; test names 71/45 unchanged; 123 ACP unit + 17 conformance + 4 shared pass |
 | R2-fix | 3 | queued review #2 fixes (F1 F2 F3 F6 F7); branch `fork/acp-review2-fixes` off stage `76045f863` | Sol `aa00969c` (triton, `acp-review2-fixes`) | accepted; merged into `fork/acp-stage-next` `e87becb75` | F1 `9f5c97299`, F2 `8ae2d0834`, F3 `af56fa992`, F6 `82965e1f0`, F7 `415e31f2c`; 126 ACP unit + 17 conformance + 4 shared pass |
-| CI-guard | 0 | clear clippy/warning/panic/swallowed-error ratchet failures; branch `fork/acp-ci-guardrails` off `fork/acp-stage-next` `e87becb75` | Sol `ae3f6bd4` (triton, `acp-ci-guardrails`) | running | |
+| CI-guard | 0 | clear clippy/warning/panic/swallowed-error ratchet failures; branch `fork/acp-ci-guardrails` off `fork/acp-stage-next` `e87becb75` | Sol `ae3f6bd4` (triton, `acp-ci-guardrails`) | done; is the new `custom`/stage head `bf9f0b22f` | run 42465256663 green; panic totals 8 -> 8, swallowed 17 -> 17 across split families; 3 swallowed + 1 panic genuinely removed |
 
 Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 
@@ -461,3 +461,26 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 - Keep `CQ_QUEUE_SSH_ALIAS=cq-queue-ceres`, and unset `PASEO_AGENT_ID` and `CQ_REVIEW_NOTIFY_HOST`.
 - The client retries a typed busy response for up to 35 s.
 - I told `1f8a9aff` that the old review cwds were removed and their evidence preserved, and offered to restore them if a request id needs its original cwd.
+
+### 2026-11-08 — `custom` advanced (first fork-CI-gated integration)
+
+- **Review of CI-guard (`bf9f0b22f`):**
+  - Budget allowances were transferred with totals unchanged: panic 2+6 -> 1+5+2; swallowed 17 -> 17.
+  - No upstream-owned allowance was raised.
+  - `cancel_processing_message` wrapper removed; tests call the turn-aware entry with `None`.
+  - `#[allow(clippy::too_many_arguments)]` matches an existing sibling in upstream `client_processing.rs`.
+  - `TurnOwnership::claim` is `#[cfg(test)]`.
+  - `RoutedEvent::Event` is boxed (clippy `large_enum_variant`).
+  - Failed sends are logged, not dropped.
+  - `parse_acp_slash_command` returns `None` for an absent name (`?`, not `unwrap_or_default`).
+- **Fast-forwards to `bf9f0b22f`**, which has a green Fork CI run on the exact SHA (42465256663: Quality Guardrails + Build & Test):
+  - `fork/acp-stage`: `76045f863` -> `bf9f0b22f`
+  - `custom`: `a047a0c07` -> `bf9f0b22f`
+  - No history rewrite.
+- **`custom` now contains:** P0 CI, P1 meta/race, T-conf, R1, R2, P3 corr/detach/skill/mcp/map/corpus (+ config peer fanout), the module split, the review #2 fixes and CI-guard.
+- **Confirmation run** on `custom` (push trigger): 42467221310.
+- **Desvio:** `manifest.txt` is `custom` only (no appended carries), so the direct fast-forward is consistent. `mine` is stale until the next `jcode-desvio build`.
+- **Remaining open items** (not blocking):
+  - Upstream candidates: `a7a3c29d0` (stdin wchan), `a47408ec1`, D1/D2 on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag`, and the config peer fanout.
+  - Phases 4–5 (v2) stay gated, per the strategy.
+
