@@ -86,7 +86,8 @@ Attachment identity intentionally follows the retained connection. Initial
 load-fix CI `42532296659` exposed two old expectations that load/resume always
 replace it. The corrected metadata test asserts stable identity for repeated
 live load/resume and distinct identities for a different session and another
-ACP process. The fixture changes only that repeated-load identity. Contract
+ACP process. The create/list/load and imported-history fixtures change only their repeated-load
+attachment identity; stored replay message IDs and content remain unchanged. Contract
 wording now explicitly distinguishes retained attachments from EOF reconnects.
 
 Lost-steer input was admitted to the daemon queue without transport ownership;
