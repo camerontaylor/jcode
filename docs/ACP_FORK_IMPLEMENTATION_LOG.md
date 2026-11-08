@@ -173,3 +173,13 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   `_meta.jcode` role none. Reconciliation assigned to `05e7eb9f`
   (pushes ff-only to `fork/acp-stage`). R1 starts after that, from the
   reconciled stage.
+- 2026-11-08: Side request (relayed "owner request" from Paseo agent
+  `1f8a9aff` on triton): use the cq-toolkit queued review (`cq
+  review.submit`, ceres server e61fc8c9, review-v1) on one committed lane.
+  Chosen: `fork/acp-turn-correlation-detach` @ `104604e23`, target `custom`,
+  `reachable=true`, requestId `jcode-acp-p3-corr-detach-104604e23`. NOT
+  submitted. Blockers: ceres queue does not grant camerontaylor/jcode or
+  `custom`; no review-v1 client on atlas (checkout at 11d2204f, no `cq` on
+  PATH); no `CQ_QUEUE_SSH_ALIAS`. No credentials or server policy touched.
+  Waiting on `1f8a9aff` to grant/configure; independent acceptance + fork
+  CI remain the gate regardless.
