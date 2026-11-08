@@ -1033,7 +1033,13 @@ async fn acp_skill_clear_round_trip() -> Result<()> {
                 }),
             )
             .await?;
-        assert_eq!(selected["stopReason"], "end_turn");
+        assert_eq!(
+            selected,
+            serde_json::json!({
+                "stopReason": "end_turn",
+                "_meta": { "jcode": { "turnId": null, "role": "none" } },
+            })
+        );
         let updates = acp.take_notifications();
         assert!(
             agent_texts(&updates)
@@ -1046,6 +1052,24 @@ async fn acp_skill_clear_round_trip() -> Result<()> {
             "a selection-only action starts no turn: {updates:#?}"
         );
 
+        let bare = acp
+            .request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "prompt": [{ "type": "text", "text": "/interrogate" }],
+                }),
+            )
+            .await?;
+        assert_eq!(
+            bare,
+            serde_json::json!({
+                "stopReason": "end_turn",
+                "_meta": { "jcode": { "turnId": null, "role": "none" } },
+            })
+        );
+        assert!(turn_notifications(&acp.take_notifications()).is_empty());
+
         // Clear with empty text: a selection-only action that starts no turn.
         let cleared = acp
             .request(
@@ -1057,7 +1081,13 @@ async fn acp_skill_clear_round_trip() -> Result<()> {
                 }),
             )
             .await?;
-        assert_eq!(cleared["stopReason"], "end_turn");
+        assert_eq!(
+            cleared,
+            serde_json::json!({
+                "stopReason": "end_turn",
+                "_meta": { "jcode": { "turnId": null, "role": "none" } },
+            })
+        );
         let updates = acp.take_notifications();
         assert!(
             agent_texts(&updates).is_empty(),

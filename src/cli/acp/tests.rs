@@ -872,6 +872,13 @@ fn a_clearing_prompt_clears_the_attachment_and_starts_no_turn() {
         "the prompt runs without the cleared skill"
     );
     assert!(plan.attach, "the clear rewrites the sticky selection");
+    assert_eq!(
+        prompt_response("end_turn", &TurnUsage::default()),
+        json!({
+            "stopReason": "end_turn",
+            "_meta": { "jcode": { "turnId": null, "role": "none" } },
+        })
+    );
 
     // With text, the text is submitted unskilled exactly as written, even when
     // it looks like a skill invocation: only the clear decides the skill.
@@ -916,6 +923,13 @@ fn an_explicit_selection_wins_over_textual_recognition() {
     )
     .unwrap();
     assert!(plan.selection_only);
+    assert_eq!(
+        prompt_response("end_turn", &TurnUsage::default()),
+        json!({
+            "stopReason": "end_turn",
+            "_meta": { "jcode": { "turnId": null, "role": "none" } },
+        })
+    );
     assert_eq!(plan.skill, Some("review".to_string()));
 
     // Textual invocations still select when no metadata is sent, and the
