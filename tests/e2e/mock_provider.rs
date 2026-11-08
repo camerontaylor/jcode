@@ -97,10 +97,8 @@ impl Provider for MockProvider {
         let gate = self.gate.clone();
         let stream = stream! {
             for (index, event) in events.into_iter().enumerate() {
-                if index == 1 {
-                    if let Some(gate) = &gate {
-                        gate.acquire().await.expect("test gate remains open").forget();
-                    }
+                if index == 1 && let Some(gate) = &gate {
+                    gate.acquire().await.expect("test gate remains open").forget();
                 }
                 yield Ok(event);
             }

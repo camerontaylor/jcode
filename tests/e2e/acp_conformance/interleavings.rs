@@ -66,6 +66,9 @@ async fn acp_conformance_interleavings() -> Result<()> {
                         let received: Vec<_> = origin.tape.iter().filter(|r| r["dir"] == "a2c").map(|r| r["msg"].clone()).collect();
                         assert_eq!(texts(&received), vec![text]);
                         assert!(origin.pending.iter().all(|m| m.get("method").is_some()), "every request answered");
+                        if owner == 0 && action == "complete" && midturn {
+                            acp_fixture::check("09-midturn-attach-v1.jsonl", &observer.tape)?;
+                        }
                         a.shutdown().await;
                         b.shutdown().await;
                         Ok::<(), anyhow::Error>(())

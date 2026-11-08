@@ -62,3 +62,7 @@ parameter errors and observer-close brackets. All contract-gap tests are enabled
 
 Number 06 is intentionally absent: acceptance scenario 6 in the contract is
 the deferred v2 delivery track, not a missing v1 recording.
+
+- `09-midturn-attach-v1.jsonl`: observer attaches to a gated active turn;
+  exactly one start/terminal pair preserves its identity. Replayed by the
+  exhaustive 12-case interleaving test.

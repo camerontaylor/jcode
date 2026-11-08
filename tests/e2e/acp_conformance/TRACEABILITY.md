@@ -50,7 +50,11 @@ Evidence: atlas `.cache/paseo-jcode-e2e/REPORT.md`, 2026-11-08, baseline
 - QA-STEER: peer steer into own turn missing from ACP user updates.
 - QA-REPLAY: first user message duplicated on load.
 
-These observations are not yet encoded as ignored tests here. In particular,
+Ignored targets: `acp_known_defect_stop_observed_peer`,
+`acp_known_defect_reverse_steer_is_mirrored`, and
+`acp_known_defect_replay_first_user_once`. We assert intended behavior rather
+than enshrining the wrong behavior in a passing companion. These probes still
+need verification against the live QA reproductions. In particular,
 a provider-stream cancellation case does not reproduce a tool-wait cancel.
 Do not treat passing provider-only scenarios as disproving the QA evidence.
 
