@@ -4,13 +4,13 @@
 //! same titles, timestamps and bookmark handling the harness API bridge's
 //! `list_sessions` reports. Rather than carrying its own copy of the bridge's
 //! index and record readers, the adapter asks for that view here; the readers
-//! themselves stay in [`crate::translate`], where upstream keeps them.
+//! themselves stay in the parent module, where upstream keeps them.
 //!
 //! Everything is best-effort: an unreadable or missing record degrades to
 //! missing metadata rather than failing a listing.
 
-use crate::translate::BridgeState;
-use crate::translate::PersistedSessionMetadata;
+use super::BridgeState;
+use super::PersistedSessionMetadata;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One stored session as the catalog reports it.

@@ -2,7 +2,7 @@
 //! stored sessions the way the harness API bridge already does.
 
 use super::*;
-use crate::translate::jcode_home_test_lock;
+use crate::translate::{BridgeState, jcode_home_test_lock};
 use rusqlite::Connection;
 use serde_json::json;
 use std::path::{Path, PathBuf};

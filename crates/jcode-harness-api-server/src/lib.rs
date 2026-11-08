@@ -18,8 +18,12 @@
 
 pub mod allocator;
 pub mod background_progress;
-pub mod session_catalog;
 pub mod translate;
+
+// `session/list` asks for the stored-session catalog; it lives under
+// `translate` so it can read the bridge's private readers, and is re-exported
+// here at the path the ACP adapter already uses.
+pub use translate::session_catalog;
 
 #[cfg(all(test, unix))]
 mod session_presence_tests;

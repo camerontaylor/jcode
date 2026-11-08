@@ -241,29 +241,29 @@ struct ArchiveState {
 /// attach responses. Serde skips the heavyweight transcript fields without
 /// materializing them.
 #[derive(Debug, Default, Deserialize)]
-pub(crate) struct PersistedSessionMetadata {
+struct PersistedSessionMetadata {
     #[serde(default)]
-    pub(crate) working_dir: Option<String>,
+    working_dir: Option<String>,
     /// Generated or imported title.
     #[serde(default)]
-    pub(crate) title: Option<String>,
+    title: Option<String>,
     /// User-provided rename, which is what `Session::display_title` prefers.
     #[serde(default)]
-    pub(crate) custom_title: Option<String>,
+    custom_title: Option<String>,
     #[serde(default)]
-    pub(crate) todo_title: Option<String>,
+    todo_title: Option<String>,
     #[serde(default)]
-    pub(crate) saved: bool,
+    saved: bool,
     #[serde(default)]
-    pub(crate) save_label: Option<String>,
+    save_label: Option<String>,
     #[serde(skip)]
-    pub(crate) updated_at_ms: Option<i64>,
+    updated_at_ms: Option<i64>,
     #[serde(skip)]
-    pub(crate) last_active_at_ms: Option<i64>,
+    last_active_at_ms: Option<i64>,
 }
 
 impl PersistedSessionMetadata {
-    pub(crate) fn display_title(&self) -> Option<String> {
+    fn display_title(&self) -> Option<String> {
         self.custom_title
             .as_deref()
             .and_then(Self::normalized_title)
@@ -286,16 +286,16 @@ impl PersistedSessionMetadata {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RecentSessionIndexEntry {
-    pub(crate) session_id: String,
-    pub(crate) working_dir: Option<String>,
-    pub(crate) generated_title: Option<String>,
-    pub(crate) custom_title: Option<String>,
-    pub(crate) todo_title: Option<String>,
-    pub(crate) saved: bool,
-    pub(crate) save_label: Option<String>,
-    pub(crate) updated_at_ms: i64,
-    pub(crate) last_active_at_ms: Option<i64>,
+struct RecentSessionIndexEntry {
+    session_id: String,
+    working_dir: Option<String>,
+    generated_title: Option<String>,
+    custom_title: Option<String>,
+    todo_title: Option<String>,
+    saved: bool,
+    save_label: Option<String>,
+    updated_at_ms: i64,
+    last_active_at_ms: Option<i64>,
 }
 
 impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
@@ -2929,7 +2929,7 @@ impl BridgeState {
     /// list. Session records can be hundreds of megabytes, while the fields we
     /// need are written in the small header and trailer. Reading bounded windows
     /// avoids parsing every transcript message just to populate the sidebar.
-    pub(crate) fn resolve_session_metadata(session_id: &str) -> Option<PersistedSessionMetadata> {
+    fn resolve_session_metadata(session_id: &str) -> Option<PersistedSessionMetadata> {
         let path = Self::session_record_path(session_id)?;
         // A missing or malformed record is expected (a session may predate the
         // fields, or be mid-write), and the only cost is missing metadata, so
@@ -3011,7 +3011,7 @@ impl BridgeState {
         std::fs::metadata(path).ok().map(|meta| meta.len())
     }
 
-    pub(crate) fn session_modified_ms(session_id: &str) -> Option<u64> {
+    fn session_modified_ms(session_id: &str) -> Option<u64> {
         Self::session_record_path(session_id)?
             .metadata()
             .ok()?
@@ -3053,7 +3053,7 @@ impl BridgeState {
     /// session is derived once and cached in the shared index (an empty
     /// value marks "no usable prompt"). The work is time-boxed per request,
     /// newest first, so a large backlog is spread across list calls.
-    pub(crate) fn backfill_prompt_titles(
+    fn backfill_prompt_titles(
         ids: &BTreeSet<String>,
         indexed: &BTreeMap<String, RecentSessionIndexEntry>,
         metadata: &mut BTreeMap<String, PersistedSessionMetadata>,
@@ -3185,7 +3185,7 @@ impl BridgeState {
             .find_map(|entry| entry.append_messages.0)
     }
 
-    pub(crate) fn recent_session_index_entries() -> Vec<RecentSessionIndexEntry> {
+    fn recent_session_index_entries() -> Vec<RecentSessionIndexEntry> {
         let Some(path) = Self::recent_session_index_path() else {
             return Vec::new();
         };
@@ -3246,7 +3246,7 @@ impl BridgeState {
             .unwrap_or_default()
     }
 
-    pub(crate) fn saved_session_ids() -> Vec<String> {
+    fn saved_session_ids() -> Vec<String> {
         let Some(path) = Self::recent_session_index_path() else {
             return Vec::new();
         };
@@ -3298,7 +3298,7 @@ impl BridgeState {
         let _ = transaction.commit();
     }
 
-    pub(crate) fn stored_session_ids(limit: Option<usize>) -> Vec<String> {
+    fn stored_session_ids(limit: Option<usize>) -> Vec<String> {
         let indexed = Self::recent_session_index_entries();
         if !indexed.is_empty() && limit.is_some_and(|limit| indexed.len() >= limit) {
             return indexed
@@ -3515,6 +3515,8 @@ mod tests;
 #[cfg(test)]
 #[path = "user_response_capability_tests.rs"]
 mod user_response_capability_tests;
+
+pub mod session_catalog;
 
 #[path = "translate/session_files.rs"]
 mod session_files;
