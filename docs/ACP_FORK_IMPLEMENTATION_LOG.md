@@ -63,7 +63,7 @@ observe it, plus a wire-level test:
 | P3-skill | 3 | `skill: null` clear + `skill_selection` ext; branch `fork/acp-skill-clear-mcp-notice` off `fork/acp-capability-metadata` | DeepSeek `8e023355` (triton, `acp-p3-skill-mcp`) | accepted, awaiting integration | `5ca728de0`; 57 `cli::acp::tests` + 3 e2e wire tests pass |
 | P3-mcp | 3 | ignored `mcpServers` notice (same branch/agent as P3-skill) | DeepSeek `8e023355` | accepted, awaiting integration | `5ca728de0`: notice only when client advertised `session.notices`; contract bullet amended on the branch |
 | P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | accepted; merged into stage `b1d801910`, compile verification assigned to `436bb2af` | `d94ec61af`: reasoning -> `agent_thought_chunk`; todo -> session `plan` via `GetTodos` snapshot; tool `name`, `locations` (read/edit/write), `diff` on edit/write; apply_patch paths/diffs and plan-on-load skipped (no structured data) |
-| P3-corpus | 3 | record scenarios 05 close owner-aware, 07 config/commands, 08 negotiation/legacy; branch `fork/acp-corpus-v1` off stage `76045f863` | Sol `e66fe5f0` (triton, `acp-corpus-v1`) | accepted (05/07/08 recorded; `25604eeaa`, `5dcce24f8`, `adfe0f4c7`); gap fix in progress on same branch | conformance 20 pass + 1 ignored gap; shared 4; ACP unit 71; 5x replays each |
+| P3-corpus | 3 | record scenarios 05 close owner-aware, 07 config/commands, 08 negotiation/legacy; branch `fork/acp-corpus-v1` off stage `76045f863` | Sol `e66fe5f0` (triton, `acp-corpus-v1`) | accepted (05/07/08 recorded; `25604eeaa`, `5dcce24f8`, `adfe0f4c7`); gap fixed `9bf7aaf25` (accepted) | conformance 20 pass + 1 ignored gap; shared 4; ACP unit 71; 5x replays each |
 | P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | done; in stage | `57bc78ce9`: budgets green, no ceiling raised; `ServerEvent::scoped` constructor; acp.rs 4182 -> 940; new modules transport/session/presentation/requests/prompt all < 1200; test names 71/45 unchanged; 123 ACP unit + 17 conformance + 4 shared pass |
 | R2-fix | 3 | queued review #2 fixes (F1 F2 F3 F6 F7); branch `fork/acp-review2-fixes` off stage `76045f863` | Sol `aa00969c` (triton, `acp-review2-fixes`) | running | |
 
@@ -392,4 +392,20 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   1. Fast-forward `custom` to `76045f863` once run 42461964356 is green.
   2. Merge corpus and review2-fixes into the stage.
   3. Wait for one CI run on that stage head, then fast-forward `custom` again.
+
+### 2026-11-08 — config peer-update gap fixed (`9bf7aaf25`)
+
+- A thin, additive core hook was needed. The daemon's model, effort and route setters only acknowledged the requester.
+- **The hook** (`crates/jcode-app-core/src/server/provider_config_fanout.rs`, plus 4 call sites in upstream-owned `client_lifecycle.rs`):
+  - wraps the reply channel
+  - forwards each event to the requester unchanged
+  - fans successful `ModelChanged`/`ReasoningEffortChanged` out to the other connections on the session, with broadcast id 0
+- **Review:** the relay task is justified because `handle_set_model`/`handle_set_reasoning_effort` use `spawn_deferred_agent_mutation`, so the acknowledgement can arrive late. The requester connection is excluded and its replies are unchanged. Upstream candidate: peers following config is a general TUI benefit.
+- **Validation:**
+  - conformance 21 pass, 0 ignored
+  - shared-session 4 pass
+  - ACP unit 71 pass
+  - no fixture changed
+  - the router regression test fails without the fix and passes with it
+  - CI run 42463671628 is pending
 
