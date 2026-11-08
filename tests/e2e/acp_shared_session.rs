@@ -949,3 +949,145 @@ async fn collect_peer_turn(client: &mut server::Client, text: &str) -> Result<Ve
     }
     anyhow::bail!("timed out waiting for peer turn text {text}")
 }
+
+/// The capability metadata a consumer gates every jcode behavior on, over the
+/// real wire: `initialize` advertises it, and every successful attachment
+/// reports its own instance id plus the effective `sharedControl` support.
+///
+/// No turn runs here on purpose: the metadata must be usable before a client
+/// submits work.
+#[tokio::test]
+async fn acp_capability_metadata_identifies_each_attachment() -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime_dir = short_runtime_dir(format!(
+        "jcode-e2e-acp-capability-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir)?;
+    let _runtime_env = EnvVarGuard::set("JCODE_RUNTIME_DIR", &runtime_dir);
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedTurnProvider {
+        words: Arc::new(Mutex::new(VecDeque::new())),
+        pause: Duration::from_millis(10),
+    });
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    let result = async {
+        wait_for_socket(&socket_path).await?;
+        let cwd = std::env::current_dir()?;
+        let mut acp = AcpClient::spawn()?;
+
+        // The default profile: `shared_control` and `peer_turns` are honored,
+        // `raw_server_event` belongs to the extended profiles only.
+        let initialize = acp
+            .request("initialize", serde_json::json!({ "protocolVersion": 1 }))
+            .await?;
+        let meta = &initialize["agentCapabilities"]["_meta"]["jcode"];
+        assert_eq!(
+            meta["interfaceVersion"], 1,
+            "initialize advertises the jcode interface version: {initialize}"
+        );
+        assert_eq!(meta["profile"], "standard");
+        assert_eq!(
+            meta["extensions"],
+            serde_json::json!(["shared_control", "peer_turns"])
+        );
+        assert_eq!(meta["sessionMcpServers"], false);
+        assert_eq!(
+            initialize["agentCapabilities"]["mcpCapabilities"],
+            serde_json::json!({ "http": false, "sse": false })
+        );
+
+        let created = acp
+            .request(
+                "session/new",
+                serde_json::json!({ "cwd": cwd, "mcpServers": [] }),
+            )
+            .await?;
+        let created_instance = attachment_instance(&created, "session/new")?;
+        let session_id = created["sessionId"]
+            .as_str()
+            .context("session/new returns a sessionId")?
+            .to_string();
+
+        // Two more attachments to the same session, each a fresh daemon
+        // connection of this adapter process.
+        let loaded = acp
+            .request(
+                "session/load",
+                serde_json::json!({ "sessionId": session_id, "cwd": cwd }),
+            )
+            .await?;
+        let loaded_instance = attachment_instance(&loaded, "session/load")?;
+
+        let resumed = acp
+            .request(
+                "session/resume",
+                serde_json::json!({ "sessionId": session_id, "cwd": cwd }),
+            )
+            .await?;
+        let resumed_instance = attachment_instance(&resumed, "session/resume")?;
+
+        for (left, right) in [
+            (&created_instance, &loaded_instance),
+            (&loaded_instance, &resumed_instance),
+            (&created_instance, &resumed_instance),
+        ] {
+            assert_ne!(
+                left, right,
+                "every attachment to one session reports its own instance id"
+            );
+        }
+
+        acp.shutdown().await;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}
+
+/// `result._meta.jcode` of an attachment response, asserting the contract's
+/// exact shape: a non-empty instance id, and exactly the four boolean
+/// `sharedControl` fields with `detach` false (`_jcode/detach` does not exist
+/// yet, so the behavior is not usable).
+fn attachment_instance(result: &serde_json::Value, method: &str) -> Result<String> {
+    let jcode = &result["_meta"]["jcode"];
+    let instance = jcode["clientInstanceId"]
+        .as_str()
+        .with_context(|| format!("{method} reports a string clientInstanceId: {result}"))?;
+    assert!(
+        !instance.is_empty(),
+        "{method} reports a non-empty clientInstanceId"
+    );
+
+    let shared = jcode["sharedControl"]
+        .as_object()
+        .with_context(|| format!("{method} reports sharedControl: {result}"))?;
+    let mut fields: Vec<&str> = shared.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        ["detach", "implicitSteering", "observe", "stopObservedTurn"],
+        "{method} reports exactly the contract's sharedControl fields: {shared:?}"
+    );
+    for (name, value) in shared {
+        assert!(
+            value.is_boolean(),
+            "{method} reports sharedControl.{name} as a boolean: {value}"
+        );
+    }
+    assert_eq!(
+        shared["detach"], false,
+        "{method} must not advertise detach before _jcode/detach exists"
+    );
+    Ok(instance.to_string())
+}
