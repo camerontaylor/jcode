@@ -258,3 +258,18 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   and send misses that TurnStopped (live_status still observed). Merged
   into stage cleanly: `b034aad96`. All four review findings are now fixed
   in the stage.
+- 2026-11-08: Stage verified by `436bb2af` at `7e4acbee2` (= b034aad96 +
+  one-line `tests/e2e/main.rs` mod-order format fix). Core: 58 lifecycle,
+  14 turn-event, 44 session, 3 ownership + named race regressions; ACP: 71
+  unit, 45 router, 15 conformance (4 fixtures replay, no re-record needed:
+  fixtures use text-only mock scripts), 4 shared-session; fmt-check exit 0.
+- 2026-11-08: P0 stdin-forwarding root cause (`a7a3c29d0`): fork runner got
+  ubuntu-26.04 first; newer kernels report `anon_pipe_read` in
+  /proc/PID/wchan, missing from `stdin_detect.rs`'s fallback list, so
+  `sh -> reader` chains never trigger forwarding. Reproduced on atlas
+  (kernel 7.2.12): times out without the line, passes with it. One-line
+  upstream-file carry; strong upstream candidate (real user impact on new
+  kernels). Fork CI run 3 (42458512159) in progress: Quality green.
+  Upstream candidates so far: `a7a3c29d0` (stdin wchan), `a47408ec1`
+  (cloud_managed_tests import), D1 `pr/turn-scoped-cancel`, D2
+  `pr/stale-cancel-flag`.
