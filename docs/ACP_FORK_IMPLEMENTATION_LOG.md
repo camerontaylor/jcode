@@ -62,7 +62,7 @@ observe it, plus a wire-level test:
 | P3-detach | 3 | `_jcode/detach`; also v1 observer close must end an open peer bracket with `canceled` (T-conf gap `acp_conformance_observer_close_bracket_contract`); same lane as P3-corr | Sol `05e7eb9f` | accepted; in stage | core hook: `PrepareDisconnect.preserve_work` + capability `detach_preserve_work` (additive) |
 | P3-skill | 3 | `skill: null` clear + `skill_selection` ext; branch `fork/acp-skill-clear-mcp-notice` off `fork/acp-capability-metadata` | DeepSeek `8e023355` (triton, `acp-p3-skill-mcp`) | accepted, awaiting integration | `5ca728de0`; 57 `cli::acp::tests` + 3 e2e wire tests pass |
 | P3-mcp | 3 | ignored `mcpServers` notice (same branch/agent as P3-skill) | DeepSeek `8e023355` | accepted, awaiting integration | `5ca728de0`: notice only when client advertised `session.notices`; contract bullet amended on the branch |
-| P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | running | |
+| P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | accepted; merged into stage `b1d801910`, compile verification assigned to `436bb2af` | `d94ec61af`: reasoning -> `agent_thought_chunk`; todo -> session `plan` via `GetTodos` snapshot; tool `name`, `locations` (read/edit/write), `diff` on edit/write; apply_patch paths/diffs and plan-on-load skipped (no structured data) |
 | P3-corpus | 3 | record scenarios 1–5, 7, 8 (v1) into corpus; CI replay | Sol | partial: 01 create/list/load, 02 shared observe/steer, 03 stop-then-prompt, 04 detach recorded; remaining: 05 close owner-aware, 07 config/commands, 08 negotiation/legacy | |
 | P0-split | 0/4 | split `src/cli/acp.rs` into transport/session/presentation | Sol | not started (after P3 adapter churn settles) | |
 
@@ -243,3 +243,9 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   normalised, no re-record. 59 ACP unit, 41 router, 14 conformance,
   4 shared-session, 199 harness lib. Orchestrator spot-checked F3 and
   fast-forwarded `fork/acp-stage` to `8841ffa93`. F1 (core) pending.
+- 2026-11-08: P3-map accepted (`d94ec61af`). Verified `name` is in the
+  ACP v1 ToolCall schema. Merged into stage (`b1d801910`): union-resolved
+  `daemon_router_tests.rs` (45 tests = 37 common + 4 corr/detach + 4
+  mappings; git dropped a `}`/`#[test]` at the seam, fixed; rerere
+  recorded). acp.rs auto-merged, uncompiled -> `436bb2af` verifies and
+  pushes ff-only.
