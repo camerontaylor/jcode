@@ -1,0 +1,390 @@
+name: Fork CI
+
+# The fork's own verification baseline. Upstream ci.yml triggers only on
+# main/master, so nothing here ran on `custom` before this workflow existed.
+# It deliberately reuses upstream's jobs almost verbatim (quality, plus the
+# ubuntu leg of build, which carries the provider_matrix and e2e steps) rather
+# than modifying ci.yml, which stays identical to upstream. Dropped here:
+# Windows, macOS, the TypeScript SDK job, installer/release automation and the
+# standalone fmt job (fmt runs inside quality).
+#
+# Budget files come from scripts/fork/ (see scripts/fork/README.md): the
+# upstream ratchets already fail on this tree, and the fork baseline carries
+# that pre-existing debt without loosening the ratchet on any file.
+#
+# Uses no repository secrets.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - custom
+      - "fork/**"
+      - "pr/**"
+  pull_request:
+    branches:
+      - custom
+
+concurrency:
+  group: fork-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JCODE_CI: "1"
+  # CI builds without the local parallel-frontend rustc wrapper from
+  # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
+  CARGO_BUILD_RUSTC_WRAPPER: ""
+  CARGO_TERM_COLOR: always
+  # Upstream commit the fork is assembled against, used by
+  # scripts/fork/fmt-check.sh to work out which .rs files are fork carries.
+  # UPDATE THIS when the Desvio base moves. The quality job's checkout needs it
+  # locally, so it fetches full history (fetch-depth: 0).
+  FORK_UPSTREAM_BASE: 7fd42339c907de223021bd63e5bb5df778c43a01
+
+jobs:
+  quality:
+    name: Quality Guardrails
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      JCODE_CODE_SIZE_BUDGET: scripts/fork/code_size_budget.json
+      JCODE_TEST_SIZE_BUDGET: scripts/fork/test_size_budget.json
+      JCODE_PANIC_BUDGET: scripts/fork/panic_budget.json
+      JCODE_SWALLOWED_ERROR_BUDGET: scripts/fork/swallowed_error_budget.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Full history: scripts/fork/fmt-check.sh runs `git show <base>:<file>`
+          # and `git diff <base> HEAD` against $FORK_UPSTREAM_BASE.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: quality-ubuntu
+          cache-all-crates: "true"
+
+      - name: Check module declarations resolve
+        # A `mod x;` with no file makes rustfmt fail with "Error writing files:
+        # failed to resolve mod", which reads like a formatting problem and hides
+        # every gate behind it. Naming the real cause first (221159294).
+        run: python3 scripts/check_module_files.py
+
+      - name: Check formatting (fork-touched files only)
+        # NOT `cargo fmt --all -- --check`: upstream's base is not rustfmt-clean,
+        # and reformatting never-modified upstream files would turn them into
+        # fork carries that conflict at every base bump. The fork gate checks
+        # only the .rs files this fork adds or modifies, skipping files already
+        # unformatted at the base. See scripts/fork/README.md.
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/fork/fmt-check.sh "$FORK_UPSTREAM_BASE"
+
+      - name: Check all targets and all features
+        if: ${{ !cancelled() }}
+        run: cargo check --locked --all-targets --all-features
+
+      - name: Run clippy with warnings denied
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Enforce Cargo.lock is up to date
+        if: ${{ !cancelled() }}
+        shell: bash
+        # Adding a dependency without regenerating Cargo.lock breaks every
+        # `--locked` build. Only the Windows jobs pass `--locked`, so such a
+        # commit passes 8 of 9 CI jobs and fails Windows at "Build release
+        # binary", skipping all of its validation steps. This catches it in
+        # seconds, on the job that already owns dependency hygiene.
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
+
+      - name: Warning budget gate contract tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: scripts/test_check_warning_budget.sh
+
+      - name: Enforce warning budget
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: scripts/check_warning_budget.sh
+
+      - name: Enforce oversized-file ratchet
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python3 scripts/check_code_size_budget.py
+
+      - name: Enforce oversized-test ratchet
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python3 scripts/check_test_size_budget.py
+
+      - name: Enforce panic-prone usage ratchet
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python3 scripts/check_panic_budget.py
+
+      - name: Enforce swallowed-error usage ratchet
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python3 scripts/check_swallowed_error_budget.py
+
+      - name: Enforce crate dependency boundaries
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python3 scripts/check_dependency_boundaries.py
+
+      - name: Enforce Rust and TypeScript SDK surface parity
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo test --locked -p jcode-sdk parity -- --nocapture
+
+      - name: Enforce wildcard re-export ratchet
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python3 scripts/check_wildcard_reexport_budget.py
+
+      - name: Enforce no unused dependencies
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo install cargo-machete --locked
+          cargo machete
+
+  build:
+    name: Build & Test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    # Inherited from upstream: 35 minutes covers a normal push (~12 min with a
+    # warm Swatinem cache) but not a rerun, where the cache is cold.
+    timeout-minutes: 75
+    # Some dependencies (e.g. convert_case 0.10.0 via derive_more/crossterm, and
+    # proc-macro2/quote) accidentally ship a `rust-toolchain.toml` *inside their
+    # published crate*. When cargo builds such a crate its CWD is that crate dir,
+    # so the rustup proxy honours the file: convert_case pins `channel = "1.83.0"`
+    # and proc-macro2 requests `components = ["rust-src"]`. RUSTUP_TOOLCHAIN takes
+    # precedence over any rust-toolchain.toml override, so pinning it here makes
+    # every step use this job's installed stable toolchain.
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      JCODE_CODE_SIZE_BUDGET: scripts/fork/code_size_budget.json
+      JCODE_TEST_SIZE_BUDGET: scripts/fork/test_size_budget.json
+      JCODE_PANIC_BUDGET: scripts/fork/panic_budget.json
+      JCODE_SWALLOWED_ERROR_BUDGET: scripts/fork/swallowed_error_budget.json
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+          # Pre-install rust-src in the (serial) toolchain step. Some build-script
+          # / proc-macro units trigger an on-demand `rustup component add rust-src`,
+          # and when several parallel cargo/rustc processes request it at once they
+          # race on the shared `~/.rustup/downloads/*.partial` file and fail with
+          # "could not rename ... No such file or directory".
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Same suffix as upstream, so the fork's ubuntu builds share the cache
+          # entry that the corresponding upstream job populates.
+          key: ubuntu-latest-stablepin
+
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold
+
+      - name: Build
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cat > .cargo/config.toml << 'EOF'
+          [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+          EOF
+          fi
+          # NOTE: intentionally NOT exporting RUSTC_WRAPPER=sccache here. Only this
+          # step used sccache while the later `cargo test --no-run` steps did not,
+          # so sccache emitted rlibs/rmetas stamped `<unknown rustc version>` that
+          # the non-sccache test compile then rejected with E0514
+          # ("compiled by an incompatible version of rustc"). rust-cache already
+          # caches target/ across runs, so a clean, wrapper-consistent build is
+          # both correct and fast enough.
+          RUSTC="$(rustup which rustc)"
+          export RUSTC
+          CARGO_BIN="$(rustup which cargo)"
+          "$CARGO_BIN" build --locked --release --target x86_64-unknown-linux-gnu
+
+      - name: Compile library and binary tests
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 900 \
+            "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu --lib --bins --no-run
+
+      - name: Run deterministic retention-readiness cohort
+        shell: bash
+        run: |
+          # A cold jcode-app-core test harness compiles heavy optional provider
+          # dependencies and can exceed three minutes on hosted runners. The
+          # cohort itself runs in under a second once the lib test is built.
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu \
+            -p jcode-app-core --lib retention_readiness -- --nocapture
+
+      - name: Run secret-input pty cohort (all platforms with a pty)
+        shell: bash
+        # `jcode-base --lib` is never executed on Linux CI: the only jcode-base
+        # test invocation anywhere in this workflow is a Windows-only
+        # `power_inhibit::tests::windows_` filter. So the masking fix for #660 had
+        # a test that was compiled and never run, which is the same
+        # looks-green-but-never-ran shape as the warning budget and the stdin
+        # detector (#651). These tests fork a pty, so they cannot run on the
+        # Windows runner; everywhere else they take about a second.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu \
+            -p jcode-base --lib secret_input -- --nocapture
+
+      - name: Run browser session liveness and reuse regressions
+        shell: bash
+        run: |
+          cargo test --locked --target x86_64-unknown-linux-gnu -p jcode-base --lib browser_session -- --nocapture
+          cargo test --locked --target x86_64-unknown-linux-gnu -p jcode-app-core --lib browser_session -- --nocapture
+
+      - name: Run automatic model discovery regressions (Linux only)
+        shell: bash
+        # Provider crates are not covered by the TUI library test invocation.
+        # Execute these contracts, including a future Grok ID not in the binary,
+        # rather than merely compiling them with --no-run.
+        run: |
+          set -euo pipefail
+          cargo_bin="$(rustup which cargo)"
+          target=x86_64-unknown-linux-gnu
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-provider-grok-build-runtime --lib
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-provider-openrouter-runtime --lib
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-provider-gemini-runtime --lib developer_catalog
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-provider-copilot-runtime -p jcode-provider-cursor-runtime -p jcode-provider-antigravity-runtime --lib
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-provider-bedrock --features aws-sdk --lib
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-base --lib catalog_refresh_reaches_every_runtime_slot_and_compatible_profile
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-base --lib forced_catalog_refresh_bypasses_freshness_and_throttle_but_not_in_flight
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-app-core --lib model_prefetch
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target "$target" -p jcode-app-core --lib periodic_model_refresh
+
+      - name: Run embedding numeric-stability cohort (Linux only)
+        shell: bash
+        # `minilm_embedding_is_numerically_stable_across_inference_engines` pins
+        # the model's actual output, which is the only thing that can catch an
+        # inference-engine upgrade silently changing embeddings: persisted
+        # memories are keyed by model_id, which does not change across a tract
+        # bump, so the stale-embedding filter cannot notice (#657).
+        run: |
+          set -euo pipefail
+          target=x86_64-unknown-linux-gnu
+          model_dir="$HOME/.jcode/models/all-MiniLM-L6-v2"
+          mkdir -p "$model_dir"
+          base="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
+          curl -sSfL --retry 3 -o "$model_dir/model.onnx" "$base/onnx/model.onnx"
+          curl -sSfL --retry 3 -o "$model_dir/tokenizer.json" "$base/tokenizer.json"
+          # Fail loudly if the fetch produced something unusable, so this cannot
+          # degrade back into a silent skip.
+          test -s "$model_dir/model.onnx"
+          test -s "$model_dir/tokenizer.json"
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target "$target" \
+            -p jcode-embedding --lib -- --nocapture \
+            | tee /tmp/embedding-cohort.log
+          # The test is present and the harness ran it (rather than the binary
+          # failing to build).
+          grep -q "minilm_embedding_is_numerically_stable_across_inference_engines ... ok" \
+            /tmp/embedding-cohort.log
+          # A skipped test still reports "ok", so the reported result alone
+          # cannot distinguish "verified" from "silently did nothing"; only the
+          # skip message can.
+          if grep -q "skip: MiniLM model not present" /tmp/embedding-cohort.log; then
+            echo "::error::embedding cohort skipped despite fetching the model"
+            exit 1
+          fi
+
+      - name: Run stdin-forwarding cohort (all platforms)
+        shell: bash
+        # These tests exercise the per-platform stdin detector. They were never
+        # gated: the only `jcode-app-core --lib` run above is filtered to
+        # `retention_readiness`. `TH_STATE_WAITING` was defined as 2
+        # (`TH_STATE_STOPPED`) rather than 3, which silently disabled macOS stdin
+        # forwarding entirely until #651. That macOS detector has no coverage on
+        # this ubuntu-only job; this step keeps the Linux one honest.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu \
+            -p jcode-app-core --lib tool::bash::tests::test_stdin_forwarding -- --nocapture
+
+      - name: Run TUI library tests (Linux only)
+        shell: bash
+        # Run serially. Many of these tests share process-global state (model
+        # catalog, ambient cache, render state) and fail on ordering under
+        # parallelism, while passing reliably one-at-a-time: 1977 pass serially
+        # versus 2-4 varying failures in parallel. Scoping that state is tracked
+        # in #592; until then serial execution is the honest signal.
+        #
+        # COLORTERM: the runner's headless shell advertises no color support, so
+        # capability detection falls back to 256-color and every RGB cell
+        # quantizes to `Indexed`. The palette-topology measurement identifies
+        # roles by their rendered RGB, and quantization error pushes some roles
+        # outside the matcher's family radius ("got 4 edges", run 30617961697).
+        env:
+          COLORTERM: truecolor
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu \
+            -p jcode-tui --lib -- --test-threads=1 \
+            --skip test_prompt_entry_shimmer_color_moves_across_positions \
+            --skip right_fact_stack_uses_neutral_gray_except_for_context_usage
+
+      - name: Compile integration test binaries
+        shell: bash
+        # Build the integration-test binaries up front (not counted against the
+        # run steps' execution budgets). The e2e suite in particular is heavy
+        # (burst-spawn concurrency), and folding compilation into its 900s run
+        # budget was pushing slower hosted ubuntu/macos runners over the limit.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 900 \
+            "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu \
+            --test provider_matrix --test e2e --no-run
+
+      - name: Run provider matrix tests
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu --test provider_matrix
+
+      - name: Run e2e tests
+        shell: bash
+        run: |
+          # e2e is fast (~1-2 min of execution); the generous budget only guards
+          # against an occasional slow hosted runner. Compilation is already done
+          # in the dedicated compile step above.
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu --test e2e
+
+      - name: Enforce warning budget (Linux)
+        shell: bash
+        run: |
+          scripts/check_warning_budget.sh
+
+      - name: Security preflight (Linux)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo install cargo-audit --locked
+          scripts/security_preflight.sh --strict

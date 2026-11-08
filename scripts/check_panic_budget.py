@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -25,7 +26,11 @@ from typing import Any
 from rust_safety_scan import production_lines, test_module_files
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BASELINE_FILE = REPO_ROOT / "scripts" / "panic_budget.json"
+# A fork can point this ratchet at its own baseline without editing the
+# upstream JSON: see scripts/fork/README.md.
+BASELINE_FILE = Path(
+    os.environ.get("JCODE_PANIC_BUDGET") or REPO_ROOT / "scripts" / "panic_budget.json"
+)
 SCAN_ROOTS = (REPO_ROOT / "src", REPO_ROOT / "crates")
 PATTERN = re.compile(r"\.unwrap\(|\.expect\(|\b(?:panic!|todo!|unimplemented!)")
 
@@ -41,17 +46,16 @@ def is_test_rust_file(path: Path) -> bool:
     if path.suffix != ".rs":
         return False
     parts = rel.split("/")
+    name = path.name
     if parts[0] == "tests" or any(
-        part == "tests" or part.endswith("_tests") or part.endswith("_test") or part.startswith("tests_")
+        part == "tests" or part.endswith(("_tests", "_test")) or part.startswith("tests_")
         for part in parts
     ):
         return True
-    name = path.name
     return (
         name == "tests.rs"
-        or name.endswith("_tests.rs")
-        or name.endswith("_test.rs")
         or name.startswith("tests_")
+        or name.endswith(("_tests.rs", "_test.rs"))
     )
 
 
@@ -79,7 +83,10 @@ def current_counts() -> dict[str, int]:
 def load_baseline() -> dict[str, Any]:
     if not BASELINE_FILE.exists():
         return {"version": 1, "total": 0, "tracked_files": {}}
-    data = json.loads(BASELINE_FILE.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(BASELINE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"error: cannot read baseline {BASELINE_FILE}: {error}") from error
     if not isinstance(data, dict):
         raise SystemExit(f"error: invalid baseline file format: {BASELINE_FILE}")
     total = data.get("total")
