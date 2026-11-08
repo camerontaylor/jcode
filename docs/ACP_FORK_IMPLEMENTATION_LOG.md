@@ -64,7 +64,7 @@ observe it, plus a wire-level test:
 | P3-mcp | 3 | ignored `mcpServers` notice (same branch/agent as P3-skill) | DeepSeek `8e023355` | accepted, awaiting integration | `5ca728de0`: notice only when client advertised `session.notices`; contract bullet amended on the branch |
 | P3-map | 3 | reasoning/plans/tool metadata mappings; branch `fork/acp-v1-mappings` off `fork/acp-stage`; audit in `docs/verification/p3-mappings.md` | DeepSeek `436bb2af` (atlas, `acp-p3-map`) | accepted; merged into stage `b1d801910`, compile verification assigned to `436bb2af` | `d94ec61af`: reasoning -> `agent_thought_chunk`; todo -> session `plan` via `GetTodos` snapshot; tool `name`, `locations` (read/edit/write), `diff` on edit/write; apply_patch paths/diffs and plan-on-load skipped (no structured data) |
 | P3-corpus | 3 | record scenarios 1–5, 7, 8 (v1) into corpus; CI replay | Sol | partial: 01 create/list/load, 02 shared observe/steer, 03 stop-then-prompt, 04 detach recorded; remaining: 05 close owner-aware, 07 config/commands, 08 negotiation/legacy | |
-| P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | running; blocks integration into custom | |
+| P0-split | 0/4 | pure-move split of `src/cli/acp.rs` (4182 > ceiling 3444) + `tests.rs` (2275 > 1380) + `daemon_router_tests.rs` (1815 > 1644); branch `fork/acp-module-split` off stage `38fa8f3ee` | Sol `b4d57c2d` (triton, `acp-module-split`) | ACP split accepted (`a2900422e`); clearing 4 remaining budget failures | acp.rs 4182 -> 940; new modules transport/session/presentation/requests/prompt all < 1200; test names 71/45 unchanged; 123 ACP unit + 17 conformance + 4 shared pass |
 
 Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 
@@ -323,3 +323,11 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   for both diff signs and real key shapes. `1f8a9aff` will redeploy ceres
   and re-scan the exact diff, then ask for resubmission
   (`--supersedes=jcode-acp-r1-stage-38fa8f3ee`). No jcode edit needed.
+- 2026-11-08: Module split accepted at `a2900422e` (per-commit identical
+  line multisets). Remaining fork-budget failures, traced: TUI `remote.rs`
+  +2 = R1's `end: None, end_message: None` in a `TurnEvent` literal ->
+  asked for a `ServerEvent::scoped(identity, event)` constructor replacing
+  such literals workspace-wide (also shrinks core carry);
+  `client_lifecycle_tests.rs` 1942 > 1939, `turn_event_channel_tests.rs`
+  1617, `tests/e2e/acp_shared_session.rs` 1431 -> pure-move test splits.
+  No ceilings raised.
