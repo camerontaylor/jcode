@@ -150,3 +150,12 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   rejection `-32000`, not `-32602`; the contract wording only says "reject
   before insertion", so no amendment is needed.
 - 2026-11-08: P3-skill+mcp accepted at `5ca728de0` (verified gate reads `clientCapabilities.session.notices` as an object marker; contract amended in-branch).
+- 2026-11-08: Decision (contract ambiguity raised by P3-corr worker): busy
+  `session/prompt` rejections keep the legacy JSON-RPC error; turn
+  correlation applies to every *successful* prompt result; `role: none` =
+  successful result with no turn (selection-only command, bare skill, skill
+  clear). Contract amended in the P3-corr branch. Rationale: the contract
+  also requires preserving existing v1 error behavior, and the skill lane
+  already uses the `-32000` busy error. Note: `respond_to_permission` cannot
+  reach agents on other hosts (no serverId); answer remote questions via
+  `send_agent_prompt` steer.
