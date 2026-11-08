@@ -80,7 +80,7 @@ pub struct TurnIdentity {
 }
 
 /// Capability advertised when `turn_started`/`turn_state` carry the turn's
-/// origin and prompt and every turn is closed by `turn_ended`.
+/// origin and prompt and every turn is closed by a classified scoped terminal.
 pub const SERVER_CAPABILITY_TURN_ORIGIN: &str = "turn_origin";
 
 /// Additive daemon capabilities this build implements, as advertised in
@@ -192,22 +192,15 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user_content: Option<String>,
     },
-    /// Published exactly once per turn, after all of its output and
-    /// immediately before its scoped terminal `done`/`error`. Only sent to
-    /// identity-aware transports.
-    #[serde(rename = "turn_ended")]
-    TurnEnded {
-        identity: TurnIdentity,
-        status: TurnEndStatus,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        message: Option<String>,
-    },
     /// All events owned by a turn, including its terminal, share this scope.
     #[serde(rename = "turn_event")]
     TurnEvent {
         /// Authoritative classification, present only on the scoped terminal.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         end: Option<TurnEndStatus>,
+        /// Optional terminal diagnostic, including a producer that exited early.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_message: Option<String>,
         identity: TurnIdentity,
         event: Box<ServerEvent>,
     },

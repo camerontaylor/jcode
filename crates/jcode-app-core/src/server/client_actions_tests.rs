@@ -1197,7 +1197,7 @@ async fn subagent_launch_is_bracketed_by_its_own_turn() {
         .expect("the launch announces its turn");
     let ended = events
         .iter()
-        .position(|event| matches!(event, ServerEvent::TurnEnded { .. }))
+        .position(|event| matches!(event, ServerEvent::TurnEvent { end: Some(_), .. }))
         .expect("the launch ends its turn");
     let tool_start = events
         .iter()
@@ -1210,7 +1210,7 @@ async fn subagent_launch_is_bracketed_by_its_own_turn() {
         .expect("the launch streams its tool call");
     let terminal = events.len() - 1;
     assert!(
-        started < tool_start && tool_start < ended && ended < terminal,
+        started < tool_start && tool_start < ended && ended == terminal,
         "turn_started → tool stream → turn_ended → terminal: {events:?}"
     );
 
@@ -1234,9 +1234,6 @@ async fn subagent_launch_is_bracketed_by_its_own_turn() {
     for event in &events[started + 1..] {
         match event {
             ServerEvent::TurnEvent {
-                identity: scope, ..
-            }
-            | ServerEvent::TurnEnded {
                 identity: scope, ..
             } => assert_eq!(scope, identity, "every launch event is scoped to its turn"),
             other => panic!("unscoped event inside the launch: {other:?}"),

@@ -91,8 +91,9 @@ fn turn_started(turn_id: u64, origin: TurnOrigin, content: Option<&str>) -> Serv
     }
 }
 
-fn turn_ended(turn_id: u64, status: TurnEndStatus) -> ServerEvent {
+fn scoped_terminal(turn_id: u64, status: TurnEndStatus) -> ServerEvent {
     ServerEvent::TurnEvent {
+        end_message: None,
         identity: identity(turn_id),
         end: Some(status),
         event: Box::new(if status == TurnEndStatus::Failed {
@@ -109,6 +110,7 @@ fn turn_ended(turn_id: u64, status: TurnEndStatus) -> ServerEvent {
 
 fn scoped(turn_id: u64, event: ServerEvent) -> ServerEvent {
     ServerEvent::TurnEvent {
+        end_message: None,
         end: None,
         identity: identity(turn_id),
         event: Box::new(event),
@@ -137,23 +139,24 @@ fn peer(request_id: u64) -> TurnOrigin {
     TurnOrigin::client(Some(PEER.to_string()), request_id)
 }
 
-fn drain(rx: &mut RoutedReceiver) -> Vec<ServerEvent> {
+fn drain_with_ends(
+    rx: &mut RoutedReceiver,
+) -> (Vec<ServerEvent>, Vec<(usize, TurnIdentity, TurnEndStatus)>) {
     let mut events = Vec::new();
+    let mut ends = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        events.push(match event {
-            RoutedEvent::Event(event) => event,
+        match event {
+            RoutedEvent::Event(event) => events.push(event),
             RoutedEvent::LocalTurnEnd {
-                identity,
-                status,
-                message,
-            } => ServerEvent::TurnEnded {
-                identity,
-                status,
-                message,
-            },
-        });
+                identity, status, ..
+            } => ends.push((events.len(), identity, status)),
+        }
     }
-    events
+    (events, ends)
+}
+
+fn drain(rx: &mut RoutedReceiver) -> Vec<ServerEvent> {
+    drain_with_ends(rx).0
 }
 
 fn texts(events: &[ServerEvent]) -> Vec<String> {
@@ -191,7 +194,7 @@ fn own_turn_streams_to_the_prompt_waiter_only() {
     assert!(router.route(scoped(1, delta("answer"))).is_empty());
     assert!(
         router
-            .route(turn_ended(1, TurnEndStatus::Completed))
+            .route(scoped_terminal(1, TurnEndStatus::Completed))
             .is_empty()
     );
     assert!(
@@ -233,7 +236,7 @@ fn peer_turn_while_idle_is_mirrored_and_its_done_is_ignored() {
         [RouteAction::PeerTurnEvent(ServerEvent::TextDelta { text })] if text == "peer text"
     ));
 
-    let actions = router.route(turn_ended(9, TurnEndStatus::Completed));
+    let actions = router.route(scoped_terminal(9, TurnEndStatus::Completed));
     assert!(matches!(
         actions.as_slice(),
         [RouteAction::PeerTurnEnded {
@@ -260,7 +263,7 @@ fn peer_turn_after_an_own_turn_mirrors_without_touching_the_prompt() {
 
     router.route(turn_started(1, ours(77), Some("mine")));
     router.route(scoped(1, delta("own answer")));
-    router.route(turn_ended(1, TurnEndStatus::Completed));
+    router.route(scoped_terminal(1, TurnEndStatus::Completed));
     router.route(scoped(1, ServerEvent::Done { id: 77 }));
 
     // The adapter has not unregistered the prompt yet when a peer turn starts.
@@ -274,7 +277,7 @@ fn peer_turn_after_an_own_turn_mirrors_without_touching_the_prompt() {
         actions.as_slice(),
         [RouteAction::PeerTurnEvent(_)]
     ));
-    let actions = router.route(turn_ended(2, TurnEndStatus::Failed));
+    let actions = router.route(scoped_terminal(2, TurnEndStatus::Failed));
     assert!(matches!(
         actions.as_slice(),
         [RouteAction::PeerTurnEnded {
@@ -335,7 +338,7 @@ fn peer_done_with_a_colliding_id_does_not_complete_the_own_prompt() {
     // A peer turn whose connection-local request id happens to be ours.
     router.route(turn_started(1, peer(77), Some("theirs")));
     router.route(scoped(1, delta("peer answer")));
-    router.route(turn_ended(1, TurnEndStatus::Completed));
+    router.route(scoped_terminal(1, TurnEndStatus::Completed));
     router.route(scoped(1, ServerEvent::Done { id: 77 }));
     assert!(
         drain(&mut prompt).is_empty(),
@@ -345,7 +348,7 @@ fn peer_done_with_a_colliding_id_does_not_complete_the_own_prompt() {
     // Our own turn and terminal for the same id still land.
     router.route(turn_started(2, ours(77), Some("mine")));
     router.route(scoped(2, delta("own answer")));
-    router.route(turn_ended(2, TurnEndStatus::Completed));
+    router.route(scoped_terminal(2, TurnEndStatus::Completed));
     router.route(scoped(2, ServerEvent::Done { id: 77 }));
     let events = drain(&mut prompt);
     assert_eq!(texts(&events), vec!["own answer".to_string()]);
@@ -448,7 +451,7 @@ fn mid_turn_attach_opens_the_running_turn_from_turn_state() {
             .is_empty()
     );
 
-    let actions = router.route(turn_ended(5, TurnEndStatus::Cancelled));
+    let actions = router.route(scoped_terminal(5, TurnEndStatus::Cancelled));
     assert!(matches!(
         actions.as_slice(),
         [RouteAction::PeerTurnEnded {
@@ -620,7 +623,7 @@ fn peer_terminal_closes_a_peer_turn_that_never_ended() {
 fn a_late_peer_terminal_is_fenced_by_identity() {
     let mut router = attached_router();
     router.route(turn_started(1, peer(77), Some("peer prompt")));
-    router.route(turn_ended(1, TurnEndStatus::Completed));
+    router.route(scoped_terminal(1, TurnEndStatus::Completed));
 
     let mut prompt = router.register(77, PendingKind::Prompt);
     router.route(turn_started(2, ours(77), Some("mine")));
@@ -641,7 +644,7 @@ fn a_late_peer_terminal_is_fenced_by_identity() {
 }
 
 /// The cancel path as the daemon emits it. The canceller gets the scoped
-/// interrupt notice, the turn's `turn_ended(cancelled)` and scoped terminal,
+/// interrupt notice, the turn's `scoped_terminal(cancelled)` and scoped terminal,
 /// then the cancel path's own scoped `interrupted` + `done` for the same
 /// request id. A peer gets the notice, the end and the turn's terminal (the
 /// daemon fans it out to every attachment).
@@ -658,7 +661,7 @@ fn the_cancel_path_leaves_both_routers_consistent() {
     canceller.route(scoped(1, delta("streaming")));
     let actions = canceller.route(scoped(1, interrupted_notice()));
     assert!(actions.is_empty(), "own turn events stay on the prompt");
-    canceller.route(turn_ended(1, TurnEndStatus::Cancelled));
+    canceller.route(scoped_terminal(1, TurnEndStatus::Cancelled));
     canceller.route(scoped(1, ServerEvent::Done { id: 31 }));
     // The cancel path's own notice and terminal, for a turn already closed.
     canceller.route(scoped(1, ServerEvent::Interrupted));
@@ -695,7 +698,7 @@ fn the_cancel_path_leaves_both_routers_consistent() {
         matches!(actions.as_slice(), [RouteAction::PeerTurnEvent(_)]),
         "the interrupt notice is mirrored inside the peer turn: {actions:?}"
     );
-    let actions = peer_router.route(turn_ended(1, TurnEndStatus::Cancelled));
+    let actions = peer_router.route(scoped_terminal(1, TurnEndStatus::Cancelled));
     assert!(
         matches!(
             actions.as_slice(),
@@ -739,7 +742,7 @@ fn cancelling_a_peer_turn_keeps_it_mirrored_until_it_ends() {
     ));
     assert!(matches!(
         router
-            .route(turn_ended(4, TurnEndStatus::Cancelled))
+            .route(scoped_terminal(4, TurnEndStatus::Cancelled))
             .as_slice(),
         [RouteAction::PeerTurnEnded {
             status: TurnEndStatus::Cancelled,
@@ -760,7 +763,7 @@ fn cancelling_a_peer_turn_keeps_it_mirrored_until_it_ends() {
 fn an_aborted_peer_turn_does_not_swallow_a_later_terminal_with_its_id() {
     let mut router = attached_router();
     router.route(turn_started(1, peer(77), Some("peer prompt")));
-    let actions = router.route(turn_ended(1, TurnEndStatus::Cancelled));
+    let actions = router.route(scoped_terminal(1, TurnEndStatus::Cancelled));
     assert!(
         matches!(actions.as_slice(), [RouteAction::PeerTurnEnded { .. }]),
         "the cancelled peer turn closes: {actions:?}"
@@ -1164,7 +1167,7 @@ fn an_idle_steer_becomes_our_own_turn() {
     }
     assert!(router.route(pickup).is_empty());
     assert!(router.route(scoped(1, delta("answer"))).is_empty());
-    router.route(turn_ended(1, TurnEndStatus::Completed));
+    router.route(scoped_terminal(1, TurnEndStatus::Completed));
     assert!(
         router
             .route(scoped(1, ServerEvent::Done { id: 77 }))
@@ -1211,7 +1214,7 @@ fn a_steer_into_our_running_turn_resolves_with_it() {
             .is_empty()
     );
     router.route(scoped(1, delta("second part")));
-    router.route(turn_ended(1, TurnEndStatus::Completed));
+    router.route(scoped_terminal(1, TurnEndStatus::Completed));
     let actions = router.route(scoped(1, ServerEvent::Done { id: 77 }));
     assert!(
         withdrawal(&actions).is_none(),
@@ -1275,7 +1278,7 @@ fn our_steer_into_a_peer_turn_adopts_it() {
 
         // From here the turn answers our prompt.
         assert!(router.route(scoped(9, delta("after steer"))).is_empty());
-        all_actions.extend(router.route(turn_ended(9, status)));
+        all_actions.extend(router.route(scoped_terminal(9, status)));
         all_actions.extend(router.route(scoped(9, terminal.clone())));
 
         assert_eq!(
@@ -1293,29 +1296,25 @@ fn our_steer_into_a_peer_turn_adopts_it() {
             "the bracket is closed by the prompt, after its output: {all_actions:?}"
         );
 
-        let events = drain(&mut prompt);
+        let (events, ends) = drain_with_ends(&mut prompt);
         assert_eq!(texts(&events), vec!["after steer".to_string()]);
-        let markers: Vec<&ServerEvent> = events
-            .iter()
-            .filter(|event| matches!(event, ServerEvent::TurnEnded { .. }))
-            .collect();
-        assert!(
-            matches!(
-                markers.as_slice(),
-                [ServerEvent::TurnEnded { identity: ended, status: ended_status, .. }]
-                    if *ended == identity(9) && *ended_status == status
-            ),
-            "exactly one terminal bracket for the adopted turn: {events:?}"
-        );
-        let marker_at = events
-            .iter()
-            .position(|event| matches!(event, ServerEvent::TurnEnded { .. }))
-            .unwrap();
+        assert_eq!(ends.len(), 1, "exactly one adopted bracket end");
+        let (marker_at, ended, ended_status) = &ends[0];
+        assert_eq!(*ended, identity(9));
+        assert_eq!(*ended_status, status);
         let text_at = events
             .iter()
             .position(|event| matches!(event, ServerEvent::TextDelta { .. }))
             .unwrap();
-        assert!(text_at < marker_at, "output precedes the bracket end");
+        assert!(text_at < *marker_at, "output precedes the bracket end");
+        let terminal_at = events
+            .iter()
+            .position(|event| matches!(event, ServerEvent::Done { .. } | ServerEvent::Error { .. }))
+            .unwrap();
+        assert!(
+            *marker_at <= terminal_at,
+            "bracket precedes prompt settlement"
+        );
         match status {
             TurnEndStatus::Completed => {
                 assert_eq!(done_count(&events, 77), 1, "{events:?}");
@@ -1349,7 +1348,7 @@ fn peer_steers_are_mirrored_as_user_messages() {
         second.as_slice(),
         [RouteAction::PeerSteer { index: 1, .. }]
     ));
-    router.route(turn_ended(9, TurnEndStatus::Completed));
+    router.route(scoped_terminal(9, TurnEndStatus::Completed));
 
     // A peer steering our own turn is shown by the prompt, in stream order.
     let mut prompt = steer(&mut router, 77);
@@ -1376,7 +1375,7 @@ fn a_stranded_steer_is_recovered_with_cancel_by_id() {
     let mut prompt = steer(&mut router, 77);
 
     // The peer turn ends without injecting our steer.
-    let actions = router.route(turn_ended(9, TurnEndStatus::Completed));
+    let actions = router.route(scoped_terminal(9, TurnEndStatus::Completed));
     assert!(
         actions
             .iter()
@@ -1405,7 +1404,7 @@ fn a_stranded_steer_is_recovered_with_cancel_by_id() {
     // This time the session is idle and it starts our turn.
     router.route(turn_started(10, ours(77), Some("steer 77")));
     router.route(scoped(10, delta("finally")));
-    router.route(turn_ended(10, TurnEndStatus::Completed));
+    router.route(scoped_terminal(10, TurnEndStatus::Completed));
     router.route(scoped(10, ServerEvent::Done { id: 77 }));
     let events = drain(&mut prompt);
     assert_eq!(texts(&events), vec!["finally".to_string()]);
@@ -1417,7 +1416,7 @@ fn a_steer_reported_not_queued_waits_for_its_turn() {
     let mut router = steering_router();
     router.route(turn_started(9, peer(5), Some("peer prompt")));
     let mut prompt = steer(&mut router, 77);
-    let actions = router.route(turn_ended(9, TurnEndStatus::Completed));
+    let actions = router.route(scoped_terminal(9, TurnEndStatus::Completed));
     let (probe_id, _) = withdrawal(&actions).unwrap();
 
     // A turn took it (here: the daemon started ours as the peer turn ended),
@@ -1438,7 +1437,7 @@ fn a_steer_reported_not_queued_waits_for_its_turn() {
         "the turn arrived before the grace period ran out"
     );
     router.route(scoped(10, delta("ran")));
-    router.route(turn_ended(10, TurnEndStatus::Completed));
+    router.route(scoped_terminal(10, TurnEndStatus::Completed));
     router.route(scoped(10, ServerEvent::Done { id: 77 }));
     let events = drain(&mut prompt);
     assert_eq!(texts(&events), vec!["ran".to_string()]);
@@ -1449,7 +1448,7 @@ fn a_steer_reported_not_queued_waits_for_its_turn() {
     let mut lost = steer(&mut router, 78);
     router.route(turn_started(11, peer(6), None));
     let (probe_id, _) =
-        withdrawal(&router.route(turn_ended(11, TurnEndStatus::Completed))).unwrap();
+        withdrawal(&router.route(scoped_terminal(11, TurnEndStatus::Completed))).unwrap();
     let confirm = wakes(&router.route(cancelled_reply(probe_id, &[], &[cid(78)])));
     assert!(router.wake(confirm[0]).is_empty());
     assert!(answered_cancelled(&drain(&mut lost), 78));
@@ -1495,7 +1494,7 @@ fn stop_withdraws_a_waiting_steer() {
     assert!(answered_cancelled(&drain(&mut prompt), 77));
 
     // The peer turn still ends in the mirror, and nothing is probed after it.
-    let actions = router.route(turn_ended(9, TurnEndStatus::Cancelled));
+    let actions = router.route(scoped_terminal(9, TurnEndStatus::Cancelled));
     assert!(
         actions
             .iter()
@@ -1558,23 +1557,18 @@ fn close_cancels_only_a_turn_this_view_started() {
             .any(|action| matches!(action, RouteAction::Send(Request::Cancel { .. }))),
         "an adopted turn belongs to the client that started it: {actions:?}"
     );
-    let events = drain(&mut prompt);
+    let (events, ends) = drain_with_ends(&mut prompt);
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            ServerEvent::TurnEnded {
-                status: TurnEndStatus::Cancelled,
-                ..
-            }
-        )),
-        "the adopted turn's bracket is closed for this view: {events:?}"
+        ends.iter()
+            .any(|(_, _, status)| *status == TurnEndStatus::Cancelled),
+        "the adopted bracket closes for this view"
     );
     assert!(answered_cancelled(&events, 77));
     // Its remaining events are not routed anywhere.
     assert!(router.route(scoped(9, delta("still running"))).is_empty());
     assert!(
         router
-            .route(turn_ended(9, TurnEndStatus::Completed))
+            .route(scoped_terminal(9, TurnEndStatus::Completed))
             .is_empty()
     );
 }
@@ -1609,7 +1603,7 @@ fn a_steer_rejected_as_busy_is_retried() {
     // Rejected again; a turn ending first resends it at once.
     router.route(busy);
     router.route(turn_started(9, peer(5), None));
-    let actions = router.route(turn_ended(9, TurnEndStatus::Completed));
+    let actions = router.route(scoped_terminal(9, TurnEndStatus::Completed));
     assert_eq!(resent(&actions), vec![77]);
     assert!(
         router
@@ -1670,7 +1664,7 @@ fn correlation_survives_terminal_until_request_release() {
     r.route(turn_started(1, ours(10), None));
     let _joined = steer(&mut r, 11);
     r.route(scoped(1, injected("steer", &[cid(11)])));
-    r.route(turn_ended(1, TurnEndStatus::Completed));
+    r.route(scoped_terminal(1, TurnEndStatus::Completed));
     r.route(scoped(1, ServerEvent::Done { id: 10 }));
     assert_eq!(r.prompt_correlation(10), Some((tid(1), "origin")));
     assert_eq!(r.prompt_correlation(11), Some((tid(1), "steer")));

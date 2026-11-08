@@ -5,7 +5,7 @@
 //! prompts is running. Every event is therefore routed here first:
 //!
 //! - replies to a request this adapter is waiting on go to that waiter;
-//! - events scoped to a turn (`turn_started`, `turn_event`, `turn_ended`) are
+//! - events scoped to a turn (`turn_started`, `turn_event`) are
 //!   classified by the turn's identity *before* they are unwrapped: this
 //!   adapter's own turn feeds its `session/prompt`, a peer turn is mirrored to
 //!   the ACP client;
@@ -1180,7 +1180,7 @@ impl RouterState {
     }
 }
 
-/// End status of a turn whose scoped terminal arrived without `turn_ended`.
+/// Backward-compatible classification for a scoped terminal without metadata.
 fn terminal_status(event: &ServerEvent) -> (TurnEndStatus, Option<String>) {
     match event {
         ServerEvent::Error { message, .. } => (TurnEndStatus::Failed, Some(message.clone())),
@@ -1212,9 +1212,7 @@ fn flatten_scope(mut event: ServerEvent) -> Option<ServerEvent> {
     loop {
         event = match event {
             ServerEvent::TurnEvent { event, .. } => *event,
-            ServerEvent::TurnStarted { .. }
-            | ServerEvent::TurnEnded { .. }
-            | ServerEvent::TurnState { .. } => return None,
+            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
             event => return Some(event),
         };
     }

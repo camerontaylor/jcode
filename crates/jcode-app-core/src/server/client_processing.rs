@@ -504,6 +504,7 @@ pub(super) async fn cancel_processing_message_for_turn(
     // unscoped Stop targets the turn observed at dispatch, never its successor.
     let scoped = |event| match &identity {
         Some(identity) => ServerEvent::TurnEvent {
+            end_message: None,
             end: None,
             identity: identity.clone(),
             event: Box::new(event),

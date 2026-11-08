@@ -12,6 +12,7 @@ fn idle_soft_interrupt_cancel_settles_pre_stream_turn_without_replaying_prompt()
                 turn_id: 1,
             };
             let scoped = |event| ServerEvent::TurnEvent {
+                end_message: None,
                 end: None,
                 identity: identity.clone(),
                 event: Box::new(event),

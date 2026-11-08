@@ -524,7 +524,6 @@ struct TurnEventDrain {
     publication: crate::agent::TurnPublicationPin,
     cancel: crate::agent::CancelProbe,
     terminal_id: u64,
-    ended: bool,
     terminal_published: bool,
 }
 
@@ -535,23 +534,18 @@ impl TurnEventDrain {
         }
     }
 
-    /// Forward one producer event in the turn's scope. The first terminal is
-    /// preceded by `turn_ended`.
+    /// Forward one producer event, classifying only the first terminal.
     async fn forward(&mut self, event: ServerEvent) {
-        self.forward_with_end(event, None).await;
+        self.forward_with_exit(event, false).await;
     }
 
-    async fn forward_with_end(
-        &mut self,
-        event: ServerEvent,
-        forced_end: Option<crate::protocol::TurnEndStatus>,
-    ) {
-        let end = is_turn_terminal(&event).then(|| {
-            forced_end.unwrap_or_else(|| match &event {
-                ServerEvent::Error { .. } => crate::protocol::TurnEndStatus::Failed,
-                _ if self.cancel.cancelled() => crate::protocol::TurnEndStatus::Cancelled,
-                _ => crate::protocol::TurnEndStatus::Completed,
-            })
+    async fn forward_with_exit(&mut self, event: ServerEvent, producer_dropped: bool) {
+        let end = is_turn_terminal(&event).then(|| match &event {
+            ServerEvent::Error { .. } => crate::protocol::TurnEndStatus::Failed,
+            _ if producer_dropped || self.cancel.cancelled() => {
+                crate::protocol::TurnEndStatus::Cancelled
+            }
+            _ => crate::protocol::TurnEndStatus::Completed,
         });
         if is_turn_terminal(&event) {
             if self.terminal_published {
@@ -559,15 +553,15 @@ impl TurnEventDrain {
             }
             self.terminal_published = true;
         }
-        if !self.ended && is_turn_terminal(&event) {
-            let message = match &event {
-                ServerEvent::Error { message, .. } => Some(message.clone()),
-                _ => None,
-            };
-            let status = end.expect("terminal classification");
-            self.end(status, message).await;
+        if end.is_some() {
+            // Retire the active snapshot before publication; the pin continues
+            // to reserve the runtime until every accepted event is drained.
+            self.publication.retire();
         }
+        let end_message =
+            producer_dropped.then(|| "The turn ended before it reported completion.".into());
         self.publish(ServerEvent::TurnEvent {
+            end_message,
             end,
             identity: self.identity.clone(),
             event: Box::new(event),
@@ -575,62 +569,33 @@ impl TurnEventDrain {
         .await;
     }
 
-    async fn end(&mut self, status: crate::protocol::TurnEndStatus, message: Option<String>) {
-        self.ended = true;
-        // Retire first: a client attaching after `turn_ended` must not be told
-        // that this turn is still running.
-        self.publication.retire();
-        self.publish(ServerEvent::TurnEnded {
-            identity: self.identity.clone(),
-            status,
-            message,
-        })
-        .await;
-    }
-
     /// Close a turn whose producer never queued a terminal.
     async fn close(mut self, exit: TurnEventExit) {
-        if self.ended {
+        if self.terminal_published {
             return;
         }
-        let forced_end = matches!(exit, TurnEventExit::Dropped { panicking: false })
-            .then_some(crate::protocol::TurnEndStatus::Cancelled);
+        let producer_dropped = matches!(exit, TurnEventExit::Dropped { panicking: false });
         let terminal = match exit {
             TurnEventExit::Dropped { panicking: true } => ServerEvent::Error {
                 id: self.terminal_id,
                 message: "The turn panicked before it reported completion.".into(),
                 retry_after_secs: None,
             },
-            TurnEventExit::Dropped { panicking: false } => {
-                self.end(
-                    crate::protocol::TurnEndStatus::Cancelled,
-                    Some("The turn ended before it reported completion.".into()),
-                )
-                .await;
-                ServerEvent::Done {
-                    id: self.terminal_id,
-                }
-            }
+            TurnEventExit::Dropped { panicking: false } => ServerEvent::Done {
+                id: self.terminal_id,
+            },
             TurnEventExit::Finished => ServerEvent::Done {
                 id: self.terminal_id,
             },
         };
-        self.forward_with_end(terminal, forced_end).await;
+        self.forward_with_exit(terminal, producer_dropped).await;
     }
 }
 
-/// Owns one turn's event queue. Closing or aborting the producer drains all
-/// accepted events before releasing the runtime's publication reservation.
-///
-/// The drain task publishes, in order: `turn_started` (with the turn's origin
-/// and prompt), every queued event in the turn's scope, then exactly one
-/// `turn_ended` immediately followed by the scoped terminal (`done`/`error`).
-/// If the producer never queued a terminal, typically because its task was
-/// aborted, the drain task supplies both after all queued output, so every
-/// attachment sees the turn end instead of only the cancelling connection.
-///
-/// The turn's attribution is published to the runtime's turn state before
-/// `turn_started` is queued, and withdrawn before `turn_ended`.
+/// Owns one turn's event queue and publication reservation. The drain publishes
+/// start, accepted output, then one classified scoped terminal, supplying it
+/// after producer abort when necessary. Attribution is visible before start
+/// and retired before the terminal; publication pins outlive the entire drain.
 pub(super) struct TurnEventChannel {
     tx: mpsc::UnboundedSender<ServerEvent>,
     close: Option<tokio::sync::oneshot::Sender<TurnEventExit>>,
@@ -663,7 +628,6 @@ impl TurnEventChannel {
             publication: lease.publication_pin(),
             cancel: lease.cancel_probe(),
             terminal_id,
-            ended: false,
             terminal_published: false,
         };
         let task = tokio::spawn(async move {

@@ -314,25 +314,10 @@ async fn aborted_turn_publishes_a_scoped_terminal_to_every_attachment() {
         let events = read_until(rx, |event| is_scoped_done(event, 21)).await;
         assert!(
             matches!(
-                events.last(),
-                Some(ServerEvent::TurnEvent {
-                    end: Some(crate::protocol::TurnEndStatus::Cancelled),
-                    ..
-                })
-            ),
-            "producer abort classification must survive on the terminal"
-        );
-        let (scope, _) = scoped_payload(events.last().unwrap()).unwrap();
-        assert_eq!(
-            scope, identity,
-            "the terminal is scoped to the aborted turn"
-        );
-        assert!(
-            matches!(
-                &events[events.len() - 2],
-                ServerEvent::TurnEnded {
+                events.last().unwrap(),
+                ServerEvent::TurnEvent {
                     identity: ended,
-                    status: crate::protocol::TurnEndStatus::Cancelled,
+                    end: Some(crate::protocol::TurnEndStatus::Cancelled),
                     ..
                 } if ended == identity
             ),
@@ -410,16 +395,17 @@ async fn dropped_channel_publishes_its_terminal_after_queued_output() {
             scoped_payload(&next_event(rx).await),
             Some((scope, ServerEvent::TextDelta { text })) if scope == &identity && text == "partial"
         ));
+        let terminal = next_event(rx).await;
         assert!(matches!(
-            next_event(rx).await,
-            ServerEvent::TurnEnded {
+            &terminal,
+            ServerEvent::TurnEvent {
                 identity: ended,
-                status: crate::protocol::TurnEndStatus::Cancelled,
+                end: Some(crate::protocol::TurnEndStatus::Cancelled),
                 ..
-            } if ended == identity
+            } if ended == &identity
         ));
         assert!(matches!(
-            scoped_payload(&next_event(rx).await),
+            scoped_payload(&terminal),
             Some((scope, ServerEvent::Done { id: 33 })) if scope == &identity
         ));
     }
@@ -503,9 +489,7 @@ async fn cancel_turn_stopped_is_scoped_to_the_active_turn_for_every_attachment()
 
     for (rx, identity) in receivers.iter_mut().zip(&identities) {
         // Read the channel terminal, then include any extra direct replies.
-        let mut events =
-            read_until(rx, |event| matches!(event, ServerEvent::TurnEnded { .. })).await;
-        events.extend(read_until(rx, |event| is_scoped_done(event, 31)).await);
+        let mut events = read_until(rx, |event| is_scoped_done(event, 31)).await;
         assert!(
             !events
                 .iter()
@@ -524,24 +508,24 @@ async fn cancel_turn_stopped_is_scoped_to_the_active_turn_for_every_attachment()
         );
         let ended = events
             .iter()
-            .position(|event| matches!(event, ServerEvent::TurnEnded { .. }))
+            .position(|event| matches!(event, ServerEvent::TurnEvent { end: Some(_), .. }))
             .expect("every attachment learns the turn ended");
         assert!(
             matches!(
                 &events[ended],
-                ServerEvent::TurnEnded {
+                ServerEvent::TurnEvent {
                     identity: scope,
-                    status: crate::protocol::TurnEndStatus::Cancelled,
+                    end: Some(crate::protocol::TurnEndStatus::Cancelled),
                     ..
                 } if scope == identity
             ),
             "a cancelled turn reports a cancelled end: {events:?}"
         );
         assert!(
-            events[ended + 1..]
+            events[ended..]
                 .iter()
                 .any(|event| is_scoped_done(event, 31)),
-            "the channel's terminal follows turn_ended: {events:?}"
+            "classification is on the channel terminal: {events:?}"
         );
         events.extend(std::iter::from_fn(|| rx.try_recv().ok()));
         assert_eq!(
@@ -755,7 +739,7 @@ fn lifecycle_summary(events: &[ServerEvent]) -> Vec<String> {
                     .and_then(|origin| origin.client_instance_id.as_deref()),
                 user_content
             )),
-            ServerEvent::TurnEnded { status, .. } => Some(format!("ended {status:?}")),
+
             ServerEvent::TurnEvent { event, .. } => match &**event {
                 ServerEvent::TextDelta { text } => Some(format!("delta {text}")),
                 ServerEvent::Done { id } => Some(format!("done {id}")),
@@ -777,7 +761,7 @@ fn started(index: usize, id: u64, content: &str) -> String {
 
 /// Both attachments see the same ordered lifecycle around a prompt one of
 /// them started, with the origin naming the starter. Attribution is published
-/// before `turn_started` and withdrawn before `turn_ended`.
+/// before `turn_started` and withdrawn before the scoped terminal.
 #[tokio::test]
 async fn two_attachments_see_started_stream_ended_done_in_order() {
     let _lock = crate::storage::lock_test_env();
@@ -837,10 +821,10 @@ async fn two_attachments_see_started_stream_ended_done_in_order() {
         };
         loop {
             let event = next_event(rx).await;
-            if matches!(event, ServerEvent::TurnEnded { .. }) {
+            if matches!(event, ServerEvent::TurnEvent { end: Some(_), .. }) {
                 assert!(
                     observer.active_turn().active.is_none(),
-                    "the turn is withdrawn from the attach snapshot before turn_ended"
+                    "the turn is withdrawn from the attach snapshot before the terminal"
                 );
             }
             let done = is_scoped_done(&event, 77);
@@ -854,14 +838,12 @@ async fn two_attachments_see_started_stream_ended_done_in_order() {
             vec![
                 started(0, 77, "what is the answer"),
                 "delta answer-1".to_string(),
-                "ended Completed".to_string(),
                 "done 77".to_string(),
             ],
             "attachment {index} sees started -> stream -> ended -> done"
         );
         assert!(events.iter().all(|event| match event {
             ServerEvent::TurnStarted { identity: id, .. }
-            | ServerEvent::TurnEnded { identity: id, .. }
             | ServerEvent::TurnEvent { identity: id, .. } => id == &identity,
             _ => true,
         }));
@@ -957,11 +939,9 @@ async fn overlapping_prompts_do_not_nest_and_keep_their_own_origin() {
             vec![
                 started(0, 11, "first prompt"),
                 "delta answer-1".to_string(),
-                "ended Completed".to_string(),
                 "done 11".to_string(),
                 started(1, 12, "second prompt"),
                 "delta answer-2".to_string(),
-                "ended Completed".to_string(),
                 "done 12".to_string(),
             ],
             "attachment {index} sees two sequential, separately attributed turns"
@@ -973,7 +953,11 @@ async fn overlapping_prompts_do_not_nest_and_keep_their_own_origin() {
                     assert!(open.is_none(), "turns must not nest: {events:?}");
                     open = Some(identity);
                 }
-                ServerEvent::TurnEnded { identity, .. } => {
+                ServerEvent::TurnEvent {
+                    identity,
+                    end: Some(_),
+                    ..
+                } => {
                     assert_eq!(open.take(), Some(identity), "a turn ends its own scope");
                 }
                 ServerEvent::TurnEvent { identity, .. } => {
@@ -991,7 +975,7 @@ async fn overlapping_prompts_do_not_nest_and_keep_their_own_origin() {
     }
 }
 
-/// A panicking turn still ends: every attachment sees a failed `turn_ended`
+/// A panicking turn still ends: every attachment sees a failed scoped terminal
 /// immediately before the scoped error.
 #[tokio::test]
 async fn panicking_turn_reports_a_failed_end_to_every_attachment() {
@@ -1031,19 +1015,18 @@ async fn panicking_turn_reports_a_failed_end_to_every_attachment() {
         );
         assert!(
             matches!(
-                &events[events.len() - 2],
-                ServerEvent::TurnEnded {
-                    status: crate::protocol::TurnEndStatus::Failed,
-                    message: Some(message),
-                    ..
-                } if message.contains("panicked")
+                events.last().unwrap(),
+                ServerEvent::TurnEvent {
+                    end: Some(crate::protocol::TurnEndStatus::Failed),
+                    event, ..
+                } if matches!(&**event, ServerEvent::Error { message, .. } if message.contains("panicked"))
             ),
-            "a panicking turn reports a failed end before its error: {events:?}"
+            "a panicking turn reports a failed scoped error: {events:?}"
         );
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, ServerEvent::TurnEnded { .. }))
+                .filter(|event| matches!(event, ServerEvent::TurnEvent { end: Some(_), .. }))
                 .count(),
             1
         );
@@ -1100,19 +1083,21 @@ async fn turn_is_attributed_before_turn_started_is_announced() {
     ));
 
     events.sender().send(ServerEvent::Done { id: 41 }).unwrap();
+    let terminal = next_event(&mut rx).await;
     assert!(matches!(
-        next_event(&mut rx).await,
-        ServerEvent::TurnEnded {
-            status: crate::protocol::TurnEndStatus::Completed,
+        terminal,
+        ServerEvent::TurnEvent {
+            end: Some(crate::protocol::TurnEndStatus::Completed),
             ..
         }
     ));
+    assert!(is_scoped_done(&terminal, 41));
     assert_eq!(
         observer.active_turn().attribution,
         None,
-        "withdrawn before turn_ended"
+        "withdrawn before the terminal"
     );
-    assert!(is_scoped_done(&next_event(&mut rx).await, 41));
+
     events.finish().await;
     drop(lease);
 }
@@ -1221,16 +1206,17 @@ async fn duplicate_producer_terminals_are_published_once() {
             scoped_payload(&next_event(rx).await),
             Some((scope, ServerEvent::TextDelta { text })) if scope == &identity && text == "partial"
         ));
+        let terminal = next_event(rx).await;
         assert!(matches!(
-            next_event(rx).await,
-            ServerEvent::TurnEnded {
+            &terminal,
+            ServerEvent::TurnEvent {
                 identity: ended,
-                status: crate::protocol::TurnEndStatus::Completed,
+                end: Some(crate::protocol::TurnEndStatus::Completed),
                 ..
-            } if ended == identity
+            } if ended == &identity
         ));
         assert!(matches!(
-            scoped_payload(&next_event(rx).await),
+            scoped_payload(&terminal),
             Some((scope, ServerEvent::Done { id: 33 })) if scope == &identity
         ));
         assert!(rx.try_recv().is_err(), "exactly one terminal is published");
@@ -1299,16 +1285,17 @@ async fn failed_producer_terminal_is_published_once_after_output() {
             scoped_payload(&next_event(rx).await),
             Some((scope, ServerEvent::TextDelta { text })) if scope == &identity && text == "partial"
         ));
+        let terminal = next_event(rx).await;
         assert!(matches!(
-            next_event(rx).await,
-            ServerEvent::TurnEnded {
+            &terminal,
+            ServerEvent::TurnEvent {
                 identity: ended,
-                status: crate::protocol::TurnEndStatus::Failed,
+                end: Some(crate::protocol::TurnEndStatus::Failed),
                 ..
-            } if ended == identity
+            } if ended == &identity
         ));
         assert!(matches!(
-            scoped_payload(&next_event(rx).await),
+            scoped_payload(&terminal),
             Some((scope, ServerEvent::Error { id: 33, message, .. })) if scope == &identity && message == "failure sentinel"
         ));
         assert!(rx.try_recv().is_err(), "exactly one terminal is published");
@@ -1409,8 +1396,8 @@ async fn two_steering_producers_withdraw_on_either_side_of_insertion() {
     let ended = read_until(&mut observer, |event| is_scoped_done(event, 60)).await;
     assert!(ended.iter().any(|event| matches!(
         event,
-        ServerEvent::TurnEnded {
-            status: crate::protocol::TurnEndStatus::Completed,
+        ServerEvent::TurnEvent {
+            end: Some(crate::protocol::TurnEndStatus::Completed),
             ..
         }
     )));
@@ -1501,8 +1488,8 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
     complete.send(()).unwrap();
     let normal = read_until(&mut observer, |event| is_scoped_done(event, 77)).await;
     retirement.await.unwrap();
-    assert!(normal.iter().any(|event| matches!(event, ServerEvent::TurnEnded {
-        identity: ended, status: crate::protocol::TurnEndStatus::Completed, .. } if ended == &identity)));
+    assert!(normal.iter().any(|event| matches!(event, ServerEvent::TurnEvent {
+        identity: ended, end: Some(crate::protocol::TurnEndStatus::Completed), .. } if ended == &identity)));
     assert_eq!(
         normal
             .iter()

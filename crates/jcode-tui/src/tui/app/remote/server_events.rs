@@ -233,7 +233,6 @@ pub(in crate::tui::app) fn handle_server_event(
                 &*event,
                 ServerEvent::TurnState { .. }
                     | ServerEvent::TurnStarted { .. }
-                    | ServerEvent::TurnEnded { .. }
                     | ServerEvent::TurnEvent { .. }
             ) {
                 return false;
@@ -1124,7 +1123,6 @@ fn handle_server_event_inner(
         // is what closes the turn here.
         ServerEvent::TurnState { .. }
         | ServerEvent::TurnStarted { .. }
-        | ServerEvent::TurnEnded { .. }
         | ServerEvent::TurnEvent { .. } => false,
         ServerEvent::Done { id } => {
             let mut auto_poked = false;

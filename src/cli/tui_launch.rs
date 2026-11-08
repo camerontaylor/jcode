@@ -97,6 +97,7 @@ mod turn_envelope_tests {
 
     fn envelope(event: ServerEvent) -> ServerEvent {
         ServerEvent::TurnEvent {
+            end_message: None,
             end: None,
             identity: TurnIdentity {
                 runtime_generation: "runtime-test".into(),

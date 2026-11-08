@@ -1444,10 +1444,11 @@ fn closing_a_view_only_cancels_a_running_own_turn() {
         "a stop in this view targets the mirrored peer turn"
     );
 
-    router.route(ServerEvent::TurnEnded {
+    router.route(ServerEvent::TurnEvent {
         identity: identity(1),
-        status: TurnEndStatus::Completed,
-        message: None,
+        end: Some(TurnEndStatus::Completed),
+        end_message: None,
+        event: Box::new(ServerEvent::Done { id: 0 }),
     });
     router.route(ServerEvent::TurnStarted {
         identity: identity(2),

@@ -32,7 +32,8 @@ impl RouterState {
                 identity,
                 event,
                 end,
-            } => self.on_scoped(identity, *event, end),
+                end_message,
+            } => self.on_scoped(identity, *event, end, end_message),
             event => self.on_flat(event),
         }
     }
@@ -150,7 +151,7 @@ impl RouterState {
         actions
     }
 
-    fn on_turn_ended(
+    fn on_terminal(
         &mut self,
         identity: TurnIdentity,
         status: TurnEndStatus,
@@ -161,11 +162,9 @@ impl RouterState {
             .as_ref()
             .filter(|own| own.identity == identity)
         {
-            // Keep `own_turn` until the scoped terminal: it is the prompt's
-            // completion. A cancelled turn tells the prompt so, because the
-            // cancel path's own `interrupted` reaches this connection only
-            // after the turn's terminal (and only if this connection
-            // cancelled).
+            // Keep the prompt until the scoped terminal is delivered. Its
+            // authoritative status also settles cancellation requested by a
+            // different attachment, without relying on this view's Stop intent.
             let members: Vec<u64> = own.members().collect();
             let primary = own.request_id;
             if status == TurnEndStatus::Cancelled {
@@ -183,7 +182,7 @@ impl RouterState {
             return actions;
         }
         crate::logging::debug(&format!(
-            "acp: dropping turn_ended for a turn that is not open: {}",
+            "acp: dropping terminal for a turn that is not open: {}",
             turn_id_string(&identity)
         ));
         Vec::new()
@@ -198,6 +197,7 @@ impl RouterState {
         identity: TurnIdentity,
         event: ServerEvent,
         end: Option<TurnEndStatus>,
+        end_message: Option<String>,
     ) -> Vec<RouteAction> {
         let event = match flatten_scope(event) {
             Some(event) => event,
@@ -218,7 +218,11 @@ impl RouterState {
         let terminal = matches!(event, ServerEvent::Done { .. } | ServerEvent::Error { .. });
         if terminal {
             let (fallback, message) = terminal_status(&event);
-            let actions = self.on_turn_ended(identity.clone(), end.unwrap_or(fallback), message);
+            let actions = self.on_terminal(
+                identity.clone(),
+                end.unwrap_or(fallback),
+                end_message.or(message),
+            );
             if !self.is_open(&identity) {
                 return actions;
             }
@@ -246,15 +250,6 @@ impl RouterState {
             return Vec::new();
         }
         if self.peer_matches(&identity) {
-            if terminal {
-                // Normally `turn_ended` closed the turn already; this is a
-                // terminal without one (an older daemon build).
-                self.fence.complete(&identity);
-                let (status, message) = terminal_status(&event);
-                let mut actions = self.close_peer_turn(status, message);
-                actions.extend(self.on_turn_closed());
-                return actions;
-            }
             if let Some(change) = session_state_change(&event) {
                 return vec![RouteAction::SessionState(change)];
             }

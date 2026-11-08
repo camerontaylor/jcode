@@ -1,7 +1,191 @@
 # R1 single lifecycle verification
 
-Status: inventory and pure-move router split complete; lifecycle replacement and
-equivalence gate are pending.
+Status: R1 complete. The staged checkpoint notes below are historical; this
+final result supersedes their pending-work notes.
+
+## Final result
+
+The daemon publishes one classified scoped terminal, with no `TurnEnded` event
+or `ended` flag. `TurnEndStatus` remains the generic shared enum. `TurnEvent`
+has `end: Option<TurnEndStatus>` and `end_message: Option<String>`, both defaulted
+and omitted when absent. The diagnostic field preserves the old aborted-producer
+peer notification's error message, rather than silently dropping it. Error and
+panic classify failed; producer drop and cancellation epoch classify cancelled;
+otherwise completion is completed. Old producers without metadata retain the
+Done/completed and Error/failed fallback. Nonterminal scopes omit both fields.
+
+The adapter's `RoutedEvent::LocalTurnEnd` carries local bracket ends through the
+same FIFO as prompt payloads. It is never a daemon event. Core retains epoch
+probes, atomic active-snapshot retirement and publication pins; these are still
+the authority and reservation mechanism. Only the competing publication and
+bookkeeping were removed. Legacy transport still unwraps Done/Error unchanged.
+D3 is gone because the unsupported event no longer exists. Against upstream,
+`translate.rs` now carries only R2's `pub mod session_catalog` declaration.
+
+### Equivalence gate
+
+Every command below used `CARGO_BUILD_RUSTC_WRAPPER= nice -n 10 cargo test -j 3`.
+Available memory was checked before builds; no full workspace suite, install,
+shared daemon restart, fixture recording, merge or force-push was performed.
+
+| Command suffix | Result |
+| --- | --- |
+| `--test e2e acp_conformance` | 14 passed, including all four unmodified fixtures and both new producer-exit wire tests |
+| `--test e2e acp_shared_session` | 4 passed |
+| `--lib cli::acp::tests` | 58 passed |
+| `--lib cli::acp::daemon_router::tests` | 41 passed |
+| `-p jcode-app-core --lib server::client_lifecycle` | 57 passed (includes the channel tests); final repeat also 57 passed |
+| `-p jcode-app-core --lib turn_event_channel_tests` | 13 passed |
+| `-p jcode-app-core --lib agent::turn_ownership::tests` | 3 passed |
+| `-p jcode-app-core --lib server::client_session::tests` | 44 passed |
+| `-p jcode-app-core --lib tool::sdk::tests` | 4 passed |
+| `-p jcode-harness-api-server --lib` | 199 passed |
+| `-p jcode-protocol --lib turn_identity` | 10 passed |
+
+The new `acp_conformance_aborted_producer_after_stop_is_cancelled` arms a
+noncooperative provider prewarm only after both clients attach. After the test
+observes provider entry and the peer start, Stop must abort the producer: its
+gate is never released. The real stdio adapter returns `stopReason: cancelled`;
+the observer receives the same turn ID with state `canceled` and the preserved
+abort diagnostic. `acp_conformance_panicking_producer_is_failed` releases that
+gate into a panic; the prompt receives the existing JSON-RPC error and the peer
+receives `failed`. Neither test is fixture-recorded or timing-gated by sleeps.
+
+The first version of these two tests blocked startup prewarm and timed out in
+session/new. Arming after attachment fixed the test harness. The final complete
+conformance run passes all 14 tests in 2.23 seconds. The original 12 tests also
+passed in that failed harness run; only final successful results count here.
+
+`git diff --exit-code 47a130e98 -- tests/fixtures/acp/` exits 0. All four fixtures
+replayed unmodified; no recording flag was used. Per-file rustfmt checks with
+`--edition 2024 --config skip_children=true` and `git diff --check` pass.
+
+### Deleted-test / surviving-coverage mapping
+
+Only one test function was replaced/renamed; no core or router behavioral test
+was retired. A function-name comparison against the baseline confirms this.
+
+| Removed test or redundant assertion | Surviving coverage |
+| --- | --- |
+| Harness `turn_ended_is_attribution_only_and_leaves_the_turn_open_for_its_terminal` | `scoped_terminal_end_classification_is_attribution_neutral`: for completed/failed/cancelled, refined and unrefined terminals translate identically and close the fence |
+| Old end-event serialization loop in `turn_origin_events_roundtrip_with_origin_and_content` | `scoped_terminal_preserves_authoritative_end_classification` roundtrips every status; `obsolete_turn_ended_is_not_a_daemon_wire_event` rejects the old variant and roundtrips the abort diagnostic; origin roundtrip assertions remain in the original test |
+| Separate end-event filtering assertions in `identity_transport_negotiation_preserves_legacy_payload_shape` | The same test now unwraps a classified scoped terminal for legacy readers and preserves it for identity-aware readers; start/state filtering assertions remain |
+| Separate end/terminal receives and duplicate end summaries in the channel tests | All 13 original channel tests remain: abort, panic, failure and normal-terminal classification are checked on the terminal; ordering, attachment identity, one-terminal counts, retirement snapshots, late Stop and publication reservations remain asserted |
+| Router's old end-event helper and test-only local-end projection | The same 41 router tests drive scoped terminals; adopted-bracket tests inspect adapter-owned local ends and retain output-before-bracket-before-settlement checks |
+
+### Core diff measurement
+
+Exact command, both times:
+`git diff --stat 7fd42339c907de223021bd63e5bb5df778c43a01 -- crates/`
+
+Before: **93 files changed, 4476 insertions(+), 296 deletions(-)**.
+After: **93 files changed, 4457 insertions(+), 304 deletions(-)**.
+Net carried lines decrease by 27; total changed lines decrease by 11. Behavioral
+coverage was retained rather than deleting the estimated hundreds of test lines.
+
+<details><summary>Full after stat</summary>
+
+```text
+ crates/jcode-app-core/src/agent.rs                 |    9 +-
+ crates/jcode-app-core/src/agent/interrupts.rs      |    9 +
+ crates/jcode-app-core/src/agent/turn_execution.rs  |    3 +
+ crates/jcode-app-core/src/agent/turn_ownership.rs  |  120 +-
+ .../src/agent/turn_streaming_mpsc.rs               |    7 +
+ .../src/protocol_tests/core_events.rs              |    1 +
+ crates/jcode-app-core/src/server.rs                |    5 +
+ .../jcode-app-core/src/server/background_tasks.rs  |    4 +
+ crates/jcode-app-core/src/server/client_actions.rs |  314 ++--
+ .../src/server/client_actions_tests.rs             |  204 ++-
+ .../src/server/client_comm_message.rs              |    1 +
+ .../jcode-app-core/src/server/client_lifecycle.rs  |  108 +-
+ .../src/server/client_lifecycle_logging.rs         |    2 +-
+ .../src/server/client_lifecycle_socket_tests.rs    |   10 +-
+ .../src/server/client_lifecycle_tests.rs           |  296 +++-
+ .../jcode-app-core/src/server/client_processing.rs |  140 +-
+ crates/jcode-app-core/src/server/client_session.rs |   16 +
+ crates/jcode-app-core/src/server/client_state.rs   |   83 +-
+ .../src/server/client_state_tests.rs               |   42 +
+ .../src/server/client_state_tests/history_delta.rs |    1 +
+ crates/jcode-app-core/src/server/comm_control.rs   |    4 +
+ .../comm_control_tests/progress_publication.rs     |    3 +
+ crates/jcode-app-core/src/server/comm_session.rs   |    3 +
+ .../src/server/history_provider_tests.rs           |   27 +
+ crates/jcode-app-core/src/server/jade_relay.rs     |   10 +-
+ crates/jcode-app-core/src/server/live_turn.rs      |   13 +-
+ .../jcode-app-core/src/server/provider_control.rs  |   10 +
+ .../src/server/session_connections.rs              |    7 +-
+ crates/jcode-app-core/src/server/state.rs          |  182 ++-
+ crates/jcode-app-core/src/server/tests.rs          |    2 +
+ .../src/server/turn_event_channel_tests.rs         | 1525 ++++++++++++++++++++
+ crates/jcode-app-core/src/server/turn_failover.rs  |    8 +
+ .../jcode-app-core/src/tool/communicate_tests.rs   |    3 +
+ crates/jcode-app-core/src/tool/sdk.rs              |   37 +-
+ crates/jcode-app-core/src/update.rs                |    5 +-
+ crates/jcode-base/src/provider/mod.rs              |   71 +-
+ crates/jcode-base/src/provider/tests.rs            |   17 +
+ .../src/provider/tests/model_resolution.rs         |   77 +-
+ .../jcode-base/src/provider/tests/startup_pool.rs  |   20 +
+ crates/jcode-harness-api-server/src/lib.rs         |    5 +
+ crates/jcode-harness-api-server/src/translate.rs   |    2 +
+ .../src/translate/session_catalog.rs               |  101 ++
+ .../src/translate/session_catalog_tests.rs         |  218 +++
+ .../src/translate/turn_identity_tests.rs           |   24 +
+ .../src/translate_tests.rs                         |    1 +
+ crates/jcode-protocol/src/comm_format.rs           |    1 +
+ crates/jcode-protocol/src/lib.rs                   |   16 +-
+ .../src/protocol_tests/core_events.rs              |   68 +
+ .../src/protocol_tests/turn_identity.rs            |  206 ++-
+ crates/jcode-protocol/src/wire.rs                  |   22 +-
+ crates/jcode-protocol/src/wire/events.rs           |  110 +-
+ crates/jcode-provider-core/src/lib.rs              |    2 +-
+ crates/jcode-provider-core/src/reasoning.rs        |   50 +-
+ crates/jcode-tui/src/tui/app.rs                    |    4 +
+ .../jcode-tui/src/tui/app/auth_account_picker.rs   |    2 +
+ .../src/tui/app/auth_remote/onboarding.rs          |    1 +
+ crates/jcode-tui/src/tui/app/auth_remote/picker.rs |    1 +
+ crates/jcode-tui/src/tui/app/inline_interactive.rs |   18 +-
+ .../src/tui/app/inline_interactive/openers.rs      |    2 +
+ .../src/tui/app/inline_interactive/preview.rs      |   39 +
+ .../src/tui/app/inline_interactive_tests.rs        |    6 +
+ crates/jcode-tui/src/tui/app/input_help.rs         |    2 +-
+ crates/jcode-tui/src/tui/app/remote.rs             |   49 +-
+ .../jcode-tui/src/tui/app/remote/input_dispatch.rs |    5 +-
+ .../jcode-tui/src/tui/app/remote/server_events.rs  |   29 +-
+ .../remote/server_events/history_dedup_tests.rs    |    1 +
+ .../src/tui/app/remote/turn_identity_tests.rs      |   18 +
+ crates/jcode-tui/src/tui/app/remote_tests.rs       |  122 ++
+ .../src/tui/app/remote_tests/swarm_delivery.rs     |    1 +
+ crates/jcode-tui/src/tui/app/tests.rs              |    9 +
+ .../tui/app/tests/idle_soft_interrupt_cancel.rs    |    4 +
+ .../tui/app/tests/model_picker_startup_tests.rs    |  109 +-
+ .../src/tui/app/tests/reload_recovery_replay.rs    |    2 +
+ .../app/tests/remote_events_reload_01/part_01.rs   |   14 +
+ .../app/tests/remote_events_reload_01/part_02.rs   |    2 +
+ .../app/tests/remote_events_reload_03/part_01.rs   |   10 +
+ .../app/tests/remote_events_reload_03/part_02.rs   |    9 +
+ .../src/tui/app/tests/remote_events_reload_04.rs   |    3 +
+ .../src/tui/app/tests/remote_failover_routes.rs    |    4 +
+ .../src/tui/app/tests/remote_header_hint_facts.rs  |    2 +
+ .../tui/app/tests/remote_model_picker_hotkeys.rs   |   25 +-
+ .../app/tests/remote_startup_input_01/part_01.rs   |    2 +
+ .../app/tests/remote_startup_input_01/part_02.rs   |    1 +
+ .../app/tests/remote_startup_input_03/part_02.rs   |    3 +
+ crates/jcode-tui/src/tui/app/tests/ssh_remote.rs   |    1 +
+ .../src/tui/app/tests/swarm_plan_graph_inline.rs   |    1 +
+ crates/jcode-tui/src/tui/app/tui_lifecycle.rs      |   24 +
+ crates/jcode-tui/src/tui/app/usage_reset.rs        |    1 +
+ crates/jcode-tui/src/tui/backend.rs                |    3 +-
+ crates/jcode-tui/src/tui/mod.rs                    |    2 +
+ .../src/tui/ui_inline_interactive_tests.rs         |    3 +
+ .../src/tui/ui_tests/basic/frame_flicker.rs        |    1 +
+ crates/jcode-tui/src/tui/ui_tests/inline_picker.rs |    1 +
+ 93 files changed, 4457 insertions(+), 304 deletions(-)
+```
+
+</details>
+
+## Historical inventory and staged checkpoints
+
 
 Baseline: `47a130e98`, branch `fork/r1-single-lifecycle`, host triton.
 Memory at start: 18,965 MiB available. Configured contributor identity retained.

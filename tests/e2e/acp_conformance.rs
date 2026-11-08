@@ -599,3 +599,142 @@ async fn acp_conformance_detach_params_and_idempotency() -> Result<()> {
     c.shutdown().await;
     Ok(())
 }
+
+/// Prewarm is deliberately noncooperative: Stop must abort the producer task.
+struct TerminalExitProvider {
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+#[async_trait]
+impl Provider for TerminalExitProvider {
+    async fn prewarm(&self, _: &[ToolDefinition], _: &str) {
+        if !self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.entered.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+        panic!("terminal classification failure sentinel");
+    }
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("prewarm never returns")
+    }
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            armed: self.armed.clone(),
+            entered: self.entered.clone(),
+            release: self.release.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn acp_conformance_aborted_producer_after_stop_is_cancelled() -> Result<()> {
+    terminal_exit_scenario(false).await
+}
+
+#[tokio::test]
+async fn acp_conformance_panicking_producer_is_failed() -> Result<()> {
+    terminal_exit_scenario(true).await
+}
+
+async fn terminal_exit_scenario(fail: bool) -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime = tempfile::Builder::new()
+        .prefix("acp-terminal-")
+        .tempdir_in("/tmp")?;
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_DIR", runtime.path());
+    let socket = runtime.path().join("jcode.sock");
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider = Arc::new(TerminalExitProvider {
+        armed: armed.clone(),
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let server =
+        server::Server::new_with_paths(provider, socket.clone(), runtime.path().join("debug.sock"));
+    let task = tokio::spawn(async move { server.run().await });
+    let result = async {
+        wait_for_socket(&socket).await?;
+        let mut a = AcpClient::spawn()?;
+        let mut b = AcpClient::spawn()?;
+        initialize(&mut a).await?;
+        initialize(&mut b).await?;
+        let cwd = std::env::current_dir()?;
+        let new = a.request("session/new", json!({"cwd":cwd})).await?;
+        let id = &new["sessionId"];
+        b.request("session/resume", json!({"sessionId":id,"cwd":cwd}))
+            .await?;
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let prompt = a
+            .send_request(
+                "session/prompt",
+                json!({"sessionId":id,"prompt":[{"type":"text","text":"classify terminal"}]}),
+            )
+            .await?;
+        let start = b
+            .wait_for_notification(|m| {
+                m["method"] == "_jcode/turn" && m["params"]["state"] == "started"
+            })
+            .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.acquire())
+            .await?
+            .unwrap()
+            .forget();
+        if fail {
+            release.add_permits(1);
+        } else {
+            a.send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":id}}))
+                .await?;
+        }
+        let response = a.wait_for_response(prompt).await?;
+        if fail {
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("panicked")
+            );
+        } else {
+            assert_eq!(response["result"]["stopReason"], "cancelled");
+        }
+        let terminal = b
+            .wait_for_notification(|m| {
+                m["method"] == "_jcode/turn" && m["params"]["state"] != "started"
+            })
+            .await?;
+        assert_eq!(terminal["params"]["turnId"], start["params"]["turnId"]);
+        assert_eq!(
+            terminal["params"]["state"],
+            if fail { "failed" } else { "canceled" }
+        );
+        assert!(
+            terminal["params"]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(if fail {
+                    "panicked"
+                } else {
+                    "before it reported completion"
+                })
+        );
+        a.shutdown().await;
+        b.shutdown().await;
+        Ok(())
+    }
+    .await;
+    task.abort();
+    let _ = task.await;
+    result
+}

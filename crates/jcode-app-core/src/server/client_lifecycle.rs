@@ -92,11 +92,8 @@ fn event_for_transport(
     loop {
         event = match event {
             ServerEvent::TurnEvent { event, .. } => *event,
-            // Identity-only bookkeeping. `turn_ended` is always followed by the
-            // turn's own terminal, which legacy readers already receive.
-            ServerEvent::TurnStarted { .. }
-            | ServerEvent::TurnEnded { .. }
-            | ServerEvent::TurnState { .. } => return None,
+            // Identity-only bookkeeping is omitted for legacy readers.
+            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
             event => return Some(event),
         };
     }

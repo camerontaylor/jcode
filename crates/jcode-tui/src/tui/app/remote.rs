@@ -212,6 +212,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         let event = crate::protocol::ServerEvent::Done { id };
         let event = match app.deferred_stream_done_identity.clone() {
             Some(identity) => crate::protocol::ServerEvent::TurnEvent {
+                end_message: None,
                 end: None,
                 identity,
                 event: Box::new(event),

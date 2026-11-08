@@ -14,7 +14,8 @@ fn identity_transport_negotiation_preserves_legacy_payload_shape() {
         turn_id: 7,
     };
     let wrapped = ServerEvent::TurnEvent {
-        end: None,
+        end_message: None,
+        end: Some(crate::protocol::TurnEndStatus::Cancelled),
         identity: identity.clone(),
         event: Box::new(ServerEvent::Done { id: 99 }),
     };
@@ -35,18 +36,6 @@ fn identity_transport_negotiation_preserves_legacy_payload_shape() {
     assert!(matches!(
         event_for_transport(started, true),
         Some(ServerEvent::TurnStarted { .. })
-    ));
-    // Legacy readers get the terminal that follows `turn_ended`, never the
-    // identity bookkeeping itself.
-    let ended = ServerEvent::TurnEnded {
-        identity,
-        status: crate::protocol::TurnEndStatus::Completed,
-        message: None,
-    };
-    assert!(event_for_transport(ended.clone(), false).is_none());
-    assert!(matches!(
-        event_for_transport(ended, true),
-        Some(ServerEvent::TurnEnded { .. })
     ));
     assert!(
         event_for_transport(
@@ -1026,15 +1015,12 @@ async fn turn_publication_reserves_runtime_until_aborted_or_finished_queue_drain
         );
         assert!(matches!(
             rx.recv().await,
-            Some(ServerEvent::TurnEnded {
-                status: crate::protocol::TurnEndStatus::Completed,
-                ..
-            })
+            Some(ServerEvent::TurnEvent {
+                end: Some(crate::protocol::TurnEndStatus::Completed),
+                event, ..
+            }) if matches!(*event, ServerEvent::Done { id: 7 })
         ));
-        assert!(
-            matches!(rx.recv().await, Some(ServerEvent::TurnEvent { event, .. })
-            if matches!(*event, ServerEvent::Done { id: 7 }))
-        );
+
         let next = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if let Ok(lease) = agent.claim_server_turn() {

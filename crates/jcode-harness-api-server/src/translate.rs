@@ -1576,8 +1576,6 @@ impl BridgeState {
                 }
                 vec![]
             }
-            // Attribution only: the scoped terminal that follows closes the turn.
-            "turn_ended" => vec![],
             "turn_started" => {
                 if self.turn_fence.start(&event["identity"]) {
                     self.observed_turn_active = true;
@@ -1595,7 +1593,7 @@ impl BridgeState {
                 let payload = &event["event"];
                 if matches!(
                     payload["type"].as_str(),
-                    Some("turn_event" | "turn_started" | "turn_ended" | "turn_state")
+                    Some("turn_event" | "turn_started" | "turn_state")
                 ) {
                     return vec![];
                 }

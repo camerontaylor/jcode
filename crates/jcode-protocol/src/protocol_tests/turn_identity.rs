@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn scoped_terminal_roundtrips_without_changing_legacy_done_shape() {
     let event = ServerEvent::TurnEvent {
+        end_message: None,
         end: None,
         identity: crate::TurnIdentity {
             runtime_generation: "runtime-uuid".into(),
@@ -142,29 +143,6 @@ fn turn_origin_events_roundtrip_with_origin_and_content() {
         Some(crate::TurnOrigin::client(Some("acp-1/2".into()), 41))
     );
     assert_eq!(user_content.as_deref(), Some("what is the answer"));
-
-    for (status, wire) in [
-        (crate::TurnEndStatus::Completed, "completed"),
-        (crate::TurnEndStatus::Failed, "failed"),
-        (crate::TurnEndStatus::Cancelled, "cancelled"),
-    ] {
-        let message = (status == crate::TurnEndStatus::Failed).then(|| "boom".to_string());
-        let ended = ServerEvent::TurnEnded {
-            identity: identity(3),
-            status,
-            message: message.clone(),
-        };
-        let value = serde_json::to_value(&ended).unwrap();
-        assert_eq!(value["type"], "turn_ended");
-        assert_eq!(value["status"], wire);
-        assert_eq!(value.get("message").is_some(), message.is_some());
-        let decoded: ServerEvent = serde_json::from_value(value).unwrap();
-        assert!(matches!(
-            decoded,
-            ServerEvent::TurnEnded { identity: id, status: decoded_status, message: decoded_message }
-                if id == identity(3) && decoded_status == status && decoded_message == message
-        ));
-    }
 }
 
 #[test]
@@ -274,4 +252,17 @@ fn scoped_terminal_preserves_authoritative_end_classification() {
         let decoded: ServerEvent = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
     }
+}
+
+#[test]
+fn obsolete_turn_ended_is_not_a_daemon_wire_event() {
+    assert!(serde_json::from_value::<ServerEvent>(serde_json::json!({
+        "type": "turn_ended", "identity": {"runtime_generation":"r","turn_id":1}, "status":"completed"
+    })).is_err());
+    let wire = serde_json::json!({
+        "type":"turn_event", "identity":{"runtime_generation":"r","turn_id":1},
+        "event":{"type":"done","id":1}, "end":"cancelled", "end_message":"producer exited"
+    });
+    let event: ServerEvent = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(event).unwrap(), wire);
 }
