@@ -56,7 +56,7 @@ observe it, plus a wire-level test:
 | P1-meta | 1 | `fork/acp-capability-metadata`: `agentCapabilities._meta.jcode` (interfaceVersion, profile, extensions, sessionMcpServers) in every profile; `result._meta.jcode` {clientInstanceId, sharedControl} on new/load/resume; detach=false | DeepSeek `5365c86a` (atlas, `acp-p1-meta`) | accepted, awaiting integration | `d335f2e7d`: 5 unit + 1 e2e wire test pass; sharedControl derived from daemon Pong caps (`SharedControlSupport::from_router`) |
 | P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | accepted, awaiting integration | `26c296a09` (review fixes: Interrupted queued inside locked revalidation, failing-first test `db810004f`); D1 `26ff594f2` on pr/turn-scoped-cancel, D2 `86db359cf` on pr/stale-cancel-flag; evidence `docs/verification/p1-cancel-race.md` |
 | T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | accepted, awaiting integration (after P0-ci green) | `4759e51b3`: 5 pass + 2 ignored contract gaps; 5/5 stable runs on triton |
-| P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs` | Sol | held until P3-corr-detach lands (both rework adapter lifecycle in `daemon_router.rs`) | |
+| P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs`; branch `fork/r1-single-lifecycle` off stage `47a130e98`; gate = 4 fixtures replay unmodified | Sol `7be2f4d6` (triton, `acp-r1-lifecycle`) | running | |
 | P2-R2 | 2 | catalog facade in `jcode-harness-api-server`; branch `fork/r2-catalog-facade` off `fork/acp-conformance` | DeepSeek `1334bb53` (triton, `acp-r2-catalog`) | accepted, awaiting integration | `8a9e9e499`: catalog-path diff vs base 1,242 -> 113 lines (`translate.rs` 5/1, `session_files.rs` 0); fixture 01 replays unmodified; 199 harness + 92 acp lib + 5 conformance pass |
 | P3-corr | 3 | turn correlation `_meta.jcode.turnId` + `role`; branch `fork/acp-turn-correlation-detach` off `fork/acp-stage` | Sol `05e7eb9f` (triton, `acp-p3-corr-detach`) | accepted; in stage | `104604e23`: 100 ACP unit/router + 2 shared-session + 12 conformance pass; new fixtures 03, 04; 5x stable |
 | P3-detach | 3 | `_jcode/detach`; also v1 observer close must end an open peer bracket with `canceled` (T-conf gap `acp_conformance_observer_close_bracket_contract`); same lane as P3-corr | Sol `05e7eb9f` | accepted; in stage | core hook: `PrepareDisconnect.preserve_work` + capability `detach_preserve_work` (additive) |
@@ -196,3 +196,12 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   `origin/custom` in triton's `~/repos/jcode` (client resolves target as a
   local ref). Polling status every 60 s from atlas (background task).
   Findings: route actionable ones to a lane fix, then report to `1f8a9aff`.
+- 2026-11-08: Stage reconciled by `05e7eb9f` at `47a130e98` (ff-only push).
+  Orchestrator verified fixture drift under comparator normalisation: the
+  only change in all four files is `initialize` extensions gaining
+  `skill_selection`. Results: 58 ACP unit, 41 router, 12 conformance,
+  4 shared-session, 199 harness-api-server.
+- 2026-11-08: Fork CI: first run 42453543273 failed in Build & Test step
+  "Run stdin-forwarding cohort (all platforms)"; Quality green. Second run
+  42455789393 (scoped fmt check) in progress; P0 worker owns diagnosis.
+- 2026-11-08: R1 dispatched (Sol, triton) from stage `47a130e98`.
