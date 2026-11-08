@@ -35,6 +35,11 @@ env:
   # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
   CARGO_BUILD_RUSTC_WRAPPER: ""
   CARGO_TERM_COLOR: always
+  # Upstream commit the fork is assembled against, used by
+  # scripts/fork/fmt-check.sh to work out which .rs files are fork carries.
+  # UPDATE THIS when the Desvio base moves. The quality job's checkout needs it
+  # locally, so it fetches full history (fetch-depth: 0).
+  FORK_UPSTREAM_BASE: 7fd42339c907de223021bd63e5bb5df778c43a01
 
 jobs:
   quality:
@@ -50,6 +55,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # Full history: scripts/fork/fmt-check.sh runs `git show <base>:<file>`
+          # and `git diff <base> HEAD` against $FORK_UPSTREAM_BASE.
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -66,12 +74,15 @@ jobs:
         # every gate behind it. Naming the real cause first (221159294).
         run: python3 scripts/check_module_files.py
 
-      - name: Check formatting
-        # These gates are independent. Report every failure in one run instead
-        # of letting a Clippy error hide stale lockfiles or budget violations.
-        # No continue-on-error: any failed check still fails the quality job.
+      - name: Check formatting (fork-touched files only)
+        # NOT `cargo fmt --all -- --check`: upstream's base is not rustfmt-clean,
+        # and reformatting never-modified upstream files would turn them into
+        # fork carries that conflict at every base bump. The fork gate checks
+        # only the .rs files this fork adds or modifies, skipping files already
+        # unformatted at the base. See scripts/fork/README.md.
         if: ${{ !cancelled() }}
-        run: cargo fmt --all -- --check
+        shell: bash
+        run: bash scripts/fork/fmt-check.sh "$FORK_UPSTREAM_BASE"
 
       - name: Check all targets and all features
         if: ${{ !cancelled() }}

@@ -37,6 +37,33 @@ JCODE_CODE_SIZE_BUDGET=scripts/fork/code_size_budget.json \
 passes on `custom` under upstream's file. If it ever starts failing, add the
 same two-line variable to that script rather than editing upstream's JSON.
 
+## Formatting: `fmt-check.sh`
+
+Upstream's `cargo fmt --all -- --check` is not usable here: the upstream base
+`7fd42339c907de223021bd63e5bb5df778c43a01` is not rustfmt-clean, and
+reformatting files the fork never touched turns them into fork carries that
+conflict at every upstream base bump. `scripts/fork/fmt-check.sh <base>` checks
+only the `.rs` files the fork adds or modifies (`git diff --diff-filter=AM
+<base> HEAD`), running rustfmt standalone on each and skipping files that were
+already unformatted at the base. `fork-ci.yml` runs it with
+`$FORK_UPSTREAM_BASE`, set once at workflow level; **update that value when the
+Desvio base moves**. The quality job checks out with `fetch-depth: 0` because
+the script needs `git show <base>:<file>`.
+
+Locally:
+
+```bash
+bash scripts/fork/fmt-check.sh 7fd42339c907de223021bd63e5bb5df778c43a01
+```
+
+## Upstreamable carries
+
+`src/cli/cloud_managed_tests.rs` carries a one-line fix: `use std::path::Path`
+was at module scope while every use sits inside the `x86_64-linux`-gated
+`mod shell`, so clippy's `unused_imports` (denied in the quality job) failed.
+The fix scopes the import to the module that uses it. It is a candidate to
+send upstream rather than carry.
+
 ## What the baselines record
 
 Each fork baseline is upstream's baseline with **one change per currently
