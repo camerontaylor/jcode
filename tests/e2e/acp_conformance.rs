@@ -959,3 +959,4 @@ async fn acp_conformance_detach_prepare_error_preserves_attachment() -> Result<(
 
 mod close_v1;
 mod config_v1;
+mod legacy_v1;
