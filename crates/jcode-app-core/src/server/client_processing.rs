@@ -1,5 +1,12 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static TURN_CLAIM_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+
 /// Retire finished turns before interpreting a request against client-local state.
 /// The task publishes completion before its terminal event, and never waits on
 /// this actor. Joining it also closes the cross-thread gap between those sends:
@@ -207,6 +214,12 @@ pub(super) async fn start_processing_message(
             return;
         }
     };
+    #[cfg(test)]
+    TURN_CLAIM_HOOK.with(|hook| {
+        if let Some(callback) = hook.borrow_mut().take() {
+            callback();
+        }
+    });
     // The claim makes this the session's only turn, so a cancel still armed
     // now targeted an earlier turn and must not abort this one.
     if agent_guard.discard_cancel_armed_before_turn() {
