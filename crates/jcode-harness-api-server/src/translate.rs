@@ -12,16 +12,15 @@ use control_replies::SimpleKind;
 use jcode_harness_api::{
     ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame, SessionInfo, TextMatch,
 };
+use rusqlite::{Connection, params};
+use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{
     Mutex, MutexGuard, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use crate::session_catalog;
-use crate::session_catalog::PersistedSessionMetadata;
 
 #[cfg(test)]
 pub(crate) fn jcode_home_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -238,6 +237,82 @@ struct ArchiveState {
     archive_after_days: Option<u32>,
 }
 
+/// The small, canonical subset of a persisted `Session` needed by list and
+/// attach responses. Serde skips the heavyweight transcript fields without
+/// materializing them.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct PersistedSessionMetadata {
+    #[serde(default)]
+    pub(crate) working_dir: Option<String>,
+    /// Generated or imported title.
+    #[serde(default)]
+    pub(crate) title: Option<String>,
+    /// User-provided rename, which is what `Session::display_title` prefers.
+    #[serde(default)]
+    pub(crate) custom_title: Option<String>,
+    #[serde(default)]
+    pub(crate) todo_title: Option<String>,
+    #[serde(default)]
+    pub(crate) saved: bool,
+    #[serde(default)]
+    pub(crate) save_label: Option<String>,
+    #[serde(skip)]
+    pub(crate) updated_at_ms: Option<i64>,
+    #[serde(skip)]
+    pub(crate) last_active_at_ms: Option<i64>,
+}
+
+impl PersistedSessionMetadata {
+    pub(crate) fn display_title(&self) -> Option<String> {
+        self.custom_title
+            .as_deref()
+            .and_then(Self::normalized_title)
+            // Bookmarks labelled before labels doubled as titles.
+            .or_else(|| self.save_label())
+            .or_else(|| self.todo_title.as_deref().and_then(Self::normalized_title))
+            .or_else(|| self.title.as_deref().and_then(Self::normalized_title))
+    }
+
+    fn save_label(&self) -> Option<String> {
+        self.saved
+            .then(|| self.save_label.as_deref().and_then(Self::normalized_title))
+            .flatten()
+    }
+
+    fn normalized_title(title: &str) -> Option<String> {
+        let title = title.trim();
+        (!title.is_empty()).then(|| title.to_string())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecentSessionIndexEntry {
+    pub(crate) session_id: String,
+    pub(crate) working_dir: Option<String>,
+    pub(crate) generated_title: Option<String>,
+    pub(crate) custom_title: Option<String>,
+    pub(crate) todo_title: Option<String>,
+    pub(crate) saved: bool,
+    pub(crate) save_label: Option<String>,
+    pub(crate) updated_at_ms: i64,
+    pub(crate) last_active_at_ms: Option<i64>,
+}
+
+impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
+    fn from(entry: &RecentSessionIndexEntry) -> Self {
+        Self {
+            working_dir: entry.working_dir.clone(),
+            title: entry.generated_title.clone(),
+            custom_title: entry.custom_title.clone(),
+            todo_title: entry.todo_title.clone(),
+            saved: entry.saved,
+            save_label: entry.save_label.clone(),
+            updated_at_ms: Some(entry.updated_at_ms),
+            last_active_at_ms: entry.last_active_at_ms,
+        }
+    }
+}
+
 /// Whether translating this daemon event may perform synchronous file I/O.
 ///
 /// Keep in sync with the arms of [`BridgeState::legacy_event_to_api`] that
@@ -443,10 +518,8 @@ impl BridgeState {
 
         match req {
             "archive_session" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
-                if session_catalog::session_record_path(session_id)
-                    .is_none_or(|path| !path.is_file())
-                {
+                let session_id = request["session_id"].as_str().unwrap_or("");
+                if Self::session_record_path(session_id).is_none_or(|path| !path.is_file()) {
                     return Self::error_reply(
                         api_id,
                         ErrorCode::UnknownSession,
@@ -464,10 +537,8 @@ impl BridgeState {
                 }
             }
             "restore_session" => {
-                let session_id = request["session_id"].as_str().unwrap_or_default();
-                if session_catalog::session_record_path(session_id)
-                    .is_none_or(|path| !path.is_file())
-                {
+                let session_id = request["session_id"].as_str().unwrap_or("");
+                if Self::session_record_path(session_id).is_none_or(|path| !path.is_file()) {
                     return Self::error_reply(
                         api_id,
                         ErrorCode::UnknownSession,
@@ -697,13 +768,12 @@ impl BridgeState {
                 // live snapshot so unattached dashboards and global event
                 // subscribers discover complete session state.
                 let limit = request["limit"].as_u64().map(|limit| limit as usize);
-                let mut ids: BTreeSet<String> = session_catalog::stored_session_ids(limit)
-                    .into_iter()
-                    .collect();
+                let mut ids: BTreeSet<String> =
+                    Self::stored_session_ids(limit).into_iter().collect();
                 if limit.is_some() {
                     // Bookmarks are how users find old work, so a recency
                     // limit must never hide them from pickers.
-                    ids.extend(session_catalog::saved_session_ids());
+                    ids.extend(Self::saved_session_ids());
                 }
                 let ids_loaded = list_started.elapsed();
                 ids.extend(self.known_sessions.iter().cloned());
@@ -713,7 +783,7 @@ impl BridgeState {
                 if let Some(limit) = limit {
                     let mut recent: Vec<_> = ids.into_iter().collect();
                     recent.sort_unstable_by_key(|id| {
-                        std::cmp::Reverse(session_catalog::session_modified_ms(id))
+                        std::cmp::Reverse(Self::session_modified_ms(id))
                     });
                     recent.truncate(limit);
                     ids = recent.into_iter().collect();
@@ -725,7 +795,32 @@ impl BridgeState {
                 // before `SessionRenamed` is broadcast, and every list call
                 // should reflect that newest canonical value even on another
                 // API connection.
-                let metadata = session_catalog::load_session_metadata(&ids);
+                let indexed_metadata: BTreeMap<_, _> = Self::recent_session_index_entries()
+                    .into_iter()
+                    .map(|entry| (entry.session_id.clone(), entry))
+                    .collect();
+                let metadata: BTreeMap<String, PersistedSessionMetadata> = ids
+                    .iter()
+                    .filter_map(|id| {
+                        indexed_metadata
+                            .get(id)
+                            .map(|entry| {
+                                let mut metadata = PersistedSessionMetadata::from(entry);
+                                // Rows indexed before labels were tracked have
+                                // no label. Only saved sessions can carry one,
+                                // so the record read stays rare.
+                                if metadata.saved && metadata.save_label.is_none() {
+                                    metadata.save_label = Self::resolve_session_metadata(id)
+                                        .and_then(|record| record.save_label);
+                                }
+                                metadata
+                            })
+                            .or_else(|| Self::resolve_session_metadata(id))
+                            .map(|metadata| (id.clone(), metadata))
+                    })
+                    .collect();
+                let mut metadata = metadata;
+                Self::backfill_prompt_titles(&ids, &indexed_metadata, &mut metadata);
                 let metadata_loaded = list_started.elapsed();
                 for id in &ids {
                     if !self.session_dirs.contains_key(id)
@@ -748,9 +843,7 @@ impl BridgeState {
                         {
                             continue;
                         }
-                        if session_catalog::session_modified_ms(id)
-                            .is_some_and(|modified| modified < cutoff)
-                        {
+                        if Self::session_modified_ms(id).is_some_and(|modified| modified < cutoff) {
                             archive.sessions.insert(id.clone(), Self::now_ms());
                             changed = true;
                         }
@@ -789,8 +882,7 @@ impl BridgeState {
                             .get(&session_id)
                             .and_then(|value| value.updated_at_ms)
                             .or_else(|| {
-                                session_catalog::session_modified_ms(&session_id)
-                                    .map(|value| value as i64)
+                                Self::session_modified_ms(&session_id).map(|value| value as i64)
                             }),
                         last_active_at_ms: metadata
                             .get(&session_id)
@@ -1761,7 +1853,7 @@ impl BridgeState {
                         self.observed_turn_active =
                             event["is_processing"].as_bool().unwrap_or(false);
                     }
-                    let metadata = session_catalog::resolve_session_metadata(&session_id);
+                    let metadata = Self::resolve_session_metadata(&session_id);
                     // New sessions persist nothing until the first prompt.
                     let working_dir = metadata
                         .as_ref()
@@ -1791,7 +1883,7 @@ impl BridgeState {
                                     .as_ref()
                                     .and_then(|value| value.updated_at_ms)
                                     .or_else(|| {
-                                        session_catalog::session_modified_ms(&session_id)
+                                        Self::session_modified_ms(&session_id)
                                             .map(|value| value as i64)
                                     }),
                                 last_active_at_ms: metadata
@@ -2102,7 +2194,7 @@ impl BridgeState {
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
-                let metadata = session_catalog::resolve_session_metadata(&session_id);
+                let metadata = Self::resolve_session_metadata(&session_id);
                 vec![ServerFrame::reply(
                     api_id,
                     ApiEvent::SessionForked {
@@ -2114,7 +2206,7 @@ impl BridgeState {
                             swarm_status: None,
                             transcript_bytes: Self::transcript_bytes(&session_id),
                             saved: metadata.as_ref().is_some_and(|value| value.saved),
-                            updated_at_ms: session_catalog::session_modified_ms(&session_id)
+                            updated_at_ms: Self::session_modified_ms(&session_id)
                                 .map(|value| value as i64),
                             last_active_at_ms: metadata
                                 .as_ref()
@@ -2798,6 +2890,115 @@ impl BridgeState {
         false
     }
 
+    /// Path of a session's persisted record, or `None` if the id is not a
+    /// plain session id.
+    ///
+    /// One funnel for three reasons. It honours `JCODE_HOME`, without which a
+    /// launched instance reads the *user's* sessions: `peek_session` served
+    /// the real transcripts of the jcode the user runs interactively, which
+    /// defeats the isolation an embedded instance exists to provide. It
+    /// rejects ids that are not bare session ids, since the id comes straight
+    /// off the wire and is interpolated into a path, so `../../.ssh/id_rsa`
+    /// would otherwise be read and returned. And it keeps the three callers
+    /// from drifting apart, which is how the first two problems survived
+    /// being fixed anywhere else.
+    fn session_record_path(session_id: &str) -> Option<std::path::PathBuf> {
+        // Session ids are `session_<name>_<millis>_<hex>`; anything with a
+        // separator or a parent reference is not one.
+        if session_id.is_empty()
+            || session_id.len() > 128
+            || !session_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return None;
+        }
+        let home = match std::env::var_os("JCODE_HOME") {
+            Some(home) => std::path::PathBuf::from(home),
+            None => std::path::Path::new(&std::env::var_os("HOME")?).join(".jcode"),
+        };
+        Some(home.join("sessions").join(format!("{session_id}.json")))
+    }
+
+    /// Metadata of a session, read from its persisted record.
+    ///
+    /// The legacy `history` event lists session *ids* only, but the strip
+    /// groups by directory, so the bridge resolves them from the same files
+    /// the daemon persists. Best-effort by design: an unreadable or missing
+    /// record simply leaves the session ungrouped rather than failing the
+    /// list. Session records can be hundreds of megabytes, while the fields we
+    /// need are written in the small header and trailer. Reading bounded windows
+    /// avoids parsing every transcript message just to populate the sidebar.
+    pub(crate) fn resolve_session_metadata(session_id: &str) -> Option<PersistedSessionMetadata> {
+        let path = Self::session_record_path(session_id)?;
+        // A missing or malformed record is expected (a session may predate the
+        // fields, or be mid-write), and the only cost is missing metadata, so
+        // this degrades rather than failing the whole session list or attach.
+        const WINDOW: usize = 64 * 1024;
+        let mut file = std::fs::File::open(path).ok()?;
+        let len = file.metadata().ok()?.len();
+        let head_len = usize::try_from(len.min(WINDOW as u64)).ok()?;
+        let mut head = vec![0; head_len];
+        file.read_exact(&mut head).ok()?;
+        let tail = if len > WINDOW as u64 {
+            file.seek(SeekFrom::End(-(WINDOW as i64))).ok()?;
+            let mut tail = vec![0; WINDOW];
+            file.read_exact(&mut tail).ok()?;
+            tail
+        } else {
+            Vec::new()
+        };
+        Some(PersistedSessionMetadata {
+            title: Self::metadata_string(&head, "title", false),
+            custom_title: Self::metadata_string(&tail, "custom_title", true)
+                .or_else(|| Self::metadata_string(&head, "custom_title", true)),
+            todo_title: None,
+            saved: Self::metadata_bool(&tail, "saved", true)
+                .or_else(|| Self::metadata_bool(&head, "saved", false))
+                .unwrap_or(false),
+            save_label: Self::metadata_string(&tail, "save_label", true)
+                .or_else(|| Self::metadata_string(&head, "save_label", true)),
+            updated_at_ms: None,
+            last_active_at_ms: None,
+            working_dir: Self::metadata_string(&tail, "working_dir", true)
+                .or_else(|| Self::metadata_string(&head, "working_dir", true)),
+        })
+    }
+
+    fn metadata_string(bytes: &[u8], field: &str, last: bool) -> Option<String> {
+        let needle = format!("\"{field}\":");
+        let mut starts = bytes
+            .windows(needle.len())
+            .enumerate()
+            .filter_map(|(at, window)| (window == needle.as_bytes()).then_some(at + needle.len()));
+        let start = if last {
+            starts.next_back()?
+        } else {
+            starts.next()?
+        };
+        Option::<String>::deserialize(&mut serde_json::Deserializer::from_slice(&bytes[start..]))
+            .ok()
+            .flatten()
+    }
+
+    fn metadata_bool(bytes: &[u8], field: &str, last: bool) -> Option<bool> {
+        let needle = format!("\"{field}\":");
+        let mut starts = bytes
+            .windows(needle.len())
+            .enumerate()
+            .filter_map(|(at, window)| (window == needle.as_bytes()).then_some(at + needle.len()));
+        let start = if last {
+            starts.next_back()?
+        } else {
+            starts.next()?
+        };
+        bool::deserialize(&mut serde_json::Deserializer::from_slice(&bytes[start..])).ok()
+    }
+
+    fn resolve_working_dir(session_id: &str) -> Option<String> {
+        Self::resolve_session_metadata(session_id)?.working_dir
+    }
+
     /// Size of a session's stored record, in bytes.
     ///
     /// A stat rather than a parse: this runs for every session on every list
@@ -2806,8 +3007,19 @@ impl BridgeState {
     /// almost entirely message content, so its size tracks the conversation
     /// closely enough for a client to size or sort by.
     fn transcript_bytes(session_id: &str) -> Option<u64> {
-        let path = session_catalog::session_record_path(session_id)?;
+        let path = Self::session_record_path(session_id)?;
         std::fs::metadata(path).ok().map(|meta| meta.len())
+    }
+
+    pub(crate) fn session_modified_ms(session_id: &str) -> Option<u64> {
+        Self::session_record_path(session_id)?
+            .metadata()
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis() as u64)
     }
 
     fn now_ms() -> u64 {
@@ -2822,12 +3034,342 @@ impl BridgeState {
         if !jcode_todo_policy::store::is_safe_session_id(session_id) {
             return Err((ErrorCode::InvalidRequest, "invalid session_id".to_string()));
         }
-        session_catalog::jcode_home()
-            .ok_or_else(|| (ErrorCode::Internal, "no jcode home".to_string()))
+        Self::jcode_home().ok_or_else(|| (ErrorCode::Internal, "no jcode home".to_string()))
+    }
+
+    fn jcode_home() -> Option<std::path::PathBuf> {
+        std::env::var_os("JCODE_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".jcode"))
+            })
+    }
+
+    fn recent_session_index_path() -> Option<std::path::PathBuf> {
+        Some(Self::jcode_home()?.join("session-metadata-v1.sqlite3"))
+    }
+
+    /// Name sessions recorded before first-prompt titles existed. Each
+    /// session is derived once and cached in the shared index (an empty
+    /// value marks "no usable prompt"). The work is time-boxed per request,
+    /// newest first, so a large backlog is spread across list calls.
+    pub(crate) fn backfill_prompt_titles(
+        ids: &BTreeSet<String>,
+        indexed: &BTreeMap<String, RecentSessionIndexEntry>,
+        metadata: &mut BTreeMap<String, PersistedSessionMetadata>,
+    ) {
+        const BUDGET: std::time::Duration = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let mut pending: Vec<_> = ids
+            .iter()
+            .filter_map(|id| indexed.get(id))
+            .filter(|entry| entry.generated_title.is_none())
+            .collect();
+        pending.sort_by_key(|entry| {
+            std::cmp::Reverse(entry.last_active_at_ms.unwrap_or(entry.updated_at_ms))
+        });
+        for entry in pending {
+            if started.elapsed() > BUDGET {
+                break;
+            }
+            let id = &entry.session_id;
+            let title = Self::first_prompt_title(id);
+            // Empty marks "no usable prompt" so the record is not rescanned.
+            if let Some(path) = Self::recent_session_index_path()
+                && let Ok(connection) = Connection::open(path)
+            {
+                let _ = connection.execute(
+                    "UPDATE recent_sessions SET generated_title = ?2
+                     WHERE session_id = ?1 AND generated_title IS NULL",
+                    params![id, title.clone().unwrap_or_default()],
+                );
+            }
+            if let Some(title) = title
+                && let Some(value) = metadata.get_mut(id)
+            {
+                value.title = Some(title);
+            }
+        }
+    }
+
+    /// Title derived from a session's first visible user prompt, matching the
+    /// runtime's own fallback. Streams the record so only that prompt's text
+    /// is materialized, then falls back to the append journal.
+    fn first_prompt_title(session_id: &str) -> Option<String> {
+        use serde::de::{IgnoredAny, SeqAccess, Visitor};
+
+        #[derive(Deserialize)]
+        struct LiteBlock {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default)]
+            text: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct LiteMessage {
+            role: String,
+            #[serde(default)]
+            display_role: Option<IgnoredAny>,
+            #[serde(default)]
+            content: Vec<LiteBlock>,
+        }
+        impl LiteMessage {
+            fn title(&self) -> Option<String> {
+                if self.role != "user" || self.display_role.is_some() {
+                    return None;
+                }
+                let mut texts = self
+                    .content
+                    .iter()
+                    .filter(|block| block.kind == "text")
+                    .filter_map(|block| block.text.as_deref());
+                let first = texts.next()?;
+                if first.trim_start().starts_with("<system-reminder>") {
+                    return None;
+                }
+                std::iter::once(first)
+                    .chain(texts)
+                    .find_map(jcode_session_types::prompt_title)
+            }
+        }
+        #[derive(Default)]
+        struct FirstPrompt(Option<String>);
+        impl<'de> Deserialize<'de> for FirstPrompt {
+            fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+                struct Scan;
+                impl<'de> Visitor<'de> for Scan {
+                    type Value = FirstPrompt;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("a message list")
+                    }
+                    fn visit_seq<A: SeqAccess<'de>>(
+                        self,
+                        mut seq: A,
+                    ) -> Result<FirstPrompt, A::Error> {
+                        let mut found = None;
+                        while found.is_none() {
+                            match seq.next_element::<LiteMessage>()? {
+                                Some(message) => found = message.title(),
+                                None => return Ok(FirstPrompt(None)),
+                            }
+                        }
+                        while seq.next_element::<IgnoredAny>()?.is_some() {}
+                        Ok(FirstPrompt(found))
+                    }
+                }
+                de.deserialize_seq(Scan)
+            }
+        }
+        #[derive(Deserialize)]
+        struct Record {
+            #[serde(default)]
+            messages: FirstPrompt,
+        }
+        #[derive(Deserialize)]
+        struct JournalEntry {
+            #[serde(default)]
+            append_messages: FirstPrompt,
+        }
+
+        let path = Self::session_record_path(session_id)?;
+        let file = std::fs::File::open(&path).ok()?;
+        let mut de = serde_json::Deserializer::from_reader(std::io::BufReader::new(file));
+        if let Some(title) = Record::deserialize(&mut de).ok().and_then(|r| r.messages.0) {
+            return Some(title);
+        }
+        let journal = path.with_file_name(format!("{session_id}.journal.jsonl"));
+        let reader = std::io::BufReader::new(std::fs::File::open(journal).ok()?);
+        std::io::BufRead::lines(reader)
+            .map_while(Result::ok)
+            .filter_map(|line| serde_json::from_str::<JournalEntry>(&line).ok())
+            .find_map(|entry| entry.append_messages.0)
+    }
+
+    pub(crate) fn recent_session_index_entries() -> Vec<RecentSessionIndexEntry> {
+        let Some(path) = Self::recent_session_index_path() else {
+            return Vec::new();
+        };
+        let Ok(connection) = Connection::open(path) else {
+            return Vec::new();
+        };
+        if connection
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 CREATE TABLE IF NOT EXISTS recent_sessions (
+                     session_id TEXT PRIMARY KEY NOT NULL,
+                     working_dir TEXT,
+                     generated_title TEXT,
+                     custom_title TEXT,
+                     todo_title TEXT,
+                     updated_at_ms INTEGER NOT NULL,
+                     last_active_at_ms INTEGER,
+                     saved INTEGER NOT NULL DEFAULT 0,
+                     save_label TEXT
+                 );
+                 CREATE INDEX IF NOT EXISTS recent_sessions_activity
+                 ON recent_sessions(COALESCE(last_active_at_ms, updated_at_ms) DESC);",
+            )
+            .is_err()
+        {
+            return Vec::new();
+        }
+        let _ = connection.execute(
+            "ALTER TABLE recent_sessions ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = connection.execute("ALTER TABLE recent_sessions ADD COLUMN save_label TEXT", []);
+        let Ok(mut statement) = connection.prepare(
+            "SELECT session_id, working_dir, generated_title, custom_title,
+                    todo_title, saved, updated_at_ms, last_active_at_ms, save_label
+             FROM recent_sessions
+             ORDER BY COALESCE(last_active_at_ms, updated_at_ms) DESC
+             LIMIT 500",
+        ) else {
+            return Vec::new();
+        };
+        statement
+            .query_map([], |row| {
+                Ok(RecentSessionIndexEntry {
+                    session_id: row.get(0)?,
+                    working_dir: row.get(1)?,
+                    generated_title: row.get(2)?,
+                    custom_title: row.get(3)?,
+                    todo_title: row.get(4)?,
+                    saved: row.get(5)?,
+                    updated_at_ms: row.get(6)?,
+                    last_active_at_ms: row.get(7)?,
+                    save_label: row.get(8)?,
+                })
+            })
+            .and_then(|rows| rows.collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn saved_session_ids() -> Vec<String> {
+        let Some(path) = Self::recent_session_index_path() else {
+            return Vec::new();
+        };
+        let Ok(connection) = Connection::open(path) else {
+            return Vec::new();
+        };
+        let Ok(mut statement) =
+            connection.prepare("SELECT session_id FROM recent_sessions WHERE saved != 0")
+        else {
+            return Vec::new();
+        };
+        statement
+            .query_map([], |row| row.get(0))
+            .and_then(|rows| rows.collect())
+            .unwrap_or_default()
+    }
+
+    fn write_bootstrap_recent_session_index(ids: &[(SystemTime, String)]) {
+        let Some(path) = Self::recent_session_index_path() else {
+            return;
+        };
+        let Ok(mut connection) = Connection::open(path) else {
+            return;
+        };
+        let Ok(transaction) = connection.transaction() else {
+            return;
+        };
+        for (modified, session_id) in ids.iter().take(500) {
+            let metadata = Self::resolve_session_metadata(session_id).unwrap_or_default();
+            let updated_at_ms = modified
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or_default();
+            let _ = transaction.execute(
+                "INSERT INTO recent_sessions (
+                     session_id, working_dir, generated_title, custom_title,
+                     todo_title, updated_at_ms, last_active_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)
+                 ON CONFLICT(session_id) DO NOTHING",
+                params![
+                    session_id,
+                    metadata.working_dir,
+                    metadata.title,
+                    metadata.custom_title,
+                    updated_at_ms,
+                ],
+            );
+        }
+        let _ = transaction.commit();
+    }
+
+    pub(crate) fn stored_session_ids(limit: Option<usize>) -> Vec<String> {
+        let indexed = Self::recent_session_index_entries();
+        if !indexed.is_empty() && limit.is_some_and(|limit| indexed.len() >= limit) {
+            return indexed
+                .into_iter()
+                .take(limit.unwrap_or(usize::MAX))
+                .map(|entry| entry.session_id)
+                .collect();
+        }
+        let Some(home) = Self::jcode_home() else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(home.join("sessions")) else {
+            return Vec::new();
+        };
+        let candidates: Vec<(String, std::path::PathBuf)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let kind = entry.file_type().ok()?;
+                let path = entry.path();
+                if !kind.is_file() || path.extension()?.to_str()? != "json" {
+                    return None;
+                }
+                let id = path.file_stem()?.to_str()?.to_string();
+                Self::session_record_path(&id)
+                    .is_some()
+                    .then_some((id, path))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        // `stat` is the dominant cost with 100k+ sessions. Match the TUI picker
+        // by doing those independent filesystem calls concurrently rather than
+        // serially blocking the API reply long enough for clients to time out.
+        // Stat is I/O-bound, so a few threads capture the parallelism; one per
+        // core only multiplied allocator arenas in this long-lived process.
+        let workers = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(4)
+            .min(candidates.len().max(1));
+        let chunk_size = candidates.len().div_ceil(workers);
+        let mut ids = std::thread::scope(|scope| {
+            let handles = candidates.chunks(chunk_size).map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|(id, path)| {
+                            let modified = path
+                                .metadata()
+                                .and_then(|metadata| metadata.modified())
+                                .unwrap_or(UNIX_EPOCH);
+                            (modified, id.clone())
+                        })
+                        .collect::<Vec<_>>()
+                })
+            });
+            handles
+                .flat_map(|handle| handle.join().unwrap_or_default())
+                .collect::<Vec<_>>()
+        });
+        ids.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
+        Self::write_bootstrap_recent_session_index(&ids);
+        if let Some(limit) = limit {
+            ids.truncate(limit);
+        }
+        ids.into_iter().map(|(_, id)| id).collect()
     }
 
     fn archive_state_path() -> Option<std::path::PathBuf> {
-        Some(session_catalog::jcode_home()?.join("sdk-archive.json"))
+        Some(Self::jcode_home()?.join("sdk-archive.json"))
     }
 
     fn state_write_guard() -> MutexGuard<'static, ()> {
@@ -2898,7 +3440,7 @@ impl BridgeState {
     /// wants: a reader glancing at another session needs the words, not the
     /// tool-call structure around them.
     fn stored_tail(session_id: &str, limit: usize) -> Vec<HistoryMessage> {
-        let Some(path) = session_catalog::session_record_path(session_id) else {
+        let Some(path) = Self::session_record_path(session_id) else {
             return vec![];
         };
         let Ok(text) = std::fs::read_to_string(path) else {
