@@ -586,3 +586,4 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 
 
 - 2026-11-09: Fork CI run 42515725129 on `fork/release-stage` `0f9a3e5de` green (Build & Test, Quality Guardrails). `custom` fast-forwarded `bf9f0b22f..0f9a3e5de`; local `~/repos/jcode` custom synced. Next: deploy agents `f70952f38` to hosts, then (with user approval) tag `v0.99.1004+fork.p199`.
+- 2026-11-09: agents `f70952f38` status: ceres, uranus already had it; pluto fast-forwarded (only untracked files). atlas, triton, saturn, neptune checkouts have other workstreams' uncommitted edits overlapping the incoming diff, so they were NOT pulled. Rollout plan for those: `git show origin/main:scripts/harness-update.py > ~/.cache/harness-update-f70952f.py` and run it with `--manifest ~/.local/agents/manifests/harnesses.conf --only jcode`. Awaiting user approval to push tag `v0.99.1004+fork.p199`.
