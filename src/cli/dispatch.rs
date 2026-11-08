@@ -1,25 +1,22 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
-
-use anyhow::{Context, Result};
-use std::io::IsTerminal;
-use std::process::{Command as ProcessCommand, Stdio};
-use std::time::Instant;
-
 use super::args::{
     AmbientCommand, Args, AuthCommand, CloudCommand, CloudSessionsCommand, Command, MemoryCommand,
     ModelCommand, ProviderCommand, RestartCommand, ServerCommand, SessionCommand,
     TranscriptModeArg,
 };
-use crate::{
-    agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
-    tui,
-};
-
 use super::{
     account, acp, commands, debug, hot_exec, login, output, provider_init, selfdev, terminal,
     tui_launch,
 };
+use crate::{
+    agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
+    tui,
+};
+use anyhow::{Context, Result};
 use provider_init::ProviderChoice;
+use std::io::IsTerminal;
+use std::process::{Command as ProcessCommand, Stdio};
+use std::time::Instant;
 
 #[cfg(any(target_os = "linux", test))]
 fn is_file_controlled_debug_client() -> bool {
@@ -371,6 +368,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     .await?;
             let mut agent = agent::Agent::new(provider, registry);
             agent.repl().await?;
+        }
+        Some(Command::UpdatePostInstall { reason, .. }) => {
+            super::update_reload::reload_all(&std::env::current_exe()?, &reason);
         }
         Some(Command::Update { channel }) => {
             hot_exec::run_update(channel.as_deref())?;
