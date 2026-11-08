@@ -57,7 +57,7 @@ observe it, plus a wire-level test:
 | P1-race | 1 | D1/D2 atomic turn-scoped cancel + epoch at turn claim, deterministic seam, terminal publication audit, mixed-version delivery (D3 guard); on `pr/turn-scoped-cancel` / `pr/stale-cancel-flag` merge-forward; topic `fork/p1-cancel-race` | Sol `9008bf12` (atlas, `acp-p1-race`) | accepted, awaiting integration | `26c296a09` (review fixes: Interrupted queued inside locked revalidation, failing-first test `db810004f`); D1 `26ff594f2` on pr/turn-scoped-cancel, D2 `86db359cf` on pr/stale-cancel-flag; evidence `docs/verification/p1-cancel-race.md` |
 | T-conf | 1→3 | `fork/acp-conformance`: wire-level protocol conformance suite + JSONL recorder/replayer for `tests/fixtures/acp/` | Sol `652f5f66` (triton, `acp-conformance`) | accepted, awaiting integration (after P0-ci green) | `4759e51b3`: 5 pass + 2 ignored contract gaps; 5/5 stable runs on triton |
 | P2-R1 | 2 | remove competing lifecycle; split `daemon_router.rs` | Sol | not started (after P1-race) | |
-| P2-R2 | 2 | catalog facade in `jcode-harness-api-server`; branch `fork/r2-catalog-facade` off `fork/acp-conformance` | DeepSeek `1334bb53` (triton, `acp-r2-catalog`) | running | |
+| P2-R2 | 2 | catalog facade in `jcode-harness-api-server`; branch `fork/r2-catalog-facade` off `fork/acp-conformance` | DeepSeek `1334bb53` (triton, `acp-r2-catalog`) | follow-up requested (child-module facade to drop 27 `pub(crate)` markers) | catalog-path diff vs base 1,242 -> 159 lines; fixture 01 replays unmodified; 199 harness + 92 acp lib + 5 conformance pass |
 | P3-corr | 3 | turn correlation `_meta.jcode.turnId` + `role`; branch `fork/acp-turn-correlation-detach` off `fork/acp-stage` | Sol `05e7eb9f` (triton, `acp-p3-corr-detach`) | running | |
 | P3-detach | 3 | `_jcode/detach`; also v1 observer close must end an open peer bracket with `canceled` (T-conf gap `acp_conformance_observer_close_bracket_contract`); same lane as P3-corr | Sol `05e7eb9f` | running | |
 | P3-skill | 3 | `skill: null` clear + `skill_selection` ext; branch `fork/acp-skill-clear-mcp-notice` off `fork/acp-capability-metadata` | DeepSeek `8e023355` (triton, `acp-p3-skill-mcp`) | running | |
@@ -126,3 +126,11 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   is green. P3-corr+detach (Sol, triton) branches from it; its step 0
   reconciles the stage (compile, un-ignore metadata contract test,
   re-record fixture 01).
+- 2026-11-08: P2-R2 finished: facade
+  `stored_session_catalog(limit) -> Vec<SessionCatalogEntry>`;
+  `session_files.rs` and `translate_tests.rs` back to upstream (bar one
+  `stored_index` line). Residual: ~30 lines of list assembly duplicated with
+  upstream's `list_sessions` handler (drift risk if upstream changes title
+  resolution; covered by facade tests + conformance list test). Asked to move
+  the facade under `translate/` so private items are visible without the 27
+  visibility markers.
