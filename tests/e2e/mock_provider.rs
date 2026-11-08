@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 pub struct MockProvider {
     responses: Arc<Mutex<VecDeque<Vec<StreamEvent>>>>,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
     models: Vec<&'static str>,
     current_model: Arc<Mutex<String>>,
     /// Captured system prompts from complete() calls (for testing)
@@ -25,11 +26,22 @@ impl MockProvider {
     pub fn new() -> Self {
         Self {
             responses: Arc::new(Mutex::new(VecDeque::new())),
+            gate: None,
             models: Vec::new(),
             current_model: Arc::new(Mutex::new("mock".to_string())),
             captured_system_prompts: Arc::new(Mutex::new(Vec::new())),
             captured_resume_session_ids: Arc::new(Mutex::new(Vec::new())),
             captured_models: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Hold each response after its first event until the test releases a permit.
+    /// The first event is a wire-visible synchronization point; permits are
+    /// consumed, so releasing one turn cannot accidentally release its successor.
+    pub fn gated(gate: Arc<tokio::sync::Semaphore>) -> Self {
+        Self {
+            gate: Some(gate),
+            ..Self::new()
         }
     }
 
@@ -40,6 +52,7 @@ impl MockProvider {
             .unwrap_or_else(|| "mock".to_string());
         Self {
             responses: Arc::new(Mutex::new(VecDeque::new())),
+            gate: None,
             models,
             current_model: Arc::new(Mutex::new(current)),
             captured_system_prompts: Arc::new(Mutex::new(Vec::new())),
@@ -81,8 +94,14 @@ impl Provider for MockProvider {
             .pop_front()
             .unwrap_or_default();
 
+        let gate = self.gate.clone();
         let stream = stream! {
-            for event in events {
+            for (index, event) in events.into_iter().enumerate() {
+                if index == 1 {
+                    if let Some(gate) = &gate {
+                        gate.acquire().await.expect("test gate remains open").forget();
+                    }
+                }
                 yield Ok(event);
             }
         };
@@ -114,6 +133,7 @@ impl Provider for MockProvider {
         let current = self.current_model.lock().unwrap().clone();
         Arc::new(MockProvider {
             responses: self.responses.clone(),
+            gate: self.gate.clone(),
             models: self.models.clone(),
             current_model: Arc::new(Mutex::new(current)),
             captured_system_prompts: self.captured_system_prompts.clone(),
