@@ -453,3 +453,11 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
   - atlas `~/.cache/acp-stage` (on `fork/acp-stage-next`)
   - triton `acp-ci-guardrails` (Sol `ae3f6bd4`, running)
 
+
+### 2026-11-08 — cq client update (from `1f8a9aff`)
+
+- cq-toolkit #1227 (`a4686ec6`) is merged. It fixes review-admission contention.
+- The triton task PATH `/home/ctaylor/.local/state/cq-jcode-review-20261108/bin` now has a stable `cq` launcher, which runs `~/.cache/cq-client-a4686ec6/dist/cli.js`. Use `cq review.submit|status|result` instead of `node ~/.cache/cq-client-e61fc8c9/...`.
+- Keep `CQ_QUEUE_SSH_ALIAS=cq-queue-ceres`, and unset `PASEO_AGENT_ID` and `CQ_REVIEW_NOTIFY_HOST`.
+- The client retries a typed busy response for up to 35 s.
+- I told `1f8a9aff` that the old review cwds were removed and their evidence preserved, and offered to restore them if a request id needs its original cwd.
