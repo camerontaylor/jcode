@@ -412,7 +412,6 @@ async fn acp_conformance_list_metadata_and_pagination() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "contract gap: standard initialize omits jcode capability metadata"]
 async fn acp_conformance_capability_metadata_contract() -> Result<()> {
     let _env = setup_test_env()?;
     let mut c = AcpClient::spawn()?;
