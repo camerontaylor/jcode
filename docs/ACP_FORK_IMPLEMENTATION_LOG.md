@@ -489,3 +489,21 @@ Phases 4–5 (v2 track) are gated per the strategy and are not scheduled.
 
 - Run 42467221310 (push to `custom` @ `bf9f0b22f`) passed both jobs: Quality Guardrails and Build & Test (ubuntu-latest). This is the recorded fork CI baseline.
 - Phase 0–3 scope is complete. Phases 4–5 (v2) remain gated.
+
+### 2026-11-08 — build and deploy `custom` (user request)
+
+- **Build:**
+  - Desvio `build --bisect-gate` on atlas assembled `mine` `19d0b7afc` = base + `custom` `bf9f0b22f`. The tree equals `custom`.
+  - `desvio_verify` passed: modules, fmt-check, `cargo check --all-targets`.
+- **Problems before a clean run:**
+  - The local `custom` in `~/repos/jcode` was stale (`a047a0c07`); fast-forwarded to `origin/custom`.
+  - The interrupted build left `build-tree` detached; it was clean at the base and reattached to `mine`.
+  - The partial clone (`blob:none`) was missing 2 blobs for rerere training; fetched lazily.
+- **Smoke test:** the selfdev binary ran against an isolated daemon on `/run/user/502/jcode-smoke-acp.sock`.
+  - `initialize` returned `_meta.jcode` (4 v1 extensions, interfaceVersion 1).
+  - `session/new` returned `_meta.jcode` with `sharedControl.detach=true`, plus configOptions and the `available_commands_update`.
+  - The smoke daemon is stopped and the socket trashed.
+  - The dev version stamp in the selfdev binary is stale (`0.99.816-dev`, cached build-meta). Release builds stamp it from the tag, and CI checks it.
+- **Deploy path:** fork release tag `v0.99.1003` on `bf9f0b22f` -> `fork-release.yml` (4 targets, published as Latest) -> per-host `scripts/harness-update.py --only jcode` (agents repo).
+  - The tag create/push was **denied by the auto-mode permission classifier**. No tag exists locally or on origin, and nothing was deployed.
+  - Waiting on the user.
