@@ -2645,6 +2645,9 @@ struct EventMapper {
     /// index.
     message_scope: String,
     message_index: u64,
+    /// Index of the reasoning block currently being streamed, in its own id
+    /// space so a thought block and an assistant message never share an id.
+    thought_index: u64,
 }
 
 impl EventMapper {
@@ -2663,6 +2666,7 @@ impl EventMapper {
             tool_inputs: HashMap::new(),
             message_scope,
             message_index: 0,
+            thought_index: 0,
         }
     }
 
@@ -2671,8 +2675,24 @@ impl EventMapper {
         format!("{}:{}", self.message_scope, self.message_index)
     }
 
+    /// Stable id for the reasoning block currently being streamed.
+    fn thought_message_id(&self) -> String {
+        format!("{}:thought:{}", self.message_scope, self.thought_index)
+    }
+
     fn agent_chunk(&self, text: String) -> Value {
         agent_message_chunk_with_id(text, self.message_id())
+    }
+
+    fn thought_chunk(&self, text: String) -> Value {
+        json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "messageId": self.thought_message_id(),
+            "content": {
+                "type": "text",
+                "text": text,
+            }
+        })
     }
 
     fn map_event(&mut self, event: ServerEvent) -> Vec<Value> {
@@ -2682,6 +2702,15 @@ impl EventMapper {
             // One assistant message ended; the next chunk starts a new one.
             ServerEvent::MessageEnd { .. } => {
                 self.message_index = self.message_index.saturating_add(1);
+                self.thought_index = self.thought_index.saturating_add(1);
+                Vec::new()
+            }
+            // Raw model reasoning. v1 has no non-chunk shape for it, and the
+            // daemon's `ReasoningDone` only closes the block, so the block's
+            // chunks share one `messageId` and the next block gets the next.
+            ServerEvent::ReasoningDelta { text } => vec![self.thought_chunk(text)],
+            ServerEvent::ReasoningDone { .. } => {
+                self.thought_index = self.thought_index.saturating_add(1);
                 Vec::new()
             }
             ServerEvent::TextDelta { text } => vec![self.agent_chunk(text)],

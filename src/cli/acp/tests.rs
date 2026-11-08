@@ -503,6 +503,60 @@ fn event_mapper_suppresses_incomplete_legacy_tool_input() {
 }
 
 #[test]
+fn event_mapper_streams_reasoning_as_thought_chunks() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let first = mapper.map_event(ServerEvent::ReasoningDelta {
+        text: "checking the adapter".to_string(),
+    });
+    assert_eq!(first[0]["sessionUpdate"], "agent_thought_chunk");
+    assert_eq!(
+        first[0]["content"],
+        json!({"type": "text", "text": "checking the adapter"})
+    );
+    let second = mapper.map_event(ServerEvent::ReasoningDelta {
+        text: " before answering".to_string(),
+    });
+    // Chunks of one reasoning block group under one message id.
+    assert_eq!(first[0]["messageId"], second[0]["messageId"]);
+    // The block boundary itself carries no content.
+    assert!(
+        mapper
+            .map_event(ServerEvent::ReasoningDone {
+                duration_secs: Some(1.5)
+            })
+            .is_empty()
+    );
+    let next = mapper.map_event(ServerEvent::ReasoningDelta {
+        text: "a new step".to_string(),
+    });
+    assert_ne!(next[0]["messageId"], first[0]["messageId"]);
+    // Reasoning and assistant text never share an id, even in one step.
+    let answer = mapper.map_event(ServerEvent::TextDelta {
+        text: "answer".to_string(),
+    });
+    assert_eq!(answer[0]["sessionUpdate"], "agent_message_chunk");
+    assert_ne!(answer[0]["messageId"], next[0]["messageId"]);
+}
+
+#[test]
+fn event_mapper_emits_no_thought_chunk_without_daemon_reasoning() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    let updates = mapper.map_event(ServerEvent::TextDelta {
+        text: "answer".to_string(),
+    });
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["sessionUpdate"], "agent_message_chunk");
+    // Nothing is invented when the daemon exposes no reasoning.
+    assert!(
+        mapper
+            .map_event(ServerEvent::ReasoningDone {
+                duration_secs: None
+            })
+            .is_empty()
+    );
+}
+
+#[test]
 fn non_empty_mcp_servers_are_tolerated_until_session_scoped_mcp_is_supported() {
     let params = json!({"mcpServers": [{"name": "fs"}]});
     assert!(validate_acp_mcp_servers(&params).is_ok());
