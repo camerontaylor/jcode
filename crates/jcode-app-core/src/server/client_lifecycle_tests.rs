@@ -1837,7 +1837,10 @@ fn cancel_after_turn_claim_is_preserved() -> anyhow::Result<()> {
     let _env = IsolatedReloadRecoveryEnv::new();
     let session_id = "session_peer_cancel_then_message";
 
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime for TURN_CLAIM_HOOK");
     rt.block_on(async {
         let provider: Arc<dyn Provider> = Arc::new(FanoutStreamProvider);
         let registry = Registry::new(Arc::clone(&provider)).await;
@@ -1910,7 +1913,9 @@ fn cancel_after_turn_claim_is_preserved() -> anyhow::Result<()> {
         let (processing_done_tx, _processing_done_rx) = mpsc::unbounded_channel();
         let claimed_signal = agent_stop_signal.clone();
         super::client_processing::TURN_CLAIM_HOOK.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || { claimed_signal.fire(); }));
+            *hook.borrow_mut() = Some(Box::new(move || {
+                claimed_signal.fire();
+            }));
         });
         start_processing_message(
             ProcessingMessage {
@@ -1937,8 +1942,14 @@ fn cancel_after_turn_claim_is_preserved() -> anyhow::Result<()> {
         )
         .await;
 
-        assert!(agent_stop_signal.is_set(), "a cancellation after claim must survive preparation");
-        if let Some(task) = task { task.abort(); let _ = task.await; }
+        assert!(
+            agent_stop_signal.is_set(),
+            "a cancellation after claim must survive preparation"
+        );
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
     });
     Ok(())
 }

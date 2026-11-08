@@ -1,11 +1,11 @@
 use super::*;
 
+// Thread-local: hook tests must install and consume on a current-thread runtime.
 #[cfg(test)]
 thread_local! {
     pub(super) static TURN_CLAIM_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
 }
-
 
 /// Retire finished turns before interpreting a request against client-local state.
 /// The task publishes completion before its terminal event, and never waits on

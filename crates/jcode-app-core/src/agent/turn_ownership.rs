@@ -59,7 +59,7 @@ impl TurnObserver {
             active: state.active.clone(),
             attribution: state.attribution.clone(),
         }
-}
+    }
 
     /// Check identity and signal while replacement is excluded by the state lock.
     pub(crate) fn cancel_active(

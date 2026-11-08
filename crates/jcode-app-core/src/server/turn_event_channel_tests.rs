@@ -532,8 +532,14 @@ async fn cancel_turn_stopped_is_scoped_to_the_active_turn_for_every_attachment()
             "the channel's terminal follows turn_ended: {events:?}"
         );
         events.extend(std::iter::from_fn(|| rx.try_recv().ok()));
-        assert_eq!(events.iter().filter(|event| is_scoped_done(event, 31)).count(), 1,
-            "the requester and observers each receive exactly one terminal: {events:?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| is_scoped_done(event, 31))
+                .count(),
+            1,
+            "the requester and observers each receive exactly one terminal: {events:?}"
+        );
     }
 }
 
@@ -1105,7 +1111,8 @@ async fn turn_is_attributed_before_turn_started_is_announced() {
 async fn cancellation_dispatch_cannot_signal_a_successor() {
     let _lock = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
-    let harness = TurnHarness::new("dispatch_replacement", 2, Arc::new(HangingStreamProvider)).await;
+    let harness =
+        TurnHarness::new("dispatch_replacement", 2, Arc::new(HangingStreamProvider)).await;
     for mode in 0..3 {
         let guard = harness.agent.lock().await;
         let lease = (mode < 2).then(|| guard.claim_server_turn().unwrap());
@@ -1113,27 +1120,45 @@ async fn cancellation_dispatch_cannot_signal_a_successor() {
         let signal = guard.graceful_shutdown_signal();
         drop(guard);
         let control = SessionControlHandle::cancel_only(
-            harness.session_id.clone(), Arc::new(std::sync::Mutex::new(Vec::new())), signal.clone());
+            harness.session_id.clone(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+            signal.clone(),
+        );
         let mut processing = false;
         let mut message = None;
         let mut session = None;
         let mut task = None;
-        let mut state = ProcessingState { client_is_processing: &mut processing,
-            message_id: &mut message, session_id: &mut session, task: &mut task };
+        let mut state = ProcessingState {
+            client_is_processing: &mut processing,
+            message_id: &mut message,
+            session_id: &mut session,
+            task: &mut task,
+        };
         let swarm = harness.swarm();
         let blocked = harness.swarm_members.write().await;
         let cancel = super::client_processing::cancel_processing_message_for_turn(
-            &mut state, &control, &harness.senders[0], &swarm, Some(2), None,
-            Some(&harness.sessions), if mode == 0 { identity.as_ref() } else { None });
+            &mut state,
+            &control,
+            &harness.senders[0],
+            &swarm,
+            Some(2),
+            None,
+            Some(&harness.sessions),
+            if mode == 0 { identity.as_ref() } else { None },
+        );
         tokio::pin!(cancel);
         assert!(futures::poll!(cancel.as_mut()).is_pending());
         drop(lease);
         let successor = harness.agent.lock().await.claim_server_turn().unwrap();
-        let _registered = crate::turn_cancel_registry::register_active_turn(&harness.session_id, signal.clone());
+        let _registered =
+            crate::turn_cancel_registry::register_active_turn(&harness.session_id, signal.clone());
         signal.reset(); // preparation of the successor clears only earlier cancellation
         drop(blocked);
         cancel.await;
-        assert!(!signal.is_set(), "dispatch must not signal the successor (mode={mode})");
+        assert!(
+            !signal.is_set(),
+            "dispatch must not signal the successor (mode={mode})"
+        );
         drop(successor);
     }
 }
@@ -1242,7 +1267,14 @@ async fn failed_producer_terminal_is_published_once_after_output() {
             text: "partial".into(),
         })
         .unwrap();
-    events.sender().send(ServerEvent::Error { id: 33, message: "failure sentinel".into(), retry_after_secs: None }).unwrap();
+    events
+        .sender()
+        .send(ServerEvent::Error {
+            id: 33,
+            message: "failure sentinel".into(),
+            retry_after_secs: None,
+        })
+        .unwrap();
     events.sender().send(ServerEvent::Done { id: 33 }).unwrap();
     events.finish().await;
     drop(lease);
@@ -1280,7 +1312,6 @@ async fn failed_producer_terminal_is_published_once_after_output() {
     assert!(a_rx.try_recv().is_err() && b_rx.try_recv().is_err());
 }
 
-
 /// Both producers use daemon dispatch. Withdrawal is decided by the queue's
 /// insertion boundary, never by which observer remains attached.
 #[tokio::test]
@@ -1291,43 +1322,91 @@ async fn two_steering_producers_withdraw_on_either_side_of_insertion() {
     let mut harness = TurnHarness::new("steering_insertion_boundary", 3, provider).await;
     let control = {
         let agent = harness.agent.lock().await;
-        SessionControlHandle::cancel_only(harness.session_id.clone(),
-            agent.soft_interrupt_queue(), agent.graceful_shutdown_signal())
+        SessionControlHandle::cancel_only(
+            harness.session_id.clone(),
+            agent.soft_interrupt_queue(),
+            agent.graceful_shutdown_signal(),
+        )
     };
     let mut observer = harness.take_receiver(2);
     let mut processing = false;
     let mut message = None;
     let mut session = None;
     let mut task = None;
-    harness.start_prompt(0, 60, "owner", &mut ProcessingState {
-        client_is_processing: &mut processing, message_id: &mut message,
-        session_id: &mut session, task: &mut task,
-    }).await;
-    read_until(&mut observer, |event| scoped_payload(event).is_some_and(|(_, event)|
-        matches!(event, ServerEvent::TextDelta { .. }))).await;
+    harness
+        .start_prompt(
+            0,
+            60,
+            "owner",
+            &mut ProcessingState {
+                client_is_processing: &mut processing,
+                message_id: &mut message,
+                session_id: &mut session,
+                task: &mut task,
+            },
+        )
+        .await;
+    read_until(&mut observer, |event| {
+        scoped_payload(event)
+            .is_some_and(|(_, event)| matches!(event, ServerEvent::TextDelta { .. }))
+    })
+    .await;
     let (reply, mut replies) = mpsc::unbounded_channel();
     for (id, text) in [(61, "producer-a"), (62, "producer-b")] {
-        queue_soft_interrupt(id, text.into(), vec![], false, Some(text.into()), &control, &reply);
+        queue_soft_interrupt(
+            id,
+            text.into(),
+            vec![],
+            false,
+            Some(text.into()),
+            &control,
+            &reply,
+        );
     }
-    cancel_soft_interrupts_by_id(63, &harness.session_id, &["producer-a".into()], &control, &reply);
-    assert!(std::iter::from_fn(|| replies.try_recv().ok()).any(|event| matches!(event,
-        ServerEvent::SoftInterruptsCancelled { cancelled, .. } if cancelled == vec!["producer-a"])));
+    cancel_soft_interrupts_by_id(
+        63,
+        &harness.session_id,
+        &["producer-a".into()],
+        &control,
+        &reply,
+    );
+    assert!(
+        std::iter::from_fn(|| replies.try_recv().ok()).any(|event| matches!(event,
+        ServerEvent::SoftInterruptsCancelled { cancelled, .. } if cancelled == vec!["producer-a"]))
+    );
     drop(harness.take_receiver(0)); // first attachment leaves before insertion
     gate.add_permits(1);
-    let injected = read_until(&mut observer, |event| scoped_payload(event).is_some_and(|(_, event)|
-        matches!(event, ServerEvent::SoftInterruptInjected { .. }))).await;
+    let injected = read_until(&mut observer, |event| {
+        scoped_payload(event)
+            .is_some_and(|(_, event)| matches!(event, ServerEvent::SoftInterruptInjected { .. }))
+    })
+    .await;
     assert!(!injected.iter().any(|event| scoped_payload(event).is_some_and(|(_, event)|
         matches!(event, ServerEvent::SoftInterruptInjected { content, .. } if content.contains("producer-a")))));
-    cancel_soft_interrupts_by_id(64, &harness.session_id, &["producer-b".into()], &control, &reply);
+    cancel_soft_interrupts_by_id(
+        64,
+        &harness.session_id,
+        &["producer-b".into()],
+        &control,
+        &reply,
+    );
     assert!(std::iter::from_fn(|| replies.try_recv().ok()).any(|event| matches!(event,
         ServerEvent::SoftInterruptsCancelled { not_queued, .. } if not_queued == vec!["producer-b"])));
     drop(harness.take_receiver(1)); // second attachment leaves after insertion
     gate.add_permits(8);
     let ended = read_until(&mut observer, |event| is_scoped_done(event, 60)).await;
-    assert!(ended.iter().any(|event| matches!(event, ServerEvent::TurnEnded {
-        status: crate::protocol::TurnEndStatus::Completed, .. })));
+    assert!(ended.iter().any(|event| matches!(
+        event,
+        ServerEvent::TurnEnded {
+            status: crate::protocol::TurnEndStatus::Completed,
+            ..
+        }
+    )));
     task.take().unwrap().await.unwrap();
-    assert!(observer.try_recv().is_err(), "one terminal, after all inserted output");
+    assert!(
+        observer.try_recv().is_err(),
+        "one terminal, after all inserted output"
+    );
 }
 
 /// Reuse the dispatch lock seam, with independent publication so normal
@@ -1336,7 +1415,8 @@ async fn two_steering_producers_withdraw_on_either_side_of_insertion() {
 async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
     let _lock = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
-    let mut harness = TurnHarness::new("completed_before_stop", 1, Arc::new(HangingStreamProvider)).await;
+    let mut harness =
+        TurnHarness::new("completed_before_stop", 1, Arc::new(HangingStreamProvider)).await;
     let mut observer = harness.take_receiver(0);
     let guard = harness.agent.lock().await;
     let lease = guard.claim_server_turn().unwrap();
@@ -1344,8 +1424,14 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
     let signal = guard.graceful_shutdown_signal();
     drop(guard);
     let events = super::super::state::TurnEventChannel::new(
-        harness.session_id.clone(), Arc::clone(&harness.swarm_members), harness.senders[0].clone(),
-        &lease, 77, crate::protocol::TurnOrigin::client(None, 77), Some("normal turn".into()));
+        harness.session_id.clone(),
+        Arc::clone(&harness.swarm_members),
+        harness.senders[0].clone(),
+        &lease,
+        77,
+        crate::protocol::TurnOrigin::client(None, 77),
+        Some("normal turn".into()),
+    );
     let (complete, completed) = tokio::sync::oneshot::channel();
     let (retired, retirement) = tokio::sync::oneshot::channel();
     let (finish, finishing) = tokio::sync::oneshot::channel();
@@ -1353,7 +1439,12 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
     // Publication can complete before the producer's final bookkeeping exits.
     let mut task = Some(tokio::spawn(async move {
         completed.await.unwrap();
-        events.sender().send(ServerEvent::TextDelta { text: "normal output".into() }).unwrap();
+        events
+            .sender()
+            .send(ServerEvent::TextDelta {
+                text: "normal output".into(),
+            })
+            .unwrap();
         events.sender().send(ServerEvent::Done { id: 77 }).unwrap();
         events.finish().await;
         drop(lease);
@@ -1361,20 +1452,38 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
         finishing.await.unwrap();
         exited.send(()).unwrap();
     }));
-    let control = SessionControlHandle::cancel_only(harness.session_id.clone(),
-        Arc::new(std::sync::Mutex::new(Vec::new())), signal.clone());
+    let control = SessionControlHandle::cancel_only(
+        harness.session_id.clone(),
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+        signal.clone(),
+    );
     let (requester, mut replies) = mpsc::unbounded_channel();
     let mut processing = true;
     let mut message = Some(77);
     let mut session = Some(harness.session_id.clone());
-    let mut state = ProcessingState { client_is_processing: &mut processing,
-        message_id: &mut message, session_id: &mut session, task: &mut task };
+    let mut state = ProcessingState {
+        client_is_processing: &mut processing,
+        message_id: &mut message,
+        session_id: &mut session,
+        task: &mut task,
+    };
     // A separate outbound registry blocks dispatch without blocking T's drain.
     let dispatch_members = Arc::new(RwLock::new(HashMap::new()));
-    let swarm = SwarmStatusRefs { members: &dispatch_members, ..harness.swarm() };
+    let swarm = SwarmStatusRefs {
+        members: &dispatch_members,
+        ..harness.swarm()
+    };
     let blocked = dispatch_members.write().await;
     let cancel = super::client_processing::cancel_processing_message_for_turn(
-        &mut state, &control, &requester, &swarm, Some(78), None, Some(&harness.sessions), None);
+        &mut state,
+        &control,
+        &requester,
+        &swarm,
+        Some(78),
+        None,
+        Some(&harness.sessions),
+        None,
+    );
     tokio::pin!(cancel);
     assert!(futures::poll!(cancel.as_mut()).is_pending());
     complete.send(()).unwrap();
@@ -1382,8 +1491,16 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
     retirement.await.unwrap();
     assert!(normal.iter().any(|event| matches!(event, ServerEvent::TurnEnded {
         identity: ended, status: crate::protocol::TurnEndStatus::Completed, .. } if ended == &identity)));
-    assert_eq!(normal.iter().filter(|event| is_scoped_done(event, 77)).count(), 1);
-    assert!(!normal.iter().any(|event| scoped_payload(event).is_some_and(|(_, event)| matches!(event, ServerEvent::Interrupted))));
+    assert_eq!(
+        normal
+            .iter()
+            .filter(|event| is_scoped_done(event, 77))
+            .count(),
+        1
+    );
+    assert!(!normal.iter().any(|event| {
+        scoped_payload(event).is_some_and(|(_, event)| matches!(event, ServerEvent::Interrupted))
+    }));
     let epoch = signal.epoch();
     let successor = harness.agent.lock().await.claim_server_turn().unwrap();
     drop(blocked);
@@ -1391,10 +1508,19 @@ async fn completed_turn_is_not_reported_interrupted_by_a_late_stop() {
     finish.send(()).unwrap();
     exit.await.unwrap();
     let replies: Vec<_> = std::iter::from_fn(|| replies.try_recv().ok()).collect();
-    assert!(!replies.iter().any(|event| scoped_payload(event).is_some_and(|(scope, event)|
-        scope == &identity && matches!(event, ServerEvent::Interrupted))),
-        "a naturally completed turn must not be reported interrupted: {replies:?}");
-    assert_eq!(signal.epoch(), epoch, "late Stop must not fire the successor signal");
+    assert!(
+        !replies.iter().any(
+            |event| scoped_payload(event)
+                .is_some_and(|(scope, event)| scope == &identity
+                    && matches!(event, ServerEvent::Interrupted))
+        ),
+        "a naturally completed turn must not be reported interrupted: {replies:?}"
+    );
+    assert_eq!(
+        signal.epoch(),
+        epoch,
+        "late Stop must not fire the successor signal"
+    );
     assert!(!signal.is_set());
     drop(successor);
 }
