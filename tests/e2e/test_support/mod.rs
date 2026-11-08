@@ -1174,3 +1174,6 @@ pub(crate) use selfdev_reload::{
 };
 mod logs;
 pub(crate) use logs::latest_log_excerpt;
+
+pub(crate) mod acp;
+pub(crate) mod acp_fixture;
