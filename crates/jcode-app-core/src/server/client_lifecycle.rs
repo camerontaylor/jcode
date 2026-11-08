@@ -919,7 +919,7 @@ pub(super) async fn handle_client(
                     id, client_session_id, turn
                 ));
             } else {
-                cancel_processing_message(
+                cancel_processing_message_for_turn(
                     &mut ProcessingState {
                         client_is_processing: &mut client_is_processing,
                         message_id: &mut processing_message_id,
@@ -938,6 +938,7 @@ pub(super) async fn handle_client(
                     Some(id),
                     Some(request_decoded_at),
                     Some(&sessions),
+                    turn.as_ref(),
                 )
                 .await;
             }
@@ -1183,7 +1184,7 @@ pub(super) async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Ack { id });
                     continue;
                 }
-                cancel_processing_message(
+                cancel_processing_message_for_turn(
                     &mut ProcessingState {
                         client_is_processing: &mut client_is_processing,
                         message_id: &mut processing_message_id,
@@ -1202,6 +1203,7 @@ pub(super) async fn handle_client(
                     Some(id),
                     Some(request_decoded_at),
                     Some(&sessions),
+                    turn.as_ref(),
                 )
                 .await;
                 if !client_is_processing {
@@ -3414,7 +3416,7 @@ pub(super) async fn handle_client(
 mod client_processing;
 use client_processing::{
     append_context_message, cancel_processing_message, cancel_soft_interrupts_by_id,
-    cancel_targets_active_turn, clear_soft_interrupts, move_tool_to_background,
+    cancel_processing_message_for_turn, cancel_targets_active_turn, clear_soft_interrupts, move_tool_to_background,
     queue_soft_interrupt, reconcile_processing_completions, record_processing_completion,
     start_processing_message, try_available_models_snapshot,
 };

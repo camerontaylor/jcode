@@ -822,3 +822,17 @@ pub(super) fn move_tool_to_background(
         id, session_control.session_id, signalled, ack_queued
     ));
 }
+
+pub(super) async fn cancel_processing_message_for_turn(
+    state: &mut ProcessingState<'_>,
+    session_control: &SessionControlHandle,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm: &SwarmStatusRefs<'_>,
+    request_id: Option<u64>,
+    request_decoded_at: Option<Instant>,
+    sessions: Option<&SessionAgents>,
+    _expected: Option<&crate::protocol::TurnIdentity>,
+) {
+    cancel_processing_message(state, session_control, client_event_tx, swarm,
+        request_id, request_decoded_at, sessions).await;
+}

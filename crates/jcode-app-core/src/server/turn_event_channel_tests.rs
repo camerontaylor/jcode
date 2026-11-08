@@ -560,3 +560,42 @@ async fn turn_scoped_cancel_only_targets_the_active_turn() {
         "once the turn ended, a cancel naming it is stale"
     );
 }
+
+/// Force replacement at the first await in cancellation dispatch. Holding the
+/// fanout lock is a deterministic scheduling seam; no provider timing is used.
+#[tokio::test]
+async fn cancellation_dispatch_cannot_signal_a_successor() {
+    let _lock = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let harness = TurnHarness::new("dispatch_replacement", 2, Arc::new(HangingStreamProvider)).await;
+    for mode in 0..3 {
+        let guard = harness.agent.lock().await;
+        let lease = (mode < 2).then(|| guard.claim_server_turn().unwrap());
+        let identity = lease.as_ref().map(|lease| lease.identity().clone());
+        let signal = guard.graceful_shutdown_signal();
+        drop(guard);
+        let control = SessionControlHandle::cancel_only(
+            harness.session_id.clone(), Arc::new(std::sync::Mutex::new(Vec::new())), signal.clone());
+        let mut processing = false;
+        let mut message = None;
+        let mut session = None;
+        let mut task = None;
+        let mut state = ProcessingState { client_is_processing: &mut processing,
+            message_id: &mut message, session_id: &mut session, task: &mut task };
+        let swarm = harness.swarm();
+        let blocked = harness.swarm_members.write().await;
+        let cancel = super::client_processing::cancel_processing_message_for_turn(
+            &mut state, &control, &harness.senders[0], &swarm, Some(2), None,
+            Some(&harness.sessions), if mode == 0 { identity.as_ref() } else { None });
+        tokio::pin!(cancel);
+        assert!(futures::poll!(cancel.as_mut()).is_pending());
+        drop(lease);
+        let successor = harness.agent.lock().await.claim_server_turn().unwrap();
+        let _registered = crate::turn_cancel_registry::register_active_turn(&harness.session_id, signal.clone());
+        signal.reset(); // preparation of the successor clears only earlier cancellation
+        drop(blocked);
+        cancel.await;
+        assert!(!signal.is_set(), "dispatch must not signal the successor (mode={mode})");
+        drop(successor);
+    }
+}
