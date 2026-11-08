@@ -633,7 +633,10 @@ pub(super) async fn cancel_processing_message_for_turn(
             .await;
         }
         if let Some(message_id) = state.message_id.take() {
-            let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
+            // Identity-backed requests already queued this inside cancel_active.
+            if sessions.is_none() {
+                let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
+            }
             let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
             crate::logging::info(&format!(
                 "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
