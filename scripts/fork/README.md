@@ -64,6 +64,15 @@ was at module scope while every use sits inside the `x86_64-linux`-gated
 The fix scopes the import to the module that uses it. It is a candidate to
 send upstream rather than carry.
 
+`crates/jcode-core/src/stdin_detect.rs` carries one added wait-channel name
+(`anon_pipe_read`) in the Linux detector's `wchan` fallback. The primary
+`/proc/PID/syscall` probe only sees the tracked pid's own syscall, so for a
+`sh -> reader` chain the fallback decides, and it did not recognise the name
+current kernels report for a task blocked reading an anonymous pipe. The
+stdin-forwarding cohort failed on the fork's `ubuntu-26.04` runner image for
+exactly this reason while upstream's `ubuntu-24.04` runners still passed; it
+will need sending upstream as the `ubuntu-latest` label migrates.
+
 ## What the baselines record
 
 Each fork baseline is upstream's baseline with **one change per currently

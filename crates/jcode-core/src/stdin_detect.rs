@@ -50,11 +50,20 @@ pub mod linux {
         // This is less exact than /proc/PID/syscall, so pair it with an fd 0
         // pipe/pty check. For child processes, check_process_tree also verifies
         // the child shares the parent's stdin pipe before calling strict mode.
+        //
+        // `anon_pipe_read` is the name kernels since 5.1 report for a task blocked
+        // in an anonymous pipe's read path, and it is what the primary
+        // /proc/PID/syscall probe misses when the reader is not the tracked pid
+        // itself (a `sh -> wrapper -> reader` chain, where /proc/<wrapper>/syscall
+        // shows wait4 rather than the descendant's read). Without it the fallback
+        // returns NotReading and stdin forwarding never fires, which is what the
+        // stdin-forwarding cohort caught on the ubuntu-26.04 runner image.
         if let Ok(wchan) = std::fs::read_to_string(format!("/proc/{}/wchan", pid)) {
             let wchan = wchan.trim();
             if (wchan == "n_tty_read"
                 || wchan == "wait_woken"
                 || wchan == "pipe_read"
+                || wchan == "anon_pipe_read"
                 || wchan == "pipe_wait_readable"
                 || wchan == "unix_stream_read_generic")
                 && stdin_is_pipe_or_pty(pid)
