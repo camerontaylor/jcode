@@ -67,6 +67,8 @@ jobs:
         with:
           key: quality-ubuntu
           cache-all-crates: "true"
+          # Only custom (the default branch) saves; other refs restore from it.
+          save-if: ${{ github.ref == 'refs/heads/custom' }}
 
       - name: Check module declarations resolve
         # A `mod x;` with no file makes rustfmt fail with "Error writing files:
@@ -196,6 +198,8 @@ jobs:
           # Same suffix as upstream, so the fork's ubuntu builds share the cache
           # entry that the corresponding upstream job populates.
           key: ubuntu-latest-stablepin
+          # Only custom (the default branch) saves; other refs restore from it.
+          save-if: ${{ github.ref == 'refs/heads/custom' }}
 
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
