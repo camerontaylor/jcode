@@ -73,8 +73,8 @@ async fn acp_capability_metadata_identifies_each_attachment() -> Result<()> {
             .context("session/new returns a sessionId")?
             .to_string();
 
-        // Two more attachments to the same session, each a fresh daemon
-        // connection of this adapter process.
+        // Loading/resuming an already-live session retains its daemon connection.
+        // The identity follows that attachment rather than each RPC invocation.
         let loaded = acp
             .request(
                 "session/load",
@@ -91,16 +91,31 @@ async fn acp_capability_metadata_identifies_each_attachment() -> Result<()> {
             .await?;
         let resumed_instance = attachment_instance(&resumed, "session/resume")?;
 
-        for (left, right) in [
-            (&created_instance, &loaded_instance),
-            (&loaded_instance, &resumed_instance),
-            (&created_instance, &resumed_instance),
-        ] {
-            assert_ne!(
-                left, right,
-                "every attachment to one session reports its own instance id"
-            );
-        }
+        assert_eq!(created_instance, loaded_instance);
+        assert_eq!(created_instance, resumed_instance);
+
+        let different = acp
+            .request("session/new", serde_json::json!({"cwd":cwd}))
+            .await?;
+        assert_ne!(
+            created_instance,
+            attachment_instance(&different, "different session")?
+        );
+
+        let mut peer = AcpClient::spawn()?;
+        peer.request("initialize", serde_json::json!({"protocolVersion":1}))
+            .await?;
+        let peer_loaded = peer
+            .request(
+                "session/load",
+                serde_json::json!({"sessionId":session_id,"cwd":cwd}),
+            )
+            .await?;
+        assert_ne!(
+            created_instance,
+            attachment_instance(&peer_loaded, "peer load")?
+        );
+        peer.shutdown().await;
 
         acp.shutdown().await;
         Ok::<(), anyhow::Error>(())

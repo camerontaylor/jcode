@@ -203,7 +203,10 @@ v2. True means the whole behavior is usable on this attachment, including
 required daemon support. Missing/false means unavailable, not an invitation
 to probe by submitting work. `clientInstanceId` identifies this attachment
 for comparison with origin metadata; it is not a user identity or credential.
-It changes on a fresh attachment. A daemon restart invalidates the attachment;
+Repeated `session/load` or `session/resume` of the same live attachment retains
+its id and active-turn bracket. Loading a different session opens a distinct
+attachment. Reconnecting after EOF opens a fresh attachment with a fresh id.
+A daemon restart invalidates the attachment;
 reconnect and rediscover rather than retaining its capability snapshot.
 
 <!-- [C-DISCOVERY-P07] -->
