@@ -11,6 +11,9 @@ alongside v1, with explicit delivery and standard lifecycle semantics. Keep
 execution authority in the daemon and protocol presentation in the adapter.
 SDK adoption does not change this contract.
 
+See the [full development strategy](ACP_FORK_STRATEGY.md) for architectural
+direction, sequential implementation, dependencies and completion criteria.
+
 Roadmap order: (1) repair existing shared control; (2) reduce the core carry;
 (3) improve v1 mappings/discovery; (4) separate version presentation and
 evaluate the SDK; (5) add v2 and explicit delivery; (6) optional new features.
