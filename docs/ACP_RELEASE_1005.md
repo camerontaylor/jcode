@@ -121,7 +121,10 @@ new review work. Its previous review was complete; its owner confirmed no retry
 of that old agent was needed and started replacement reviewer
 `f49aaec5-4d5b-456e-8ca8-bc6bb1e5c95b` on the installed 1005 daemon. No deployment
 operator prompt was sent to either reviewer, and no further Triton reload was
-performed. Replacement completion remains to be verified.
+performed. Replacement completion was confirmed by its coordinator: actual finished event
+`bb9d9279-3135-4287-98c1-eb278f038d62`, with a completed independent review at
+[PR1279 PASS](https://github.com/camerontaylor/cq-toolkit/pull/1279#issuecomment-6729624604).
+The coordinator confirmed no further review work was pending at that point.
 
 The remaining four agents were idle with no active turn:
 `8cd4f205` / session_dove (798 persisted messages), `adf9fe3f` / session_fish
