@@ -422,17 +422,9 @@ pub(super) async fn cleanup_client_connection(
     Ok(None)
 }
 
-#[cfg(test)]
-tokio::task_local! {
-    static REPORTING_GATE: std::cell::RefCell<Option<Box<dyn FnOnce() + Send>>>;
-}
-
 fn dispatch_terminal_reporting(report: Option<crate::telemetry::DeferredLifecycleEvent>) {
     #[cfg(test)]
-    let gate = REPORTING_GATE
-        .try_with(|slot| slot.borrow_mut().take())
-        .ok()
-        .flatten();
+    let gate = grace_tests::take_reporting_gate();
     if report.is_none() {
         #[cfg(not(test))]
         return;

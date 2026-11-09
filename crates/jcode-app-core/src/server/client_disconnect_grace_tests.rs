@@ -10,6 +10,17 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+tokio::task_local! {
+    static REPORTING_GATE: std::cell::RefCell<Option<Box<dyn FnOnce() + Send>>>;
+}
+
+pub(super) fn take_reporting_gate() -> Option<Box<dyn FnOnce() + Send>> {
+    REPORTING_GATE
+        .try_with(|slot| slot.borrow_mut().take())
+        .ok()
+        .flatten()
+}
+
 struct NoRequests;
 #[async_trait]
 impl Provider for NoRequests {
