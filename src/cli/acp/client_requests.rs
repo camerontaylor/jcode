@@ -5,6 +5,8 @@ use tokio::sync::oneshot;
 #[derive(Default)]
 pub(super) struct ClientRequests {
     next: AtomicU64,
+    progress: std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+    progress_changed: tokio::sync::Notify,
     active: std::sync::Mutex<HashMap<(String, String), Arc<AtomicBool>>>,
     pending: std::sync::Mutex<HashMap<String, Pending>>,
 }
@@ -18,6 +20,48 @@ struct Pending {
 type ClientReply = oneshot::Receiver<std::result::Result<Value, Value>>;
 
 impl ClientRequests {
+    /// Record only flushed tool lifecycle updates, so forms cannot overtake
+    /// the tool call they belong to on this connection's stdout.
+    pub(super) fn observe_output(&self, value: &Value) {
+        if value.get("method").and_then(Value::as_str) != Some("session/update") {
+            return;
+        }
+        let (Some(session), Some(tool), Some(status)) = (
+            value.pointer("/params/sessionId").and_then(Value::as_str),
+            value
+                .pointer("/params/update/toolCallId")
+                .and_then(Value::as_str),
+            value
+                .pointer("/params/update/status")
+                .and_then(Value::as_str),
+        ) else {
+            return;
+        };
+        let mut progress = self.progress.lock().unwrap_or_else(|p| p.into_inner());
+        let key = (session.into(), tool.into());
+        if status == "in_progress" {
+            progress.insert(key);
+        } else if matches!(status, "pending" | "completed" | "failed") {
+            progress.remove(&key);
+        }
+        self.progress_changed.notify_waiters();
+    }
+    async fn tool_started(&self, session: &str, tool: &str) {
+        loop {
+            let changed = self.progress_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self
+                .progress
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(&(session.into(), tool.into()))
+            {
+                return;
+            }
+            changed.await;
+        }
+    }
     pub(super) fn contains(&self, session: &str, elicitation: &str) -> bool {
         self.active
             .lock()
@@ -189,6 +233,23 @@ mod tests {
         requests.route(JsonRpcMessage::parse(&line).unwrap());
         assert_eq!(reply.await.unwrap().unwrap_err()["code"], -32601);
     }
+    #[tokio::test]
+    async fn form_waits_for_flushed_tool_progress() {
+        let requests = ClientRequests::default();
+        let wait = requests.tool_started("s", "tool");
+        tokio::pin!(wait);
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, &mut wait)
+                .await
+                .is_err()
+        );
+        requests.observe_output(&json!({"method":"session/update","params":{"sessionId":"s","update":{"toolCallId":"tool","status":"in_progress"}}}));
+        tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+            .await
+            .unwrap();
+        requests.observe_output(&json!({"method":"session/update","params":{"sessionId":"s","update":{"toolCallId":"tool","status":"completed"}}}));
+        assert!(requests.progress.lock().unwrap().is_empty());
+    }
     #[test]
     fn form_reply_ignores_metadata_and_future_actions_cancel() {
         use crate::protocol::elicitation::ElicitationResponse;
@@ -238,6 +299,9 @@ impl AcpRuntime {
                 {
                     return true;
                 }
+                let own_prompt = session
+                    .upgrade()
+                    .is_some_and(|session| session.prompt_active());
                 let request = request.clone();
                 let session = session.clone();
                 let acp = self.clone();
@@ -252,9 +316,15 @@ impl AcpRuntime {
                 tokio::spawn(async move {
                     let mut pending = Some((id, rx));
                     loop {
-                        let Some((id, reply)) = pending.take() else {
+                        let Some((id, mut reply)) = pending.take() else {
                             break;
                         };
+                        if !token.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        if own_prompt && let Some(tool) = &request.tool_call_id {
+                            tokio::select! { _=acp.client_requests.tool_started(&request.session_id,tool)=>{}, _=&mut reply=>break }
+                        }
                         if !token.load(Ordering::SeqCst) {
                             break;
                         }

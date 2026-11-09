@@ -55,7 +55,14 @@ impl AcpClient {
         let value: serde_json::Value = serde_json::from_str(line.trim())?;
         assert_eq!(value["jsonrpc"], "2.0");
         if value.get("method").is_some() {
-            assert!(value.get("id").is_none());
+            if value.get("id").is_some() {
+                assert_eq!(value["method"], "elicitation/create");
+                assert!(
+                    value["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("jcode-"))
+                );
+            }
         } else {
             assert!(value.get("id").is_some());
             assert_ne!(value.get("result").is_some(), value.get("error").is_some());

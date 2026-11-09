@@ -986,6 +986,7 @@ async fn wait_for_steer_admission(runtime: &std::path::Path) -> Result<()> {
 
 mod seeded;
 
+mod elicitation;
 mod tool_wait;
 
 mod clause_index;

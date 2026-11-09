@@ -28,6 +28,7 @@ struct Connection {
     events: mpsc::UnboundedSender<ServerEvent>,
 }
 struct Pending {
+    instance: Option<String>,
     request: FormElicitation,
     reply: oneshot::Sender<ElicitOutcome>,
 }
@@ -108,6 +109,26 @@ impl Broker {
         message: String,
         schema: FormSchema,
     ) -> Result<Option<Ticket>, String> {
+        self.start_inner(session, tool, message, schema, None)
+    }
+    pub fn start_applet(
+        self: &Arc<Self>,
+        session: &str,
+        tool: Option<String>,
+        message: String,
+        schema: FormSchema,
+        instance: &str,
+    ) -> Result<Option<Ticket>, String> {
+        self.start_inner(session, tool, message, schema, Some(instance.into()))
+    }
+    fn start_inner(
+        self: &Arc<Self>,
+        session: &str,
+        tool: Option<String>,
+        message: String,
+        schema: FormSchema,
+        instance: Option<String>,
+    ) -> Result<Option<Ticket>, String> {
         schema.validate()?;
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let connections: Vec<_> = state
@@ -133,9 +154,14 @@ impl Broker {
                 ServerEvent::ElicitationRequest(request.clone()),
             );
         }
-        state
-            .pending
-            .insert(id.clone(), Pending { request, reply: tx });
+        state.pending.insert(
+            id.clone(),
+            Pending {
+                request,
+                reply: tx,
+                instance,
+            },
+        );
         Ok(Some(Ticket {
             id,
             broker: Arc::clone(self),
@@ -178,6 +204,15 @@ impl Broker {
                 (ElicitOutcome::Cancelled, ElicitationResolution::Cancelled)
             }
         };
+        if let Some(instance) = &pending.instance
+            && !crate::tool::applet_elicit::claim(
+                session,
+                instance,
+                crate::tool::applet_elicit::Source::Acp,
+            )
+        {
+            return Ok(());
+        }
         Self::finish(&mut state, id, outcome, resolution);
         Ok(())
     }

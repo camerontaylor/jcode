@@ -38,9 +38,19 @@ async fn user_response_capability_does_not_block_busy_attachment() {
     )));
     let busy = agent.lock().await;
     let registry = busy.registry();
+    let session_id = busy.session_id().to_owned();
+    let (events, _events_rx) = mpsc::unbounded_channel();
+    crate::elicitation::global().attach(
+        "busy-capability-test",
+        &session_id,
+        false,
+        false,
+        true,
+        events,
+    );
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        super::apply_or_defer_desktop_response_capability(&agent, true),
+        super::apply_or_defer_desktop_response_capability(&agent, &session_id),
     )
     .await
     .expect("busy attachment must not wait for the running turn");
@@ -67,7 +77,8 @@ async fn user_response_capability_does_not_block_busy_attachment() {
     })
     .await
     .expect("capability applied after the turn releases the lock");
-    super::apply_or_defer_desktop_response_capability(&agent, false).await;
+    crate::elicitation::global().detach("busy-capability-test");
+    super::apply_or_defer_desktop_response_capability(&agent, &session_id).await;
     assert!(
         !registry
             .tool_names()

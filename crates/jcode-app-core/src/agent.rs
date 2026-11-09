@@ -4,6 +4,7 @@
 mod cache_monitor_tests;
 mod compaction;
 mod conversation_reset;
+mod elicitation;
 mod environment;
 mod idle_hibernation;
 mod inline_tail;
@@ -310,6 +311,7 @@ pub struct Agent {
     /// to avoid cache invalidation when MCP tools arrive asynchronously.
     /// Cleared on compaction/reset.
     locked_tools: Option<Vec<ToolDefinition>>,
+    ui_capabilities: (bool, bool),
     /// One-shot guard for the async MCP-registration race (#206).
     ///
     /// MCP servers connect on a background task and register `mcp__*` tools
@@ -490,6 +492,7 @@ impl Agent {
             kv_cache_monitor: Default::default(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
+            ui_capabilities: (false, false),
             mcp_late_register_resolved: false,
             last_recovery_compaction: None,
             locked_tools_native_deferred: false,

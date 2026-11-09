@@ -1,6 +1,6 @@
 # ACP structured elicitation: implementation plan
 
-Status: in progress, 2026-11-09. Branch `fork/acp-elicitation`. Contract:
+Status: implemented and locally verified, 2026-11-09. Branch `fork/acp-elicitation`. Contract:
 [Structured elicitation](ACP_FORK_INTERFACE.md#structured-elicitation).
 
 ## Decisions
@@ -44,7 +44,7 @@ Upstream files get thin hooks.
 | File | Kind | Change |
 | --- | --- | --- |
 | `crates/jcode-protocol/src/elicitation.rs` | new | Request, schema and response types; validator |
-| `crates/jcode-protocol/src/wire.rs`, `wire/events.rs` | hook | Two events, one request, one `Subscribe` field, one server capability |
+| `crates/jcode-protocol/src/wire.rs`, `wire/events.rs` | hook | Two events, one request, two `Subscribe` fields, one server capability |
 | `crates/jcode-app-core/src/elicitation.rs` | new | Session-scoped broker |
 | `crates/jcode-app-core/src/server/*` | hook | Fan-out, response dispatch, catch-up on attach, capability aggregation |
 | `crates/jcode-app-core/src/tool/applet_elicit.rs` | new | View-to-form compiler, elicitation-only tool description |
@@ -127,7 +127,8 @@ pub enum ElicitOutcome { Accepted(Map), Declined, Cancelled, Expired, Unsupporte
 3. **Opt-in**: `applet_elicitation = supports_elicitation_form &&
    tool selection explicitly names "applet" && !disabled("applet")`, computed
    from the adapter's own config, args and env. Report the effective value as
-   `result._meta.jcode.appletElicitation` on new/load/resume.
+   `result._meta.jcode.appletElicitation` on new/load/resume only for clients
+   advertising form support; missing means false.
 4. **Mapping**:
    - `ElicitationRequest` →
      `elicitation/create {sessionId, toolCallId, mode:"form", message, requestedSchema}`.
@@ -221,19 +222,35 @@ Each commit is pushed to `fork/acp-elicitation` as it lands.
 - v2 `requires_action` state.
 - A TUI form renderer.
 
-## Implementation progress
+## Implementation evidence
 
-- Commit 2 is implemented: form payloads, validation, wire additions, and
-  protocol regression tests. The server capability is published with the broker
-  implementation rather than advertising it before it can handle requests.
-- The validator uses `jsonschema` (already used by the SDK), with the transitive
-  `ElicitationSchema` definitions extracted verbatim from the pinned v2 schema
-  into `crates/jcode-protocol/src/elicitation-schema.json`. ACP nullable optional
-  constraints are normalized before validating accepted content.
-- No capability is advertised and no runtime path uses these types yet.
-  Commits 3–6 and all end-to-end acceptance proofs remain outstanding.
-- Local protocol library clippy passes. All-target clippy encounters existing
-  `useless_vec` errors at `protocol_tests/core_events.rs:985` and `:999`.
+- Commits 2–6 are implemented. Protocol validation uses `jsonschema` and the
+  transitive definitions copied verbatim from the pinned schema. ACP optional
+  null constraints are normalized before validating accepted content.
+- Acceptance 1: `acp_conformance_elicitation_requires_capability_and_opt_in`
+  checks metadata and the provider tool surface. The existing named corpus
+  replay tests pass, with no existing fixture changed.
+- Acceptance 2–3: `acp_conformance_elicitation_form_v1` records and replays
+  fixture 09, checks merged state and standard action text, retries an invalid
+  accept, and distinguishes decline from cancel. Compiler table and selector
+  collision tests cover the supported controls and button mapping.
+- Acceptance 4–5: `acp_conformance_elicitation_peer_winner_and_turn_cancel`
+  covers pending-form attachment, one peer winner, Desktop withdrawal, late
+  replies, and prompt cancellation. Broker tests independently cover invalid
+  replies, timeout, dropped tickets and immediate unsupported results.
+- Acceptance 6: the no-capability e2e test and adapter unit tests cover response
+  routing, lenient replies with metadata and future actions, unknown/late IDs,
+  and JSON-RPC errors. Form emission waits for its tool's flushed progress
+  notification without blocking the read loop.
+- The named clause-index test and ten legacy corpus/index tests pass. Compiler,
+  registry, broker and existing Desktop capability regression tests pass.
+  Library clippy, fork formatting, and all four ratchets pass without budget
+  increases. All-target protocol clippy has pre-existing `useless_vec` errors
+  at `protocol_tests/core_events.rs:985` and `:999`.
+- A selfdev build passed a scripted stdio runtime check on its own socket:
+  capability metadata, accepted content with `_meta`, withdrawal, ignored late
+  replies and JSON-RPC error cancellation. The shared daemon was not changed.
+  Fork CI on the final pushed head remains the authority.
 
 ## Deviations
 
@@ -247,3 +264,17 @@ Each commit is pushed to `fork/acp-elicitation` as it lands.
   independently rejects invalid accepts without resolving its pending slot.
 - Per user clarification, `appletElicitation` metadata is sent only to clients
   advertising form support; missing means false. Legacy corpus files stay intact.
+
+- Move the Desktop registration method and applet-answer handler into
+  fork-owned modules to keep the existing code-size ceilings unchanged. No
+  budgets were raised; moved response sends now log delivery failures.
+- The existing view model represents headings as `text` with heading style;
+  no separate `heading` node is added. Noninteractive images contribute alt
+  text; interactive images remain unsupported. Forms without a submit button
+  use the custom action `submit`.
+- Multiple buttons can share an action name with different arguments. The
+  synthesized selector uses stable button indices and avoids bound field names
+  by prefixing underscores, so no bound state is overwritten or stripped.
+- Form requests wait for the originating tool's flushed in-progress update;
+  this fixes observed fixture ordering drift while preserving catch-up for
+  observers that do not receive that lifecycle update.

@@ -20,6 +20,7 @@ pub struct MockProvider {
     pub captured_resume_session_ids: Arc<Mutex<Vec<Option<String>>>>,
     /// Captured model names from complete() calls (for testing)
     pub captured_models: Arc<Mutex<Vec<String>>>,
+    pub captured_tool_names: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl MockProvider {
@@ -32,6 +33,7 @@ impl MockProvider {
             captured_system_prompts: Arc::new(Mutex::new(Vec::new())),
             captured_resume_session_ids: Arc::new(Mutex::new(Vec::new())),
             captured_models: Arc::new(Mutex::new(Vec::new())),
+            captured_tool_names: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -58,6 +60,7 @@ impl MockProvider {
             captured_system_prompts: Arc::new(Mutex::new(Vec::new())),
             captured_resume_session_ids: Arc::new(Mutex::new(Vec::new())),
             captured_models: Arc::new(Mutex::new(Vec::new())),
+            captured_tool_names: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -72,10 +75,14 @@ impl Provider for MockProvider {
     async fn complete(
         &self,
         _messages: &[Message],
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.captured_tool_names
+            .lock()
+            .unwrap()
+            .push(tools.iter().map(|tool| tool.name.clone()).collect());
         // Capture the system prompt for testing
         self.captured_system_prompts
             .lock()
@@ -137,6 +144,7 @@ impl Provider for MockProvider {
             captured_system_prompts: self.captured_system_prompts.clone(),
             captured_resume_session_ids: self.captured_resume_session_ids.clone(),
             captured_models: self.captured_models.clone(),
+            captured_tool_names: self.captured_tool_names.clone(),
         })
     }
 }

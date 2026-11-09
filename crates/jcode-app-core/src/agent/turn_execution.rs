@@ -670,8 +670,14 @@ impl Agent {
             .as_ref()
             .and_then(|c| c.enabled.as_ref())
             .map(|names| names.iter().cloned().collect());
-        let allowed = enabled.as_ref().or(self.allowed_tools.as_ref());
-        let mut tools = self.registry.definitions(allowed).await;
+        let mut allowed = enabled.as_ref().or(self.allowed_tools.as_ref()).cloned();
+        if self.ui_capabilities.1
+            && enabled.is_none()
+            && let Some(allowed) = allowed.as_mut()
+        {
+            allowed.insert("applet".into());
+        }
+        let mut tools = self.registry.definitions(allowed.as_ref()).await;
         if enabled.is_none() && !self.disabled_tools.is_empty() {
             tools.retain(|tool| {
                 !self
@@ -959,17 +965,10 @@ impl Agent {
         self.kv_cache_monitor.reset();
     }
 
+    #[cfg(test)]
     pub(crate) async fn set_desktop_response_capability(&mut self, enabled: bool) {
-        let was_enabled = self
-            .registry
-            .tool_names()
-            .await
-            .iter()
-            .any(|n| n == "user_response");
-        if was_enabled != enabled {
-            self.registry.set_desktop_ui_enabled(enabled).await;
-            self.invalidate_sdk_tools();
-        }
+        self.set_form_capabilities(enabled, self.ui_capabilities.1)
+            .await;
     }
 
     pub async fn tool_names(&self) -> Vec<String> {
@@ -1156,6 +1155,7 @@ impl Agent {
         }
         if let Some(allowed) = self.allowed_tools.as_ref()
             && !self.registry.tool_is_allowed(allowed, name)
+            && !(name == "applet" && self.ui_capabilities.1)
         {
             return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));
         }

@@ -168,6 +168,13 @@ pub(super) async fn cleanup_client_connection(
     )
     .await;
 
+    if let Some(agent) = sessions.read().await.get(client_session_id).cloned() {
+        super::client_session::apply_or_defer_desktop_response_capability(
+            &agent,
+            client_session_id,
+        )
+        .await;
+    }
     if continue_on_disconnect {
         // Remote continuation is a session lifetime policy, not merely a
         // promise to finish the current turn. Idle coordinators must remain

@@ -89,6 +89,9 @@ impl AcpRuntime {
         line.push('\n');
         stdout.write_all(line.as_bytes()).await?;
         stdout.flush().await?;
+        if self.form_supported() {
+            self.client_requests.observe_output(&value);
+        }
         Ok(())
     }
 }

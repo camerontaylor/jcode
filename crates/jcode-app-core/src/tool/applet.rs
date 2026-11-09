@@ -33,6 +33,13 @@ pub fn deliver_to_waiter(session_id: &str, instance: &str, message: String) -> b
     sender.is_some_and(|tx| tx.send(message).is_ok())
 }
 
+pub(crate) fn cancel_waiter(session_id: &str, instance: &str) {
+    waiters()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&(session_id.into(), instance.into()));
+}
+
 fn cap(mut s: String, max: usize) -> String {
     if s.len() > max {
         let mut end = max;
@@ -367,6 +374,18 @@ Use update to replace the document, patch for small changes (ops on /view, /stat
             .map(|i| i.document.revision)
             .unwrap_or_default();
 
+        let form = if params.wait.unwrap_or(false)
+            && matches!(action, "mount" | "update")
+            && crate::elicitation::global().capabilities(&sid).1
+        {
+            let document = &snapshot
+                .get(&id)
+                .ok_or_else(|| anyhow!("applet disappeared"))?
+                .document;
+            Some(super::applet_elicit::compile(document)?)
+        } else {
+            None
+        };
         // Register the waiter before publishing so no action can slip past.
         let wait_rx = if params.wait.unwrap_or(false) {
             let (tx, rx) = oneshot::channel();
@@ -378,6 +397,7 @@ Use update to replace the document, patch for small changes (ops on /view, /stat
         } else {
             None
         };
+        let form = form.map(|form| super::applet_elicit::prepare(&ctx, &id, form));
         publish(&sid, snapshot);
 
         let summary = format!("Applet `{id}` revision {revision}.");
@@ -399,10 +419,14 @@ Use update to replace the document, patch for small changes (ops on /view, /stat
                 None => std::future::pending::<()>().await,
             }
         };
-        let outcome = tokio::select! {
-            result = rx => result.ok(),
-            _ = tokio::time::sleep(timeout) => None,
-            _ = interrupted => None,
+        let outcome = if let Some(form) = form {
+            super::applet_elicit::wait(&ctx, &id, form, rx, timeout).await?
+        } else {
+            tokio::select! {
+                result = rx => result.ok(),
+                _ = tokio::time::sleep(timeout) => None,
+                _ = interrupted => None,
+            }
         };
         // Drop a stale waiter on timeout or interrupt.
         waiters()

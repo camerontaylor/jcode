@@ -1811,7 +1811,7 @@ pub(super) async fn handle_client(
                     supports_elicitation_form, applet_elicitation, supports_user_response, client_event_tx.clone());
                 super::client_session::apply_or_defer_desktop_response_capability(
                     &agent,
-                    supports_user_response,
+                    &client_session_id,
                 )
                 .await;
                 if requested_continuation {
@@ -1982,7 +1982,7 @@ pub(super) async fn handle_client(
                     supports_elicitation_form, applet_elicitation, supports_user_response, client_event_tx.clone());
                 super::client_session::apply_or_defer_desktop_response_capability(
                     &agent,
-                    supports_user_response,
+                    &client_session_id,
                 )
                 .await;
                 session_control = refresh_session_control_handle(
@@ -2564,7 +2564,7 @@ pub(super) async fn handle_client(
                 state,
                 source_key,
             } => {
-                super::client_actions::handle_applet_action(
+                super::applet_elicitation::handle_applet_action(
                     id,
                     session_id,
                     instance,
@@ -3398,6 +3398,11 @@ pub(super) async fn handle_client(
             &client_connections,
             &client_debug_state,
             &swarm_members,
+        )
+        .await;
+        super::client_session::apply_or_defer_desktop_response_capability(
+            &agent,
+            &client_session_id,
         )
         .await;
         event_handle.abort();
