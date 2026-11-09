@@ -1,6 +1,6 @@
 # ACP structured elicitation: implementation plan
 
-Status: planned, 2026-11-09. Branch `fork/acp-elicitation`. Contract:
+Status: in progress, 2026-11-09. Branch `fork/acp-elicitation`. Contract:
 [Structured elicitation](ACP_FORK_INTERFACE.md#structured-elicitation).
 
 ## Decisions
@@ -220,3 +220,16 @@ Each commit is pushed to `fork/acp-elicitation` as it lands.
 - Permission requests (`session/request_permission`).
 - v2 `requires_action` state.
 - A TUI form renderer.
+
+## Implementation progress
+
+- Commit 2 is partially implemented: form payloads, schema/content validation,
+  and four protocol tests are present. Wire additions are still outstanding.
+- The validator uses `jsonschema` (already used by the SDK), with the transitive
+  `ElicitationSchema` definitions extracted verbatim from the pinned v2 schema
+  into `crates/jcode-protocol/src/elicitation-schema.json`. ACP nullable optional
+  constraints are normalized before validating accepted content.
+- No capability is advertised and no runtime path uses these types yet.
+  Commits 3–6 and all end-to-end acceptance proofs remain outstanding.
+- Local protocol library clippy passes. All-target clippy encounters existing
+  `useless_vec` errors at `protocol_tests/core_events.rs:985` and `:999`.
