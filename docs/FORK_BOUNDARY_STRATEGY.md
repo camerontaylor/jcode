@@ -62,6 +62,15 @@ changed 94 of the 110 files the fork touched in the previous 30 days.
    defined in config, MCP, hooks, skills, and tools as self-contained files.
 6. A `pr/*` branch must stand alone: its own tests and test helpers, with no
    dependency on an earlier `pr/*` branch unless that one is upstream already.
+7. **Footprint beats architecture inside the boundary, ratchets
+   notwithstanding.** Do not move, split or refactor core code to make room for
+   a hook or to tidy a design. A moved upstream function conflicts with every
+   later upstream edit to it; a raised fork budget conflicts with nothing. When a
+   hook exceeds a size budget, raise that file's entry in `scripts/fork/*.json`
+   (fork-owned; upstream's JSON is never edited) by the hook's size, and record
+   it in the commit message. Recorded after `fork/acp-elicitation` moved
+   `handle_applet_action` and the Desktop tool registration out of upstream files
+   to stay under the ceilings (2026-11-09).
 
 ### Why the core is hard to carry
 

@@ -89,3 +89,23 @@ Two things that waste time otherwise:
 - Confirm which binary you are actually inspecting. `strings` on
   `builds/shared-server/jcode` reads a 70-byte symlink, not a program; resolve it
   with `readlink -f` first.
+
+## Fork footprint (camerontaylor/jcode)
+
+This fork carries its changes against a fast-moving upstream, so every hunk
+in upstream-owned code is a recurring conflict. When a change crosses the
+daemon protocol boundary (`crates/jcode-protocol`, `crates/jcode-app-core`,
+`crates/jcode-base`, `crates/jcode-tui`), minimise the footprint there instead
+of improving the architecture:
+
+- Add the smallest in-place hook: a field, an enum variant at the end of its
+  list, or a call into a new fork-owned file. Put the logic in that new file
+  or under `src/cli/acp/`.
+- Do not move, split, rename or refactor upstream code, even when the
+  result would be cleaner.
+- The size ratchets do not override this. If a hook pushes an upstream file
+  over a fork budget, raise that file's entry in `scripts/fork/*.json` by the
+  hook's size and say so in the commit message. Those budgets are
+  fork-owned; moving upstream code is not.
+
+Rules and rationale: `docs/FORK_BOUNDARY_STRATEGY.md`.
