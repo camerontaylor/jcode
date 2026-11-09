@@ -97,13 +97,13 @@ Before both updater and supported CLI agent reload, agent
 permissions. `paseo agent reload <id> --json` returned `reloaded`, timelineSize 149.
 The same native session `session_bonehound_1792889581862_af4fea67bf175815` appeared
 in socket Ping and remained idle afterward. Its 188-message, 1,433,380-byte
-conversation remained byte-identical, SHA256
+JSON snapshot remained byte-identical, SHA256
 `1d05020f4474e2b218dd64c64afa75073225d0f7a9a34cd6697f10f2dece7c84`.
 No recovery marker existed before or after; no user prompt was submitted.
 Neptune private and corrected existing-socket smoke passed all 13 checks.
 PID 87836, process command and socket inode 69898860 were identical before and
-after that smoke. The 188-message native conversation hash remained identical.
-However, subsequent Ping timed out; see the unresolved health issue below.
+after that smoke. The native JSON snapshot hash remained identical.
+Subsequent Ping timed out; see the investigation and natural recovery below.
 
 ## Triton reload incident and disposition
 
@@ -127,9 +127,10 @@ performed. Replacement completion was confirmed by its coordinator: actual finis
 The coordinator confirmed no further review work was pending at that point.
 
 The remaining four agents were idle with no active turn:
-`8cd4f205` / session_dove (798 persisted messages), `adf9fe3f` / session_fish
+`8cd4f205` / session_dove (798 JSON snapshot messages), `adf9fe3f` / session_fish
 (340), `9f3778d0` / session_bird (101), and `933367b7` / session_kikazaru (338).
-Their native handles and conversation files remained present. Their owning
+These counts describe snapshots, excluding append journals. Their native
+handles and conversation files remained present. Their owning
 coordinators were notified; no review work was fabricated to exercise reconnect.
 The interrupted session_bug retained its 105-message JSON, append journal and
 pending interrupted-peer recovery intent. Logs, trace, recovery intent and
@@ -178,7 +179,7 @@ At `2026-11-09T01:00:27Z`, the follow-up read-only sample no longer showed the
 blocked scan. A bounded standard Ping inventory succeeded on the original
 socket and listed the same bonehound attachment. Independent verification
 confirmed the same PID 87836, process command and socket inode 69898860, plus
-the same 188-message conversation and byte hash. The Paseo agent was idle,
+the same 188-message JSON snapshot and byte hash. The Paseo agent was idle,
 without an active turn, pending permissions or error. No daemon restart or
 user-conversation prompt was used for recovery. The scan naturally unblocked;
 the precise directory that stalled was not established.
@@ -249,5 +250,7 @@ Reconnect is bounded and fails closed if the native session is missing; it
 does not replay uncertain requests. A permanently blocked telemetry filesystem
 operation can still occupy its blocking worker, while presence/retirement can
 proceed. Durable session persistence itself remains synchronous. The combined
-fix is not yet on `custom`, released or deployed; the proposed follow-up tag is
-1006, subject to the orchestrator's integration decision.
+fix was not yet on `custom`, released or deployed at that integration
+checkpoint. It subsequently shipped as 1006 from `043e1f738` and was deployed
+to all seven hosts; see [the 1006 record](ACP_RELEASE_1006.md) for final runtime
+evidence and the explicit snapshot-versus-journal count correction.

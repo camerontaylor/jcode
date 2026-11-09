@@ -83,7 +83,8 @@ portable to macOS Unix-socket limits.
 
 ## Rollout status
 
-Atlas, Pluto, Ceres, Uranus, Saturn and Neptune are installed at exact 1006.
+All seven hosts—atlas, triton, neptune, saturn, pluto, ceres and uranus—are
+installed at exact 1006.
 Installed member hashes, immutable layout, current/stable/shared-server links,
 version markers and hidden post-install probe exit 73 match the release.
 Each passes the actual installed ACP/daemon private re-exec smoke with the
@@ -111,7 +112,7 @@ runtime socket with new inode 69910980. Bonehound was inspected idle with no
 active turn or permissions immediately before the updater and again before
 supported Paseo reload. Reload kept the same agent/native handle and 149-item
 timeline; its replacement ACP PID 65915 reports 1006. The exact 188-message,
-1,433,380-byte file hash remains unchanged, with no recovery record.
+1,433,380-byte JSON snapshot hash remains unchanged, with no recovery record.
 
 Neptune's explicit existing-socket disposable smoke passed all 13 checks.
 PID 87836, inode 69910980 and process command matched before/after; a later
@@ -119,12 +120,70 @@ bounded Ping lists only bonehound after the disposable attachment retired.
 Bonehound remains idle with no active turn or permissions. No user prompt,
 credential change or Paseo daemon restart was performed.
 
-Triton is deliberately pending. The immediate pre-updater check at
+Triton was deferred when the immediate pre-updater check at
 `2026-11-09T02:07:10Z` found six new critics in addition to whale, four running.
-No updater, backup or reload ran there. Owner 80eff5db was notified and is
-holding new critic dispatches while current work finishes. Deployment waits
-for actual idle/activeTurn/permission checks on every attached agent, then
-requires per-native history preservation through supported reloads. The
-original 1005 deployment incident and validation-label corrections remain
-preserved in the linked historical record; this rollout makes no fleet-wide
-completion claim while Triton remains on 1005.
+No updater or reload ran then. Owner 80eff5db held new dispatches and notified
+completion of the last turn; its error was the separately reported HTTP 429
+`GoUsageLimitError` monthly provider quota. Fresh checks at 02:28:07–08Z showed
+all seven without an active turn or pending permissions (six idle, one ended
+in quota error). Only then did the updater run. PID 1892446 exec'd into the
+verified 1006 native payload. A second fresh inspection preceded seven
+supported Paseo reloads, which all succeeded. Their replacement adapter PIDs
+2659784, 2659904, 2659955, 2660014, 2660078, 2660132 and 2660185 report 1006.
+
+Every native handle and complete materialized history digest matches exactly
+before/after. Original snapshot bytes and original journal prefixes remain
+identical; each journal appended four metadata-only records. Snapshot and
+journal copies remain on Triton under
+`~/.cache/jcode-release-1006/session-snapshots-before/`.
+
+| Native session | Materialized messages | Canonical history SHA256 |
+| --- | ---: | --- |
+| lizard | 168 | `5bf3c0e1a5fa42b67054cf8566e6111e3b75b7416936715bf321401186bea924` |
+| camel | 126 | `dc5f9e2b88633df2040a473dbef32b041767137783fa650790af39b7518da9f1` |
+| hippo | 82 | `ed1894c0f88b0eba07ccf67348bd3e0cd585e72e2e09d0f5a7f917d0835553b1` |
+| whale | 201 | `343791a7b843fe3720b1736edf154a36ffe07c55cd113daef428c3b29d50f548` |
+| flamingo | 107 | `1bd318ab8e1bf47bf0df18c5970abaa330b5fe0daf09505b22bbd6faba417a03` |
+| skunk | 64 | `d79b3b85277726bade9d921e18dab8401f5833ff25fbd721486e4ba1c1a7a0c3` |
+| octopus | 145 | `32b375cb9a22d03a19b0e66332f7d7b546c4493d43c9f881e7c5c5513faffc76` |
+
+Triton's installed private fake-provider exec smoke passed. Its actual shared
+socket `/tmp/jcode-502/jcode.sock` passed all ten protocol-only checks with
+PID 1892446 and inode 40493503 unchanged across that smoke. No real provider
+prompt or quota retry was attempted. A later Ping lists exactly the seven
+preserved native handles; all seven agents are idle without an active turn or
+permissions. The coordinator's provider/review hold is independent of this
+completed maintenance window. No review was cancelled, repeated or fabricated.
+
+Three legacy unattached ACP processes remain associated with historical
+errored agents 40fd5313, 382f0ad7 and 9d79d3e5 (PIDs 1896487, 2106455 and
+2149617; binaries 1003/1003/1004). Each has no active turn or permissions and
+none appears among the seven shared attachments. They were not killed or
+resumed. An owner reusing those old errored processes still needs supported
+reload; installation cannot retrofit their running executable. The seven
+targeted current views are the seven verified new 1006 adapter processes.
+
+An independent reviewer later started a new atlas shared daemon after its
+installation; read-only inspection identified PID 2904645 running 1006 and its
+native cat attachment. It was not reloaded or used for a deployment smoke.
+The review's later provider-quota error was reported by its owner separately.
+
+## History-count correction and evidence limits
+
+Earlier whale 156 and bonehound 188 counts referred only to JSON snapshots.
+Jcode also persists append journals: whale's complete pre/post history is 201
+messages, and bonehound's current materialized history is 226. Bonehound's
+38 journal messages all carry October 25 timestamps; the 1006 reload appended
+metadata only. Its current canonical history digest is
+`07f344eb534b67bbf04dcb5f32ef292bb67331d9d5be5e5f8d44a4c8d55e3f57`.
+Neptune's pre-update journal hash was not captured, so this report does not
+claim a historical journal byte-for-byte comparison there. Its exact snapshot
+hash and 149-item loaded timeline are the independently compared evidence.
+Triton's seven comparisons include snapshots plus complete journals captured
+before exec. The linked 1005 record now explicitly labels its snapshot counts;
+its prior smoke-label corrections and operator ordering mistake remain intact.
+
+All updater/reload windows are closed. No Paseo daemon restart, credential or
+billing change was performed. All private smoke processes were reaped; their
+temporary homes and sockets were removed. The separate OpenCode Go monthly
+quota incident remains outside this jcode release and was not retried.
