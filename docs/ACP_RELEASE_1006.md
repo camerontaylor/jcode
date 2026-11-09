@@ -187,3 +187,22 @@ All updater/reload windows are closed. No Paseo daemon restart, credential or
 billing change was performed. All private smoke processes were reaped; their
 temporary homes and sockets were removed. The separate OpenCode Go monthly
 quota incident remains outside this jcode release and was not retried.
+
+## Separate consumer-gate follow-up
+
+The later Ceres gate for exact Paseo candidate `2b9ab453` is **not green**:
+the private verified-1006 scenario passed its one test with zero skips, but
+Vitest reported one uncaught `ECONNREFUSED` on its private jcode socket and
+exited 1. The corrected 39fb contract scenario and preceding static/named
+gates had passed. Failure evidence is preserved on Ceres under
+`~/.paseo-fork/state/pr13-final-gates/daemon1006.log` and `.exit`.
+
+Read-only inspection identified an unhandled readline error path in that
+fixture's relay: socket error handlers exist, but its readline interfaces
+forward the same errors without interface error listeners. Teardown kills
+the native daemon before closing Paseo adapters and the relay, exposing that
+path to 1006's reconnect attempts. The root assigned a sole Paseo fixture
+owner to establish bounded proof and orderly shutdown/error propagation.
+The release lane performed no rerun, instrumentation, source fix or deployment
+in response. Its completed fleet runtime evidence above remains distinct from
+this failed consumer gate.
