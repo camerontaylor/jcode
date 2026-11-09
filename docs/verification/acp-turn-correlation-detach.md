@@ -140,7 +140,9 @@ in place.
 ## Daemon transport recovery
 
 The adapter retries connection establishment to its captured socket for at most
-10 seconds after EOF or a read error. It negotiates capabilities and subscribes
+10 seconds after EOF or a read error, including safe handshake I/O failures.
+Each handshake attempt has a two-second deadline. Semantic rejection (missing
+target, mismatched session or invalid snapshot) stops recovery. It negotiates capabilities and subscribes
 to the original native session before replacing the writer. It does not launch
 a daemon, discover a replacement endpoint, replay history, or resend uncertain
 requests. Requests pending on the lost transport fail through their existing
@@ -149,7 +151,9 @@ error path. New requests during recovery fail rather than queueing for retry.
 The logical attachment retains its client identity, skill selection, view state,
 turn fence and peer mapper. A retained observed turn is reconciled against the
 new daemon snapshot; retaining an identity does not mean execution resumed.
-Peer brackets are not reopened for an unchanged turn. A subsequent confirmed
+Peer brackets are not reopened for an unchanged turn. A snapshot reporting no
+active turn ends a stale peer bracket with an explicit unknown-outcome error;
+it does not infer cancellation or success while disconnected. A subsequent confirmed
 steer can receive output from a retained turn without reviving its failed prompt.
 
 Recovery omits Subscribe's working directory: the daemon resolves it from the
@@ -157,10 +161,24 @@ existing target, rejecting a missing target instead of using the new-session
 fallback. Daemons without this target-resolution contract fail recovery safely.
 Close, detach and releasing the attachment stop recovery; exhausted recovery
 leaves explicit session/load available through its existing attach contract.
+When the transport cannot supply its original address (currently non-Unix),
+automatic recovery is disabled rather than rediscovering a different daemon.
 
 Private Unix-socket tests in `src/cli/acp/tests/reconnect.rs` cover EOF recovery,
 the next prompt, original socket capture, missing target rejection, bounded
 unavailability and detach during a stalled handshake. Router tests cover peer
 identity, uncertain requests, snapshot reconciliation and subsequent steering.
-These are deterministic transport mocks, not a live provider or shared-daemon
-re-exec experiment. No shared daemon was restarted for this change.
+The opt-in `reconnect_real_private_daemon_reexec_then_fake_provider_prompt`
+test in `src/cli/acp/tests/reexec.rs` also exercises a real subprocess exec with
+private home/runtime/sockets and a local deterministic HTTP provider. On atlas,
+the installed 1005 daemon retained PID 2819860 while its server ID changed from
+`server_brook_1794185544599_6df0cb90aa047987` to
+`server_bridge_1794185545127_fc9bacc2ba873cda`. This branch's ACP library retained
+native session `session_snail_1794185544609_25d6d5d322294164`; the next prompt
+returned `private-reexec-ok`. Exactly two provider calls occurred (seed and next).
+An empty provisional session has no persisted transcript after exec and is
+correctly rejected as missing; the real-exec test seeds a persisted session.
+The existing Fork CI ACP step runs this opt-in test against its own built
+release binary, as well as the normal ACP tests. The process proof exercises
+the ACP library transport lifecycle, not the adapter's stdin/stdout framing.
+No shared daemon was restarted for this change.

@@ -973,7 +973,9 @@ fn reconnect_retains_peer_bracket_and_stop_identity_without_retry() {
     assert_eq!(router.active_turn_identity(), Some(identity(1)));
     let ended = router.route(turn_state(1, None));
     assert_eq!(ended.len(), 1);
-    assert!(matches!(ended[0], RouteAction::PeerTurnEnded { .. }));
+    assert!(
+        matches!(&ended[0], RouteAction::PeerTurnEnded { status: TurnEndStatus::Failed, message: Some(message), .. } if message.contains("outcome is unknown"))
+    );
     assert!(router.route(turn_state(1, None)).is_empty());
     assert_eq!(router.active_turn_identity(), None);
 }

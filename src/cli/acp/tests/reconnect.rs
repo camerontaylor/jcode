@@ -20,6 +20,41 @@ async fn reconnect_after_eof_keeps_session_and_sends_next_prompt_once() {
     let runtime = AcpRuntime::new(AcpProfile::Standard, ProviderChoice::Claude, None, None);
     let (prompt_seen, prompt_received) = tokio::sync::oneshot::channel();
     let daemon = tokio::spawn(async move {
+        // A re-exec can accept before its replacement transport is ready.
+        // Exercise EOF before Pong and after Subscribe without resending any
+        // uncertain application request.
+        for phase in 0..3 {
+            let (stream, _) = listener.accept().await.unwrap();
+            if phase == 0 {
+                drop(stream);
+                continue;
+            }
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let Request::Ping { id } = serde_json::from_str(&line).unwrap() else {
+                panic!("safe probe")
+            };
+            if phase == 2 {
+                writer
+                    .write_all(
+                        format!(
+                            "{}\n",
+                            json!({"type":"pong","id":id,"capabilities":["turn_origin"]})
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                line.clear();
+                reader.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<Request>(&line).unwrap(),
+                    Request::Subscribe { .. }
+                ));
+            }
+        }
         let (stream, _) = listener.accept().await.unwrap();
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
@@ -266,5 +301,39 @@ async fn reconnect_captures_original_socket_and_rejects_missing_target() {
     .await
     .unwrap();
     assert_eq!(session.session_id().await, "missing");
+    assert!(session.disconnected.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn reconnect_without_original_address_stops_instead_of_discovering_daemon() {
+    let (client, old_daemon) = tokio::net::UnixStream::pair().unwrap();
+    let (reader, writer) = client.into_split();
+    let session = Arc::new(DaemonSession::new(
+        "existing",
+        None,
+        writer,
+        "owner".into(),
+        1,
+    ));
+    assert!(session.socket_path.is_none());
+    session.spawn_reader(
+        reader,
+        AcpRuntime::new(AcpProfile::Standard, ProviderChoice::Claude, None, None),
+    );
+    drop(old_daemon);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !session
+            .reader_task
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .is_finished()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert!(session.disconnected.load(Ordering::SeqCst));
 }

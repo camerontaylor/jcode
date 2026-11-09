@@ -564,15 +564,14 @@ impl DaemonSession {
                         0
                     }
                 };
-                match bytes {
-                    0 => {
-                        let Some(session) = reader_session.upgrade() else {
-                            break;
-                        };
-                        session.disconnected.store(true, Ordering::SeqCst);
-                        let actions = router.lock().await.transport_lost();
-                        sink.apply(actions).await;
-                        let recovery = tokio::time::timeout(
+                if bytes == 0 {
+                    let Some(session) = reader_session.upgrade() else {
+                        break;
+                    };
+                    session.disconnected.store(true, Ordering::SeqCst);
+                    let actions = router.lock().await.transport_lost();
+                    sink.apply(actions).await;
+                    let recovery = tokio::time::timeout(
                             std::time::Duration::from_secs(10),
                             async {
                                 let reconnect = session.reconnect_transport();
@@ -588,29 +587,27 @@ impl DaemonSession {
                             },
                         )
                         .await;
-                        match recovery {
-                            Ok(Ok((replacement, events))) => {
-                                reader = replacement;
-                                for event in events {
-                                    let actions = router.lock().await.route(event);
-                                    sink.apply(actions).await;
-                                }
-                                session.disconnected.store(false, Ordering::SeqCst);
-                                continue;
+                    match recovery {
+                        Ok(Ok((replacement, events))) => {
+                            reader = replacement;
+                            for event in events {
+                                let actions = router.lock().await.route(event);
+                                sink.apply(actions).await;
                             }
-                            Ok(Err(err)) => {
-                                crate::logging::debug(&format!("acp: reconnect failed: {err:#}"));
-                                break;
-                            }
-                            Err(err) => {
-                                crate::logging::debug(&format!(
-                                    "acp: reconnect deadline expired: {err}"
-                                ));
-                                break;
-                            }
+                            session.disconnected.store(false, Ordering::SeqCst);
+                            continue;
+                        }
+                        Ok(Err(err)) => {
+                            crate::logging::debug(&format!("acp: reconnect failed: {err:#}"));
+                            break;
+                        }
+                        Err(err) => {
+                            crate::logging::debug(&format!(
+                                "acp: reconnect deadline expired: {err}"
+                            ));
+                            break;
                         }
                     }
-                    _ => {}
                 }
                 let Some(event) = decode_daemon_line(&line) else {
                     continue;
@@ -691,7 +688,7 @@ impl AcpRuntime {
             }
         };
         #[cfg(not(unix))]
-        let socket_path = Some(crate::server::socket_path());
+        let socket_path = None;
         let mut session = DaemonSession::new(
             session_id,
             working_dir,

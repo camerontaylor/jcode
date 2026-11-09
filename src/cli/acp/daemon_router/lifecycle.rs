@@ -153,8 +153,8 @@ impl RouterState {
                 self.own_turn = None;
             }
             actions.extend(self.close_peer_turn(
-                TurnEndStatus::Cancelled,
-                Some("The daemon snapshot reports no active turn.".into()),
+                TurnEndStatus::Failed,
+                Some("The turn ended while disconnected; its outcome is unknown.".into()),
             ));
             return actions;
         };
