@@ -951,3 +951,23 @@ fn stop_preserves_observed_turn_until_daemon_terminal() {
     )));
     assert_eq!(router.active_turn_identity(), None);
 }
+
+#[test]
+fn reconnect_new_steer_can_receive_output_of_retained_owned_turn() {
+    let mut router = steering_router();
+    let mut failed = steer(&mut router, 77);
+    router.route(turn_started(1, ours(77), Some("mine")));
+    drain(&mut failed);
+    router.transport_lost();
+    router.transport_restored();
+    let mut next = steer(&mut router, 78);
+    assert!(
+        router
+            .route(scoped(1, injected("follow up", &[cid(78)])))
+            .is_empty()
+    );
+    router.route(scoped(1, delta("new output")));
+    assert_eq!(texts(&drain(&mut next)), vec!["new output".to_string()]);
+    assert!(drain(&mut failed).is_empty());
+    assert_eq!(router.active_turn_identity(), Some(identity(1)));
+}

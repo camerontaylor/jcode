@@ -394,6 +394,11 @@ jobs:
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu -p jcode --lib cli::acp:: -- --nocapture
+          # Exercise real exec on this exact head's already-built daemon.
+          JCODE_ACP_REEXEC_TEST_BINARY="$PWD/target/x86_64-unknown-linux-gnu/release/jcode" \
+            python3 .github/scripts/run_with_timeout.py 120 \
+            "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu -p jcode --lib \
+            cli::acp::tests::reexec::reconnect_real_private_daemon_reexec_then_fake_provider_prompt -- --ignored --exact --nocapture
 
       - name: Run e2e tests
         shell: bash

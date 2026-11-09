@@ -1,10 +1,16 @@
 use super::*;
 
+mod reconnect;
+
 pub(super) struct DaemonSession {
     pub(super) writer: Mutex<WriteHalf>,
+    pub(super) disconnected: AtomicBool,
+    /// Captured once: recovery must never discover or launch a different daemon.
+    pub(super) socket_path: Option<PathBuf>,
     /// Shared with the router, which builds steer recovery requests itself.
     pub(super) next_request_id: Arc<AtomicU64>,
-    /// Client instance id of *this connection*: `{process}/{n}`. Two sessions
+    /// Client instance id of this logical attachment: `{process}/{n}`. Socket
+    /// replacement retains ownership; separate sessions
     /// in one adapter process must not look like each other's peer, so the
     /// per-process id is not enough.
     pub(super) instance_id: String,
@@ -402,6 +408,8 @@ impl DaemonSession {
         router.share_request_ids(Arc::clone(&next_request_id));
         Self {
             writer: Mutex::new(writer),
+            disconnected: AtomicBool::new(false),
+            socket_path: None,
             next_request_id,
             instance_id: instance_id.clone(),
             router: Arc::new(Mutex::new(router)),
@@ -464,6 +472,10 @@ impl DaemonSession {
         let mut json = serde_json::to_string(request)?;
         json.push('\n');
         let mut writer = self.writer.lock().await;
+        anyhow::ensure!(
+            !self.disconnected.load(Ordering::SeqCst),
+            "Daemon transport unavailable; request was not retried"
+        );
         writer.write_all(json.as_bytes()).await?;
         writer.flush().await?;
         Ok(())
@@ -517,6 +529,7 @@ impl DaemonSession {
         let router = Arc::clone(&self.router);
         let ui_state = Arc::clone(&self.ui_state);
         let session = Arc::downgrade(self);
+        let reader_session = session.clone();
         let (catalog_tx, mut catalog_rx) = tokio::sync::watch::channel(());
         let catalog_acp = acp.clone();
         let catalog_handle = tokio::spawn(async move {
@@ -544,12 +557,56 @@ impl DaemonSession {
             let mut line = String::new();
             loop {
                 line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {}
+                let bytes = match reader.read_line(&mut line).await {
+                    Ok(bytes) => bytes,
                     Err(err) => {
                         crate::logging::debug(&format!("acp: daemon read failed: {err}"));
+                        0
+                    }
+                };
+                if bytes == 0 {
+                    let Some(session) = reader_session.upgrade() else {
                         break;
+                    };
+                    session.disconnected.store(true, Ordering::SeqCst);
+                    let actions = router.lock().await.transport_lost();
+                    sink.apply(actions).await;
+                    let recovery = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            async {
+                                let reconnect = session.reconnect_transport();
+                                tokio::pin!(reconnect);
+                                loop {
+                                    tokio::select! {
+                                        result = &mut reconnect => break result,
+                                        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                                            anyhow::ensure!(Arc::strong_count(&session) > 1 && router.lock().await.can_reconnect(), "Attachment released during reconnect");
+                                        }
+                                    }
+                                }
+                            },
+                        )
+                        .await;
+                    match recovery {
+                        Ok(Ok((replacement, events))) => {
+                            reader = replacement;
+                            for event in events {
+                                let actions = router.lock().await.route(event);
+                                sink.apply(actions).await;
+                            }
+                            session.disconnected.store(false, Ordering::SeqCst);
+                            continue;
+                        }
+                        Ok(Err(err)) => {
+                            crate::logging::debug(&format!("acp: reconnect failed: {err:#}"));
+                            break;
+                        }
+                        Err(err) => {
+                            crate::logging::debug(&format!(
+                                "acp: reconnect deadline expired: {err}"
+                            ));
+                            break;
+                        }
                     }
                 }
                 let Some(event) = decode_daemon_line(&line) else {
@@ -622,13 +679,25 @@ impl AcpRuntime {
         writer: WriteHalf,
     ) -> Result<Arc<DaemonSession>> {
         let connection = self.connection_seq.fetch_add(1, Ordering::Relaxed);
-        let session = Arc::new(DaemonSession::new(
+        #[cfg(unix)]
+        let socket_path = match reader.peer_addr() {
+            Ok(addr) => addr.as_pathname().map(Path::to_path_buf),
+            Err(err) => {
+                crate::logging::debug(&format!("acp: cannot capture reconnect address: {err}"));
+                None
+            }
+        };
+        #[cfg(not(unix))]
+        let socket_path = None;
+        let mut session = DaemonSession::new(
             session_id,
             working_dir,
             writer,
             connection_instance_id(&self.instance_id, connection),
             self.request_id_base,
-        ));
+        );
+        session.socket_path = socket_path;
+        let session = Arc::new(session);
         session.spawn_reader(reader, self.clone());
         let capabilities = probe_capabilities(&session).await?;
         let mut router = session.router.lock().await;
