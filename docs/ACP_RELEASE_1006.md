@@ -22,7 +22,8 @@ Uncertain requests are not replayed. A blocked telemetry filesystem operation
 can still occupy its worker; durable session persistence remains synchronous.
 
 [Release packaging 42545917497](https://github.com/camerontaylor/jcode/actions/runs/42545917497)
-is running the four native builds. The provenance preflight has passed.
+has passed provenance and the Linux x86_64, Linux ARM and macOS ARM builds.
+The macOS Intel build is still running.
 No 1006 host installation has been performed at the time of this update.
 
 ## Installed-binary smoke provenance
@@ -53,3 +54,12 @@ bonehound has 188 messages, 1,433,380 bytes, file SHA256
 Neither has a reload-recovery record. Fresh before/after snapshots will be
 compared during rollout rather than assuming these initial snapshots stayed
 unchanged while packaging ran.
+
+Before publication, the completed Linux ARM CI artifact passed this actual
+ACP/daemon process smoke on atlas; the macOS ARM CI artifact also passed on
+Saturn. Both report `jcode v0.99.1006+fork.p199 (043e1f738)`, retain the original
+daemon PID and native session/attachment across exec, make exactly two fake
+provider calls, and answer post-close Ping. These are private CI-artifact
+checks, not claims of installed fleet validation. Logs are retained in the
+1006 release cache. Short `/tmp/jcode-1006-*` socket paths keep the same smoke
+portable to macOS Unix-socket limits.
