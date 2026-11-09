@@ -4,6 +4,8 @@ mod reconnect;
 
 pub(super) struct DaemonSession {
     pub(super) writer: Mutex<WriteHalf>,
+    pub(super) form_supported: bool,
+    pub(super) applet_elicitation: bool,
     pub(super) disconnected: AtomicBool,
     /// Captured once: recovery must never discover or launch a different daemon.
     pub(super) socket_path: Option<PathBuf>,
@@ -408,6 +410,8 @@ impl DaemonSession {
         router.share_request_ids(Arc::clone(&next_request_id));
         Self {
             writer: Mutex::new(writer),
+            form_supported: false,
+            applet_elicitation: false,
             disconnected: AtomicBool::new(false),
             socket_path: None,
             next_request_id,
@@ -569,6 +573,14 @@ impl DaemonSession {
                         break;
                     };
                     session.disconnected.store(true, Ordering::SeqCst);
+                    if let Err(error) = acp
+                        .cancel_client_forms(&session.session_id().await, None)
+                        .await
+                    {
+                        crate::logging::debug(&format!(
+                            "acp: form disconnect cleanup failed: {error}"
+                        ));
+                    }
                     let actions = router.lock().await.transport_lost();
                     sink.apply(actions).await;
                     let recovery = tokio::time::timeout(
@@ -591,6 +603,9 @@ impl DaemonSession {
                         Ok(Ok((replacement, events))) => {
                             reader = replacement;
                             for event in events {
+                                if acp.form_event(&reader_session, &event).await {
+                                    continue;
+                                }
                                 let actions = router.lock().await.route(event);
                                 sink.apply(actions).await;
                             }
@@ -612,6 +627,9 @@ impl DaemonSession {
                 let Some(event) = decode_daemon_line(&line) else {
                     continue;
                 };
+                if acp.form_event(&reader_session, &event).await {
+                    continue;
+                }
                 if matches!(&event, ServerEvent::AvailableModelsUpdated { .. }) {
                     catalog_tx.send_replace(());
                 }
@@ -697,6 +715,8 @@ impl AcpRuntime {
             self.request_id_base,
         );
         session.socket_path = socket_path;
+        session.form_supported = self.form_supported();
+        session.applet_elicitation = self.applet_opt_in();
         let session = Arc::new(session);
         session.spawn_reader(reader, self.clone());
         let capabilities = probe_capabilities(&session).await?;
@@ -729,8 +749,8 @@ impl AcpRuntime {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
-                supports_elicitation_form: false,
-                applet_elicitation: false,
+                supports_elicitation_form: session.form_supported,
+                applet_elicitation: session.applet_elicitation,
                 supports_server_failover: true,
                 supports_turn_identity: session.router.lock().await.supports_turn_origin(),
                 crash_on_disconnect: false,
@@ -840,8 +860,8 @@ impl AcpRuntime {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
-                supports_elicitation_form: false,
-                applet_elicitation: false,
+                supports_elicitation_form: session.form_supported,
+                applet_elicitation: session.applet_elicitation,
                 supports_server_failover: true,
                 supports_turn_identity: session.router.lock().await.supports_turn_origin(),
                 crash_on_disconnect: false,

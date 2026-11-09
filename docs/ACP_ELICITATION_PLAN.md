@@ -239,3 +239,11 @@ Each commit is pushed to `fork/acp-elicitation` as it lands.
 
 - Publish `elicitation_form` with the broker (commit 4), so intermediate commits
   do not advertise an unimplemented server capability.
+
+- Record the applet-backed e2e fixture with commit 6, when its first tool user
+  exists, rather than fabricating a daemon event for commit 5.
+- An invalid ACP accept has completed its JSON-RPC request, so the adapter
+  reissues the still-pending form under a new request ID. The broker also
+  independently rejects invalid accepts without resolving its pending slot.
+- Per user clarification, `appletElicitation` metadata is sent only to clients
+  advertising form support; missing means false. Legacy corpus files stay intact.

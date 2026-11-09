@@ -627,7 +627,8 @@ The `applet` tool is the first user, and only on explicit opt-in: the
 connection's tool selection must name `applet` (not `*`/`all` or the `full`
 profile), and the client must advertise form support. The effective value is
 reported as a boolean at `result._meta.jcode.appletElicitation` on
-new/load/resume. When enabled, a blocking `applet` call is presented as a form
+new/load/resume only to clients that advertised form support. Missing means
+false, following the `sharedControl` convention. When enabled, a blocking `applet` call is presented as a form
 whose fields are the applet's bound controls. The agent sees the same action
 text whichever client answers.
 

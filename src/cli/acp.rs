@@ -69,6 +69,7 @@ struct AcpRuntime {
     /// informational notices are withheld rather than faked as messages.
     client_session_notices: Arc<AtomicBool>,
     client_requests: Arc<client_requests::ClientRequests>,
+    client_form: Arc<AtomicBool>,
 }
 
 impl AcpRuntime {
@@ -90,6 +91,7 @@ impl AcpRuntime {
             connection_seq: Arc::new(AtomicU64::new(0)),
             client_session_notices: Arc::new(AtomicBool::new(false)),
             client_requests: Arc::new(client_requests::ClientRequests::default()),
+            client_form: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -137,6 +139,10 @@ impl AcpRuntime {
                 // Record what this connection may receive before answering: a
                 // v1 client that did not advertise `session.notices` must never
                 // see a `notice` update.
+                self.client_form.store(
+                    client_requests::advertises_form(&message.params),
+                    Ordering::SeqCst,
+                );
                 self.client_session_notices.store(
                     client_advertises_session_notices(&message.params),
                     Ordering::SeqCst,
@@ -227,6 +233,7 @@ impl AcpRuntime {
                     session.instance_id(),
                     session.shared_control_support().await,
                 );
+                self.insert_elicitation_meta(&mut result);
                 self.sessions
                     .lock()
                     .await
@@ -307,6 +314,7 @@ impl AcpRuntime {
                     session.instance_id(),
                     session.shared_control_support().await,
                 );
+                self.insert_elicitation_meta(&mut result);
                 self.sessions.lock().await.insert(attached_id, session);
                 self.write_result(id, result).await?;
                 self.write_available_commands(&session_id).await?;
@@ -544,6 +552,7 @@ impl AcpRuntime {
                 return Ok(());
             }
         };
+        self.cancel_client_forms(&session_id, None).await?;
         let session = self.sessions.lock().await.remove(&session_id);
         if let Some(session) = session {
             // Closing this view is not a user stop, so it must never interrupt
