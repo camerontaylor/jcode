@@ -171,7 +171,8 @@ No diagnostic daemon restart, user prompt or filesystem deletion was performed.
 The same process and persisted conversation were retained while a scoped fix
 was developed on `fork/acp-disconnect-telemetry`. Fleet installation is complete;
 the observed stall subsequently recovered naturally, as recorded below. The
-preventive fix remains pending exact-head CI and integration review.
+preventive fix passed exact-head CI and review; combined integration validation
+is recorded below. It has not been released or deployed.
 
 At `2026-11-09T01:00:27Z`, the follow-up read-only sample no longer showed the
 blocked scan. A bounded standard Ping inventory succeeded on the original
@@ -200,5 +201,53 @@ controls fail deterministically when ID lookup is put back into capture
 2.21 seconds). These are controlled source mutations, not claims that the
 ordinary release probes reproduced the filesystem stall. Both mutations were
 restored before final validation. Follow-up Fork CI:
-[42542843335](https://github.com/camerontaylor/jcode/actions/runs/42542843335),
-pending at the time of this update. The fix has not been released or deployed.
+[42542843335](https://github.com/camerontaylor/jcode/actions/runs/42542843335)
+passed on exact `2ac1da2817e2875f9a8da74d3ea00ef686958795`, including the
+explicit cleanup and real installation-ID construction regressions. Root
+review accepted the final snapshot/reporting boundary. The fix has not been
+released or deployed.
+
+## Follow-up integration stage
+
+The isolated branch `fork/acp-followup-integration` at
+`043e1f73850d1575882255a311e962f219fbd486` starts from freshly verified
+`custom` source `d66d8d2181069c3524345723cf8ac0772b23944f`. Two non-fast-forward
+merges preserve telemetry fix `2ac1da2817e2875f9a8da74d3ea00ef686958795` and
+ACP reconnect fix `69de84652a423a940fbe8607d7c762a3b4a4d731`. The latter's
+exact-head CI [42542654867](https://github.com/camerontaylor/jcode/actions/runs/42542654867)
+passed 136 normal ACP tests and an explicit real private-daemon exec test
+using its own CI-built release binary. The merged diff covers 19 files,
+1,478 insertions and 256 deletions; manual integration review found no
+additional blocker. Reporting ownership and transport recovery remain separate.
+
+Local combined-source validation on atlas passed the 20-test disconnect cleanup
+cohort, the real installation-ID/snapshot regression, 136 normal ACP tests and
+the explicit private real-exec test (one passed, zero ignored). The latter used
+the stage's adapter library with the immutable 1005 ARM daemon payload, SHA256
+`ef32e7978550576d75568ad686061be030996e0448502078208dcb69ac7c9a29`.
+PID 2879664 remained alive, server identity changed from citadel to garden,
+native session `session_shrimp_1794187398132_08dbf9ce0127565b` was retained,
+and the fake provider saw exactly two calls (seed plus next), returning
+`private-reexec-ok`. All sockets, home/configuration and provider traffic were
+private. No shared daemon or user conversation was used for this proof.
+
+Formatting and the size, test-size, panic, swallowed-error, dependency and
+wildcard-reexport guardrails passed locally. Combined exact-head CI
+[42544404044](https://github.com/camerontaylor/jcode/actions/runs/42544404044)
+passed on exact `043e1f73850d1575882255a311e962f219fbd486`; both Build & Test
+and Quality Guardrails succeeded, including all-target, all-feature clippy with
+warnings denied. Logs confirm both explicit cleanup/reporting regressions ran,
+136 normal ACP tests passed, and E2E completed with 97 passed / 7 ignored.
+The explicit real-exec test passed with zero ignored, using the release binary
+built from the exact combined source, rather than the local 1005 payload.
+PID 49331 stayed alive, server identity changed from lake to summit, native
+session `session_microbe_1794187630303_cb55c290ac72537d` was retained, and
+exactly two fake-provider calls returned `private-reexec-ok`. Full CI logs are
+retained on atlas at `~/.cache/jcode-release-1005/combined-ci.log`.
+
+Reconnect is bounded and fails closed if the native session is missing; it
+does not replay uncertain requests. A permanently blocked telemetry filesystem
+operation can still occupy its blocking worker, while presence/retirement can
+proceed. Durable session persistence itself remains synchronous. The combined
+fix is not yet on `custom`, released or deployed; the proposed follow-up tag is
+1006, subject to the orchestrator's integration decision.
