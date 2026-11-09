@@ -1,5 +1,6 @@
-use super::applet_elicitation::handle_applet_action;
-use super::client_actions::{NotifySessionContext, handle_close_applet, handle_notify_session};
+use super::client_actions::{
+    NotifySessionContext, handle_applet_action, handle_close_applet, handle_notify_session,
+};
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
     handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,

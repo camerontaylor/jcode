@@ -436,27 +436,3 @@ mod tests {
         drop(prepared);
     }
 }
-
-impl super::Registry {
-    /// Desktop opts in through its inline response renderer capability.
-    /// Keep Desktop-only UI tools out of the base map so terminal/headless
-    /// registries never advertise or execute them, including through batch
-    /// and codemode.
-    pub(crate) async fn set_desktop_ui_enabled(&self, enabled: bool) {
-        if enabled {
-            self.register(
-                "user_response".into(),
-                std::sync::Arc::new(super::user_response::UserResponseTool),
-            )
-            .await;
-            self.register(
-                "applet".into(),
-                std::sync::Arc::new(super::applet::AppletTool::new()),
-            )
-            .await;
-        } else {
-            self.unregister("user_response").await;
-            self.unregister("applet").await;
-        }
-    }
-}

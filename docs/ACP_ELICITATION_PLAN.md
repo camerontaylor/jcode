@@ -246,8 +246,8 @@ Each commit is pushed to `fork/acp-elicitation` as it lands.
   using paused Tokio time).
 - The named clause-index test and ten legacy corpus/index tests pass. Compiler,
   registry, broker and existing Desktop capability regression tests pass.
-  Library clippy, fork formatting, and all four ratchets pass without budget
-  increases. All-target protocol clippy has pre-existing `useless_vec` errors
+  Library clippy, fork formatting, and all four ratchets pass with the narrow
+  fork budget increases recorded below. All-target protocol clippy has pre-existing `useless_vec` errors
   at `protocol_tests/core_events.rs:985` and `:999`.
 - A selfdev build passed a scripted stdio runtime check on its own socket:
   capability metadata, accepted content with `_meta`, withdrawal, ignored late
@@ -267,9 +267,11 @@ Each commit is pushed to `fork/acp-elicitation` as it lands.
 - Per user clarification, `appletElicitation` metadata is sent only to clients
   advertising form support; missing means false. Legacy corpus files stay intact.
 
-- Move the Desktop registration method and applet-answer handler into
-  fork-owned modules to keep the existing code-size ceilings unchanged. No
-  budgets were raised; moved response sends now log delivery failures.
+- Keep the upstream Desktop registration method and applet-answer handler in
+  their original files and positions. New arbitration logic stays in fork-owned
+  code behind small additive hooks. Raise only the fork code-size entries for
+  `server/client_actions.rs` (1427 → 1431) and `tool/mod.rs` (1924 → 1925),
+  exactly covering the overage; upstream budgets stay unchanged.
 - The existing view model represents headings as `text` with heading style;
   no separate `heading` node is added. Noninteractive images contribute alt
   text; interactive images remain unsupported. Forms without a submit button

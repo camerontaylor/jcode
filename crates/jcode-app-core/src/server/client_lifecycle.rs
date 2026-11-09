@@ -2564,7 +2564,7 @@ pub(super) async fn handle_client(
                 state,
                 source_key,
             } => {
-                super::applet_elicitation::handle_applet_action(
+                super::client_actions::handle_applet_action(
                     id,
                     session_id,
                     instance,
