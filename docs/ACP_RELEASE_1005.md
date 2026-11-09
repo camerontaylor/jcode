@@ -146,7 +146,7 @@ reconnection remains a follow-up issue; no protocol redesign or speculative
 rollback was included in this release.
 
 
-## Neptune post-smoke health issue (rollout health remains incomplete)
+## Neptune post-smoke stall and natural recovery
 
 After the disposable shared-session prompt completed and closed, new main and
 debug socket Ping requests timed out. Recorded request bytes contain valid JSON
@@ -170,4 +170,35 @@ Evidence is retained on Neptune under `~/.cache/jcode-release-1005/`, including
 No diagnostic daemon restart, user prompt or filesystem deletion was performed.
 The same process and persisted conversation were retained while a scoped fix
 was developed on `fork/acp-disconnect-telemetry`. Fleet installation is complete;
-fleet health and controlled Neptune recovery remain pending this fix and review.
+the observed stall subsequently recovered naturally, as recorded below. The
+preventive fix remains pending exact-head CI and integration review.
+
+At `2026-11-09T01:00:27Z`, the follow-up read-only sample no longer showed the
+blocked scan. A bounded standard Ping inventory succeeded on the original
+socket and listed the same bonehound attachment. Independent verification
+confirmed the same PID 87836, process command and socket inode 69898860, plus
+the same 188-message conversation and byte hash. The Paseo agent was idle,
+without an active turn, pending permissions or error. No daemon restart or
+user-conversation prompt was used for recovery. The scan naturally unblocked;
+the precise directory that stalled was not established.
+
+Both exact immutable release binaries (1004 and 1005) passed ordinary isolated
+post-close Ping probes on atlas and Neptune. Those probes do not reproduce the
+exceptional filesystem stall. The preventive fix on `fork/acp-disconnect-telemetry`
+(current source `2ac1da2817e2875f9a8da74d3ea00ef686958795`) captures an owned
+terminal session snapshot before releasing the registry and performs reporting
+I/O on a blocking worker afterward. Installation-ID lookup, unfinished-turn
+finalization, transcript consent/submission, profiling and observer dispatch
+are deferred. Durable terminal state and registry retirement remain atomic.
+A disabled/failed deferred reporting job consumes the ended telemetry slot;
+it cannot later close a successor's slot. Ordinary synchronous shutdown keeps
+its existing delivery behavior.
+
+The actual ID-lookup gate and cleanup/presence gate regressions pass. Negative
+controls fail deterministically when ID lookup is put back into capture
+(1.00 seconds) or reporting is run inline under the presence guard (Ping timeout,
+2.21 seconds). These are controlled source mutations, not claims that the
+ordinary release probes reproduced the filesystem stall. Both mutations were
+restored before final validation. Follow-up Fork CI:
+[42542843335](https://github.com/camerontaylor/jcode/actions/runs/42542843335),
+pending at the time of this update. The fix has not been released or deployed.
