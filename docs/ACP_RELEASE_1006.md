@@ -22,9 +22,26 @@ Uncertain requests are not replayed. A blocked telemetry filesystem operation
 can still occupy its worker; durable session persistence remains synchronous.
 
 [Release packaging 42545917497](https://github.com/camerontaylor/jcode/actions/runs/42545917497)
-has passed provenance and the Linux x86_64, Linux ARM and macOS ARM builds.
-The macOS Intel build is still running.
-No 1006 host installation has been performed at the time of this update.
+passed provenance, all four native builds and publication. The release was
+published at `2026-11-09T02:01:15Z`, non-draft and non-prerelease, as Latest.
+All four archives match both published `SHA256SUMS` and GitHub asset digests;
+their members match the expected executable-only archive layout. All four CI
+version probes report `v0.99.1006+fork.p199 (043e1f738)`. The privately tested
+ARM Linux/Mac CI archives are byte-identical to the published assets.
+
+| Asset | Archive SHA256 | Native executable SHA256 |
+| --- | --- | --- |
+| Linux x86_64 | `191619e52f7c6d6635e43c67e4cc195539efde16e6beaa34af98e63e9279e912` | `12f80dc0dbf304abe6b1a97c278067fbe1f915047941af9fa7c6f4842c008aff` |
+| Linux ARM | `b16b648a9aca829fc123fd3d8145ee3940e45272343657f591829dfb3730538c` | `8aa96e209981f7744fc316b0d1fa107c196c2fcdb42d4274a7cf436bd5ad833e` |
+| macOS ARM | `259b3060d1082bb07503cffaa1161f307dea1dad37cfa61abc55e223b6113012` | `4d3a97650211724e9f32263e8f3f667b5a7e7ded04af068dd4b2e8e7574d92e8` |
+| macOS Intel | `2d23f17b1d7f11dbd31f1539cf30a47ad1d4b9d1f5d8af5a58008ab3a348e08f` | `2fb16d1e3771f2464266ae7fd06bc069e82860b41fba10f6c90e7c528f9c370d` |
+
+Linux launcher hashes remain `b7a0775811409a2959f9dd2ad0d72a03e9caac7a8495f8e6aee48420839b3c23`
+(x86_64) and `2e091ad7ad1f6a390d5433a8c64f287b72d4bad1dc616e725aedd8fdf06ce78d`
+(ARM). The verified x86_64 archive/native hashes and release URLs were sent
+directly to the Paseo owner and Ceres consumer validator. Their 39fb source
+contract gate remains unchanged; separate released-1006 consumer validation is
+owned by that lane.
 
 ## Installed-binary smoke provenance
 
@@ -63,3 +80,51 @@ provider calls, and answer post-close Ping. These are private CI-artifact
 checks, not claims of installed fleet validation. Logs are retained in the
 1006 release cache. Short `/tmp/jcode-1006-*` socket paths keep the same smoke
 portable to macOS Unix-socket limits.
+
+## Rollout status
+
+Atlas, Pluto, Ceres, Uranus, Saturn and Neptune are installed at exact 1006.
+Installed member hashes, immutable layout, current/stable/shared-server links,
+version markers and hidden post-install probe exit 73 match the release.
+Each passes the actual installed ACP/daemon private re-exec smoke with the
+same native session and attachment identity, exactly two fake-provider calls
+and responsive post-close Ping. Backups of prior links/markers are retained at
+`~/.jcode/builds/state-backup-release-0.99.1006+fork.p199/` on updated hosts.
+The pinned reviewed updater SHA256 is
+`5717c7cac7b4190756f98d2f1b034adba7617ffbb0699f25a0c0904c3123ec4b`.
+
+The first Uranus private smoke raced readiness: native Ping presence appears
+before the ACP reader has finished draining Subscribe's snapshot. The next
+prompt was rejected before transport write, with no retry. The corrected
+harness waits for a successful read-only history round trip on the same
+attachment before sending its next prompt exactly once. It retries only that
+read-only readiness probe, bounded at ten seconds. Uranus then passed; the
+corrected harness also passed on the other updated hosts. The original failed
+log is retained. This changed the test's readiness observation, not production
+source or cancellation semantics.
+
+Atlas, Pluto, Ceres, Uranus and Saturn had no responsive preexisting shared
+daemon; their evidence is explicitly private. No shared daemon was started to
+manufacture a live-validation claim. Neptune's actual preexisting shared
+daemon retained PID 87836 across exec, now reports 1006, and uses the original
+runtime socket with new inode 69910980. Bonehound was inspected idle with no
+active turn or permissions immediately before the updater and again before
+supported Paseo reload. Reload kept the same agent/native handle and 149-item
+timeline; its replacement ACP PID 65915 reports 1006. The exact 188-message,
+1,433,380-byte file hash remains unchanged, with no recovery record.
+
+Neptune's explicit existing-socket disposable smoke passed all 13 checks.
+PID 87836, inode 69910980 and process command matched before/after; a later
+bounded Ping lists only bonehound after the disposable attachment retired.
+Bonehound remains idle with no active turn or permissions. No user prompt,
+credential change or Paseo daemon restart was performed.
+
+Triton is deliberately pending. The immediate pre-updater check at
+`2026-11-09T02:07:10Z` found six new critics in addition to whale, four running.
+No updater, backup or reload ran there. Owner 80eff5db was notified and is
+holding new critic dispatches while current work finishes. Deployment waits
+for actual idle/activeTurn/permission checks on every attached agent, then
+requires per-native history preservation through supported reloads. The
+original 1005 deployment incident and validation-label corrections remain
+preserved in the linked historical record; this rollout makes no fleet-wide
+completion claim while Triton remains on 1005.
