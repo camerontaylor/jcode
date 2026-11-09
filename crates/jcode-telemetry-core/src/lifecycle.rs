@@ -87,7 +87,7 @@ pub(super) fn prepare_lifecycle_event(
     } else {
         DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT)
     };
-    let state = {
+    let mut state = {
         let mut guard = match SESSION_STATE.lock() {
             Ok(guard) => guard,
             Err(_) => return None,
@@ -101,6 +101,8 @@ pub(super) fn prepare_lifecycle_event(
             guard.as_ref()?.clone()
         }
     };
+    state.time_to_first_agent_action_ms = time_to_first_agent_action_ms(&state);
+    state.time_to_first_useful_action_ms = time_to_first_useful_action_ms(&state);
     let snapshot = LifecycleSnapshot {
         duration: ended_at.duration_since(state.started_at),
         ended_at_utc: Utc::now(),
@@ -203,8 +205,8 @@ fn emit_lifecycle_snapshot(
         workflow_coding_used,
     );
     let agent_role = infer_agent_role(&state);
-    let time_to_first_agent_action_ms = time_to_first_agent_action_ms(&state);
-    let time_to_first_useful_action_ms = time_to_first_useful_action_ms(&state);
+    let time_to_first_agent_action_ms = state.time_to_first_agent_action_ms;
+    let time_to_first_useful_action_ms = state.time_to_first_useful_action_ms;
     let todo_event = todo_session_event(
         &state,
         reason,
