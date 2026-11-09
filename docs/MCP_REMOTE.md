@@ -140,7 +140,7 @@ a prompt-cache miss. Warm cached schemas avoid that rebuild when unchanged.
   replay and discovered 39 tools from the real Expo HTTPS MCP service. Five
   safety fixes were removed in an isolated negative control, causing the
   expected regression assertions to fail. Restoring them passed the same checks.
-  See [acceptance evidence](https://github.com/camerontaylor/toolkit-research/blob/main/projects/jcode/research/MCP_REMOTE_ACCEPTANCE.md) for all 18 requirement observations, run
+  See `docs/MCP_REMOTE_ACCEPTANCE.md` for all 18 requirement observations, run
   IDs, binary identity, measurements, reproduction commands and explicit limits.
 
 ## Lifecycle and safety
