@@ -241,7 +241,9 @@ Each commit is pushed to `fork/acp-elicitation` as it lands.
 - Acceptance 6: the no-capability e2e test and adapter unit tests cover response
   routing, lenient replies with metadata and future actions, unknown/late IDs,
   and JSON-RPC errors. Form emission waits for its tool's flushed progress
-  notification without blocking the read loop.
+  notification without blocking the read loop, with a two-second fallback if
+  that update never arrives (`form_proceeds_after_fallback_without_tool_progress`,
+  using paused Tokio time).
 - The named clause-index test and ten legacy corpus/index tests pass. Compiler,
   registry, broker and existing Desktop capability regression tests pass.
   Library clippy, fork formatting, and all four ratchets pass without budget
@@ -275,6 +277,6 @@ Each commit is pushed to `fork/acp-elicitation` as it lands.
 - Multiple buttons can share an action name with different arguments. The
   synthesized selector uses stable button indices and avoids bound field names
   by prefixing underscores, so no bound state is overwritten or stripped.
-- Form requests wait for the originating tool's flushed in-progress update;
-  this fixes observed fixture ordering drift while preserving catch-up for
-  observers that do not receive that lifecycle update.
+- Form requests wait up to two seconds for the originating tool's flushed
+  in-progress update, then proceed even if that update is missing. This makes
+  ordering best-effort while preserving liveness and observer catch-up.

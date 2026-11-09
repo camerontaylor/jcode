@@ -20,8 +20,8 @@ struct Pending {
 type ClientReply = oneshot::Receiver<std::result::Result<Value, Value>>;
 
 impl ClientRequests {
-    /// Record only flushed tool lifecycle updates, so forms cannot overtake
-    /// the tool call they belong to on this connection's stdout.
+    /// Record flushed tool lifecycle updates to order forms after their tool calls
+    /// when those updates are available on this connection's stdout.
     pub(super) fn observe_output(&self, value: &Value) {
         if value.get("method").and_then(Value::as_str) != Some("session/update") {
             return;
@@ -47,6 +47,9 @@ impl ClientRequests {
         self.progress_changed.notify_waiters();
     }
     async fn tool_started(&self, session: &str, tool: &str) {
+        // Ordering is best-effort: a missing lifecycle update must not hide the form.
+        let fallback = tokio::time::sleep(std::time::Duration::from_secs(2));
+        tokio::pin!(fallback);
         loop {
             let changed = self.progress_changed.notified();
             tokio::pin!(changed);
@@ -59,7 +62,10 @@ impl ClientRequests {
             {
                 return;
             }
-            changed.await;
+            tokio::select! {
+                _ = changed => {}
+                _ = &mut fallback => return,
+            }
         }
     }
     pub(super) fn contains(&self, session: &str, elicitation: &str) -> bool {
@@ -250,6 +256,20 @@ mod tests {
         requests.observe_output(&json!({"method":"session/update","params":{"sessionId":"s","update":{"toolCallId":"tool","status":"completed"}}}));
         assert!(requests.progress.lock().unwrap().is_empty());
     }
+    #[tokio::test(start_paused = true)]
+    async fn form_proceeds_after_fallback_without_tool_progress() {
+        let requests = ClientRequests::default();
+        let form = tokio::spawn(async move {
+            requests.tool_started("s", "tool").await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(1999)).await;
+        assert!(!form.is_finished());
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(form.is_finished());
+        form.await.unwrap();
+    }
     #[test]
     fn form_reply_ignores_metadata_and_future_actions_cancel() {
         use crate::protocol::elicitation::ElicitationResponse;
@@ -323,7 +343,10 @@ impl AcpRuntime {
                             break;
                         }
                         if own_prompt && let Some(tool) = &request.tool_call_id {
-                            tokio::select! { _=acp.client_requests.tool_started(&request.session_id,tool)=>{}, _=&mut reply=>break }
+                            tokio::select! {
+                                _ = acp.client_requests.tool_started(&request.session_id, tool) => {}
+                                _ = &mut reply => break,
+                            }
                         }
                         if !token.load(Ordering::SeqCst) {
                             break;

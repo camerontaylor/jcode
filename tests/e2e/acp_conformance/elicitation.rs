@@ -179,10 +179,11 @@ async fn acp_conformance_elicitation_requires_capability_and_opt_in() -> Result<
             let prompt=client.send_request("session/prompt",json!({"sessionId":session,"prompt":[{"type":"text","text":"Try unavailable form"}]})).await?;
             let response=client.wait_for_response(prompt).await?;
             assert!(response["result"].is_object() || response["error"].is_object());
-            let calls=provider.captured_tool_names.lock().unwrap();
-            assert!(!calls.is_empty());
-            assert!(calls.iter().all(|tools|!tools.iter().any(|tool|tool=="applet")));
-            drop(calls);
+            {
+                let calls=provider.captured_tool_names.lock().unwrap();
+                assert!(!calls.is_empty());
+                assert!(calls.iter().all(|tools|!tools.iter().any(|tool|tool=="applet")));
+            }
             assert!(!client.tape.iter().any(|line|line["msg"]["method"]=="elicitation/create"));
             client.shutdown().await;Ok::<(),anyhow::Error>(())
         }.await;
