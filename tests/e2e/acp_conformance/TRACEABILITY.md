@@ -77,6 +77,10 @@ behavior of the clause, not a browser/client UI promise.
 | C-CONTENT-P02 | acp_conformance_maps_reasoning_tool_calls_and_plan; unit: prompt_from_params_accepts_text_images_and_resources, event_mapper_reports_no_diff_for_a_failed_edit; diagnostics: initialize_advertises_jcode_capability_meta_in_every_profile; client rendering is consumer-side |
 | C-CONTENT-P03 | acp_conformance_maps_reasoning_tool_calls_and_plan; unit: prompt_from_params_accepts_text_images_and_resources, event_mapper_reports_no_diff_for_a_failed_edit; diagnostics: initialize_advertises_jcode_capability_meta_in_every_profile; client rendering is consumer-side |
 | C-CONTENT-P04 | acp_conformance_maps_reasoning_tool_calls_and_plan; unit: prompt_from_params_accepts_text_images_and_resources, event_mapper_reports_no_diff_for_a_failed_edit; diagnostics: initialize_advertises_jcode_capability_meta_in_every_profile; client rendering is consumer-side |
+| C-ELICIT-P01 | Planned (docs/ACP_ELICITATION_PLAN.md commits 3 and 5); no wire change until implemented |
+| C-ELICIT-P02 | Planned (docs/ACP_ELICITATION_PLAN.md commits 4 and 5); no wire change until implemented |
+| C-ELICIT-P03 | Planned (docs/ACP_ELICITATION_PLAN.md commit 6); no wire change until implemented |
+| C-ELICIT-P04 | Consumer-side form UI; no-change half planned with C-ELICIT-P03 |
 | C-ERRORS-P01 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
 | C-ERRORS-P02 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
 | C-ERRORS-P03 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |

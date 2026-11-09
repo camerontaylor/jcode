@@ -603,12 +603,47 @@ only; do not base shared control, billing/usage totals or core UI state on it.
 Unknown event types are ignored. Supporting every stable ACP capability does
 not require exposing every daemon-internal event as a product feature.
 
+## Structured elicitation
+
+<!-- [C-ELICIT-P01] -->
+Form-mode elicitation follows the stable ACP v1 elicitation protocol, with
+no jcode extension to its wire shape. The adapter sends `elicitation/create`
+with `mode: "form"` only to a connection whose `initialize` advertised a
+non-null `clientCapabilities.elicitation.form`. Requests are session-scoped
+and carry `toolCallId` when a tool call asked. URL mode and
+`elicitation/complete` remain phase 6. Implementation plan:
+[ACP_ELICITATION_PLAN.md](ACP_ELICITATION_PLAN.md).
+
+<!-- [C-ELICIT-P02] -->
+A shared session may have several capable connections. Each receives the
+request; the first schema-valid reply wins. The adapter withdraws its request
+from every other connection with `$/cancel_request` and ignores late replies.
+A schema-invalid accept is rejected and the request stays answerable. A
+JSON-RPC error reply counts as `cancel`. Cancelling the turn that asked
+withdraws its pending requests.
+
+<!-- [C-ELICIT-P03] -->
+The `applet` tool is the first user, and only on explicit opt-in: the
+connection's tool selection must name `applet` (not `*`/`all` or the `full`
+profile), and the client must advertise form support. The effective value is
+reported as a boolean at `result._meta.jcode.appletElicitation` on
+new/load/resume. When enabled, a blocking `applet` call is presented as a form
+whose fields are the applet's bound controls. The agent sees the same action
+text whichever client answers.
+
+<!-- [C-ELICIT-P04] -->
+Consumers must offer accept, decline and cancel, and let the user review the
+form before submitting. Form mode never requests secrets; jcode does not
+compile credential prompts into forms. A consumer that does not advertise
+form support sees no change in the tool surface or the wire.
+
 ## Unsupported features and error behavior
 
 <!-- [C-ERRORS-P01] -->
 Before phase 6, do not advertise new auth flows, client filesystem/terminal
-execution, elicitation, per-tool cancellation, session deletion/fork/archive,
-or provider-management APIs. Existing `/subagent` is retained without adding
+execution, URL-mode elicitation, per-tool cancellation, session
+deletion/fork/archive, or provider-management APIs. Form-mode elicitation is
+brought forward; see [Structured elicitation](#structured-elicitation). Existing `/subagent` is retained without adding
 the experimental structured subagent protocol. Reasoning, plans and metadata
 mapping do not imply a new permission system.
 
