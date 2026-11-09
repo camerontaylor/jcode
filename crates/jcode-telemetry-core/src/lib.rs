@@ -2731,17 +2731,9 @@ pub fn record_tool_execution(name: &str, input: &Value, succeeded: bool, latency
     maybe_emit_session_start();
 }
 
-pub fn end_session(provider_end: &str, model_end: &str) {
-    end_session_with_reason(provider_end, model_end, SessionEndReason::NormalExit);
-}
-
-pub fn end_session_with_reason(provider_end: &str, model_end: &str, reason: SessionEndReason) {
-    emit_lifecycle_event("session_end", provider_end, model_end, reason, true);
-}
-
-pub fn record_crash(provider_end: &str, model_end: &str, reason: SessionEndReason) {
-    emit_lifecycle_event("session_crash", provider_end, model_end, reason, true);
-}
+pub use lifecycle::{
+    DeferredLifecycleEvent, end_session, end_session_with_reason, prepare_session_end, record_crash,
+};
 
 pub fn current_provider_model() -> Option<(String, String)> {
     SESSION_STATE.lock().ok().and_then(|guard| {
@@ -2773,3 +2765,6 @@ fn show_first_run_notice() {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod deferred_terminal_tests;

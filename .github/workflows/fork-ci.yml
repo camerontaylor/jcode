@@ -246,6 +246,12 @@ jobs:
             "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu \
             -p jcode-app-core --lib retention_readiness -- --nocapture
 
+      - name: Run disconnect telemetry responsiveness regressions
+        shell: bash
+        run: |
+          cargo test --locked --target x86_64-unknown-linux-gnu -p jcode-app-core --lib blocked_terminal_reporting_does_not_block_presence_or_retirement
+          cargo test --locked --target x86_64-unknown-linux-gnu -p jcode-telemetry-core --lib deferred_terminal_report_keeps_original_snapshot_and_clears_once
+
       - name: Run secret-input pty cohort (all platforms with a pty)
         shell: bash
         # `jcode-base --lib` is never executed on Linux CI: the only jcode-base

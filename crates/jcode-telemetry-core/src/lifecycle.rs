@@ -1,5 +1,48 @@
 use super::*;
 
+pub fn end_session(provider_end: &str, model_end: &str) {
+    end_session_with_reason(provider_end, model_end, SessionEndReason::NormalExit);
+}
+
+/// Owned terminal telemetry: the process session slot has already been captured.
+/// Emitting may scan the filesystem and must run outside async registry locks.
+pub struct DeferredLifecycleEvent(Box<dyn FnOnce() + Send>);
+
+impl DeferredLifecycleEvent {
+    pub fn emit(self) {
+        (self.0)();
+    }
+}
+
+pub fn prepare_session_end(
+    provider: &str,
+    model: &str,
+    reason: SessionEndReason,
+    crashed: bool,
+    background: bool,
+) -> Option<DeferredLifecycleEvent> {
+    prepare_lifecycle_event(
+        if crashed {
+            "session_crash"
+        } else {
+            "session_end"
+        },
+        provider,
+        model,
+        reason,
+        true,
+        background,
+    )
+}
+
+pub fn end_session_with_reason(provider_end: &str, model_end: &str, reason: SessionEndReason) {
+    emit_lifecycle_event("session_end", provider_end, model_end, reason, true);
+}
+
+pub fn record_crash(provider_end: &str, model_end: &str, reason: SessionEndReason) {
+    emit_lifecycle_event("session_crash", provider_end, model_end, reason, true);
+}
+
 pub(super) fn emit_lifecycle_event(
     event_name: &'static str,
     provider_end: &str,
@@ -7,8 +50,28 @@ pub(super) fn emit_lifecycle_event(
     reason: SessionEndReason,
     clear_state: bool,
 ) {
+    if let Some(report) = prepare_lifecycle_event(
+        event_name,
+        provider_end,
+        model_end,
+        reason,
+        clear_state,
+        false,
+    ) {
+        report.emit();
+    }
+}
+
+pub(super) fn prepare_lifecycle_event(
+    event_name: &'static str,
+    provider_end: &str,
+    model_end: &str,
+    reason: SessionEndReason,
+    clear_state: bool,
+    background: bool,
+) -> Option<DeferredLifecycleEvent> {
     if !is_enabled() {
-        return;
+        return None;
     }
     // Superseding a session does not exit the process. In particular, a new
     // desktop panel constructs an Agent here while other sessions are active.
@@ -16,19 +79,19 @@ pub(super) fn emit_lifecycle_event(
     // timeouts to that panel's creation, including one under SESSION_STATE.
     // Keep the same ordered payloads on the worker, and reserve bounded flushes
     // for lifecycle events where the process may actually be about to exit.
-    let delivery = if matches!(reason, SessionEndReason::Superseded) {
+    let delivery = if background || matches!(reason, SessionEndReason::Superseded) {
         DeliveryMode::Background
     } else {
         DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT)
     };
     let id = match get_or_create_id() {
         Some(id) => id,
-        None => return,
+        None => return None,
     };
     let state = {
         let mut guard = match SESSION_STATE.lock() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(_) => return None,
         };
         let now = Instant::now();
         if let Some(active) = guard.as_mut() {
@@ -149,13 +212,53 @@ pub(super) fn emit_lifecycle_event(
                 model_switches: s.model_switches,
                 todo: s.todo.clone(),
             },
-            None => return,
+            None => return None,
         };
         if clear_state {
             *guard = None;
         }
         state
     };
+    let snapshot = LifecycleSnapshot {
+        duration: state.started_at.elapsed(),
+        ended_at_utc: Utc::now(),
+        state,
+    };
+    let provider_end = provider_end.to_owned();
+    let model_end = model_end.to_owned();
+    Some(DeferredLifecycleEvent(Box::new(move || {
+        emit_lifecycle_snapshot(
+            event_name,
+            &provider_end,
+            &model_end,
+            reason,
+            delivery,
+            id,
+            snapshot,
+        );
+    })))
+}
+
+struct LifecycleSnapshot {
+    state: SessionTelemetry,
+    duration: Duration,
+    ended_at_utc: chrono::DateTime<Utc>,
+}
+
+fn emit_lifecycle_snapshot(
+    event_name: &'static str,
+    provider_end: &str,
+    model_end: &str,
+    reason: SessionEndReason,
+    delivery: DeliveryMode,
+    id: String,
+    snapshot: LifecycleSnapshot,
+) {
+    let LifecycleSnapshot {
+        state,
+        duration,
+        ended_at_utc,
+    } = snapshot;
     let errors = current_error_counts(&state);
     if !session_has_meaningful_activity(&state, &errors) {
         return;
@@ -163,7 +266,6 @@ pub(super) fn emit_lifecycle_event(
     if !state.start_event_sent {
         let _ = emit_session_start_for_state(id.clone(), &state, delivery);
     }
-    let duration = state.started_at.elapsed();
     let session_success = state.had_assistant_response
         || state.executed_tool_successes > 0
         || state.tests_passed > 0
@@ -187,7 +289,6 @@ pub(super) fn emit_lifecycle_event(
     let project_profile = detect_project_profile();
     let (active_days_7d, active_days_30d) = update_active_days(&id);
     let days_since_install = days_since_install(&id);
-    let ended_at_utc = Utc::now();
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let session_stop_reason = infer_session_stop_reason(
         event_name,

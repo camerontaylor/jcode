@@ -492,3 +492,65 @@ async fn busy_without_successor_aborts_owner_and_marks_crashed() {
         SessionStatus::Crashed { .. }
     ));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocked_terminal_reporting_does_not_block_presence_or_retirement() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    let fixture = Arc::new(Fixture::new(true).await);
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = calls.clone();
+    let running = fixture.clone();
+    let cleanup = tokio::spawn(REPORTING_GATE.scope(
+        std::cell::RefCell::new(Some(Box::new(move || {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = started.send(());
+            let _ = gate.recv_timeout(Duration::from_secs(5));
+        }) as Box<dyn FnOnce() + Send>)),
+        async move {
+            running.cleanup(false, Duration::ZERO).await;
+        },
+    ));
+    ready
+        .await
+        .expect("reporting worker reached the filesystem gate");
+    // This is the actual Ping projection, not merely a lock try_read.
+    let pong = timeout(
+        Duration::from_secs(1),
+        super::super::session_connections::connection_presence_pong(
+            93,
+            &fixture.connections,
+            &fixture.members,
+        ),
+    )
+    .await;
+    let other_client = timeout(Duration::from_secs(1), async {
+        fixture
+            .connections
+            .write()
+            .await
+            .insert("other".into(), connection("other", "other-session"));
+    })
+    .await;
+    // Release before assertions so failed regressions never leave a blocked worker.
+    release.send(()).unwrap();
+    cleanup.await.unwrap();
+    assert!(matches!(
+        pong.expect("Ping remains responsive during telemetry"),
+        ServerEvent::Pong { .. }
+    ));
+    other_client.expect("unrelated attachment remains responsive");
+    assert!(!fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(!fixture.members.read().await.contains_key(&fixture.id));
+    assert_eq!(
+        fixture.agent.lock().await.session_for_split().status,
+        SessionStatus::Closed
+    );
+    assert_eq!(
+        Session::load(&fixture.id).unwrap().status,
+        SessionStatus::Closed
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

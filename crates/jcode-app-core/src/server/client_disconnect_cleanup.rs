@@ -226,6 +226,7 @@ pub(super) async fn cleanup_client_connection(
     // Keep it through destructive cleanup so a successor cannot be claimed
     // between the check and session/status/control-handle removal.
     let connections = client_connections.write().await;
+    let mut terminal_report = None;
     let successor_connected = connections
         .values()
         .any(|info| info.session_id == client_session_id);
@@ -277,21 +278,20 @@ pub(super) async fn cleanup_client_connection(
                     if let Some(mut concurrency) = agent.take_concurrency_session() {
                         tokio::task::spawn_blocking(move || concurrency.finish());
                     }
-                    match disposition {
-                        DisconnectDisposition::Closed => {
-                            agent.mark_closed();
-                        }
-                        DisconnectDisposition::Reloading => {
-                            agent.mark_crashed(Some(
-                                "Server reload interrupted processing".to_string(),
-                            ));
-                        }
-                        DisconnectDisposition::Crashed => {
-                            agent.mark_crashed(Some(
-                                "Client disconnected while processing".to_string(),
-                            ));
-                        }
-                    }
+                    terminal_report = match disposition {
+                        DisconnectDisposition::Closed => agent.prepare_closed_reporting(
+                            crate::telemetry::SessionEndReason::NormalExit,
+                            true,
+                        ),
+                        DisconnectDisposition::Reloading => agent.prepare_crashed_reporting(
+                            Some("Server reload interrupted processing".to_string()),
+                            true,
+                        ),
+                        DisconnectDisposition::Crashed => agent.prepare_crashed_reporting(
+                            Some("Client disconnected while processing".to_string()),
+                            true,
+                        ),
+                    };
 
                     let memory_enabled = agent.memory_enabled();
                     let transcript = if memory_enabled {
@@ -417,8 +417,41 @@ pub(super) async fn cleanup_client_connection(
     remove_session_interrupt_queue(soft_interrupt_queues, client_session_id).await;
 
     drop(connections);
+    dispatch_terminal_reporting(terminal_report);
     event_handle.abort();
     Ok(None)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static REPORTING_GATE: std::cell::RefCell<Option<Box<dyn FnOnce() + Send>>>;
+}
+
+fn dispatch_terminal_reporting(report: Option<crate::telemetry::DeferredLifecycleEvent>) {
+    #[cfg(test)]
+    let gate = REPORTING_GATE
+        .try_with(|slot| slot.borrow_mut().take())
+        .ok()
+        .flatten();
+    if report.is_none() {
+        #[cfg(not(test))]
+        return;
+        #[cfg(test)]
+        if gate.is_none() {
+            return;
+        }
+    }
+    // Reporting owns the already captured session. Never await filesystem
+    // profiling or HTTP delivery while holding presence or an async worker.
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some(gate) = gate {
+            gate();
+        }
+        if let Some(report) = report {
+            report.emit();
+        }
+    });
 }
 
 #[cfg(test)]

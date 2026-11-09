@@ -15,7 +15,7 @@ pub(super) static TEST_DELIVERY_MODES: Mutex<Vec<DeliveryMode>> = Mutex::new(Vec
 // as `None`; the session test's `expect(...)` panicked while holding the
 // `SESSION_STATE` lock and poisoned it, cascading into `PoisonError` failures
 // in every other session test.
-struct TestEnvironment {
+pub(super) struct TestEnvironment {
     _home: tempfile::TempDir,
     previous_home: Option<OsString>,
     previous_no_telemetry: Option<OsString>,
@@ -150,7 +150,7 @@ fn lock_test_env() -> TestEnvironment {
     global_test_lock()
 }
 
-fn lock_telemetry_test_state() -> TestEnvironment {
+pub(super) fn lock_telemetry_test_state() -> TestEnvironment {
     global_test_lock()
 }
 
