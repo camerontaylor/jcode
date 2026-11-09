@@ -87,6 +87,7 @@ pub const SERVER_CAPABILITY_TURN_ORIGIN: &str = "turn_origin";
 /// `Pong::capabilities`. Clients gate on presence, not on a version.
 pub const SERVER_CAPABILITIES: &[&str] = &[
     "session_tools",
+    "elicitation_form",
     "soft_interrupt_ids",
     "detach_preserve_work",
     "runtime_commands",

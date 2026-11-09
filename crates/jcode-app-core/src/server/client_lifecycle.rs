@@ -396,6 +396,8 @@ pub(super) async fn handle_client(
     let mut model_usage_updates_enabled = false;
     let mut supports_pdf_panels = false;
     let mut supports_user_response = false;
+    let mut supports_elicitation_form = false;
+    let mut applet_elicitation = false;
     let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
@@ -1581,8 +1583,8 @@ pub(super) async fn handle_client(
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
-                supports_elicitation_form: _,
-                applet_elicitation: _,
+                supports_elicitation_form: requested_elicitation_form,
+                applet_elicitation: requested_applet_elicitation,
                 supports_server_failover: requested_server_failover,
                 supports_turn_identity: _,
                 working_dir: subscribe_working_dir,
@@ -1624,6 +1626,8 @@ pub(super) async fn handle_client(
                 continue_on_disconnect = requested_continuation;
                 supports_pdf_panels = requested_pdf_panels;
                 supports_user_response = requested_user_response;
+                supports_elicitation_form = requested_elicitation_form;
+                applet_elicitation = requested_applet_elicitation;
                 supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
@@ -1803,6 +1807,8 @@ pub(super) async fn handle_client(
                     // front of the client's GetHistory, delaying first paint.
                     last_available_models_snapshot = None;
                 }
+                crate::elicitation::global().attach(&client_connection_id, &client_session_id,
+                    supports_elicitation_form, applet_elicitation, supports_user_response, client_event_tx.clone());
                 super::client_session::apply_or_defer_desktop_response_capability(
                     &agent,
                     supports_user_response,
@@ -1972,6 +1978,8 @@ pub(super) async fn handle_client(
                 if client_session_id != pre_resume_session_id {
                     provisional_session = false;
                 }
+                crate::elicitation::global().attach(&client_connection_id, &client_session_id,
+                    supports_elicitation_form, applet_elicitation, supports_user_response, client_event_tx.clone());
                 super::client_session::apply_or_defer_desktop_response_capability(
                     &agent,
                     supports_user_response,
@@ -2541,10 +2549,12 @@ pub(super) async fn handle_client(
                 .await;
             }
 
-            Request::ElicitationResponse { id, .. } => {
-                if let Err(error) = client_event_tx.send(ServerEvent::Error {
-                    id, message: "Form elicitation is not available".into(), retry_after_secs: None,
-                }) { crate::logging::debug(&format!("elicitation response delivery failed: {error}")); }
+            Request::ElicitationResponse { id, session_id, elicitation_id, response } => {
+                let event = match crate::elicitation::global().respond(&client_connection_id, &session_id, &elicitation_id, response) {
+                    Ok(()) => ServerEvent::Done {id},
+                    Err(message) => ServerEvent::Error {id, message, retry_after_secs:None},
+                };
+                if let Err(error) = client_event_tx.send(event) { crate::logging::debug(&format!("elicitation reply failed: {error}")); }
             }
             Request::AppletAction {
                 id,
