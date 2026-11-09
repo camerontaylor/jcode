@@ -1,5 +1,13 @@
 use super::Agent;
 
+pub(crate) struct TerminalReport(Box<dyn FnOnce() + Send>);
+
+impl TerminalReport {
+    pub(crate) fn emit(self) {
+        (self.0)();
+    }
+}
+
 impl Agent {
     /// Mark this agent session as closed and persist it.
     pub fn mark_closed(&mut self) {
@@ -40,29 +48,14 @@ impl Agent {
         &mut self,
         end_reason: crate::telemetry::SessionEndReason,
         background: bool,
-    ) -> Option<crate::telemetry::DeferredLifecycleEvent> {
+    ) -> Option<TerminalReport> {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
         if !self.session.messages.is_empty() {
             self.persist_session_best_effort("session close state");
         }
-        self.upload_transcript_telemetry(end_reason);
-        // A deferred (never begun) session has nothing to end. Ending anyway
-        // would close whichever session currently owns the process slot.
-        let report = (!self.telemetry_session_deferred)
-            .then(|| {
-                crate::telemetry::prepare_session_end(
-                    self.provider.name(),
-                    &self.provider.model(),
-                    end_reason,
-                    false,
-                    background,
-                )
-            })
-            .flatten();
-        self.fire_session_lifecycle_hook("session_end", "close");
-        report
+        Some(self.prepare_terminal_report(end_reason, false, background))
     }
 
     /// Fire a session lifecycle observer hook (`session_start`/`session_end`).
@@ -91,20 +84,76 @@ impl Agent {
         &mut self,
         message: Option<String>,
         background: bool,
-    ) -> Option<crate::telemetry::DeferredLifecycleEvent> {
+    ) -> Option<TerminalReport> {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_crashed(message);
         if !self.session.messages.is_empty() {
             self.persist_session_best_effort("session crash state");
         }
-        self.upload_transcript_telemetry(crate::telemetry::SessionEndReason::Unknown);
-        crate::telemetry::prepare_session_end(
-            self.provider.name(),
-            &self.provider.model(),
+        Some(self.prepare_terminal_report(
             crate::telemetry::SessionEndReason::Unknown,
             true,
             background,
-        )
+        ))
+    }
+
+    fn prepare_terminal_report(
+        &mut self,
+        reason: crate::telemetry::SessionEndReason,
+        crashed: bool,
+        background: bool,
+    ) -> TerminalReport {
+        let transcript = if background {
+            if self.transcript_telemetry_sent || self.session.messages.is_empty() {
+                None
+            } else {
+                // This retiring Agent schedules its transcript at most once.
+                // Consent, installation-ID I/O and submission run on the worker.
+                self.transcript_telemetry_sent = true;
+                Some(self.session.redacted_for_export())
+            }
+        } else {
+            self.upload_transcript_telemetry(reason);
+            None
+        };
+        let provider = self.provider.name().to_owned();
+        let model = self.provider.model();
+        let lifecycle = if crashed || !self.telemetry_session_deferred {
+            crate::telemetry::prepare_session_end(&provider, &model, reason, crashed, background)
+        } else {
+            None
+        };
+        let observer = (!crashed).then(|| {
+            let event = crate::hooks::HookEvent::new("session_end")
+                .session_id(self.session.id.clone())
+                .field("SOURCE", "close")
+                .field("MODEL", self.provider_model());
+            if let Some(cwd) = self.working_dir() {
+                event.cwd(cwd)
+            } else {
+                event
+            }
+        });
+        TerminalReport(Box::new(move || {
+            if let Some(session) = transcript {
+                match serde_json::to_value(&session.messages) {
+                    Ok(messages) => {
+                        crate::telemetry::record_transcript(&provider, &model, reason, messages);
+                    }
+                    Err(error) => crate::logging::warn(&format!(
+                        "failed to serialize consented transcript telemetry: {error}"
+                    )),
+                }
+            }
+            if let Some(report) = lifecycle {
+                report.emit();
+            }
+            if let Some(event) = observer
+                && crate::hooks::hook_configured("session_end")
+            {
+                crate::hooks::dispatch_observer(event);
+            }
+        }))
     }
 }

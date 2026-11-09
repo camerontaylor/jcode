@@ -1,4 +1,16 @@
-use super::{tests::lock_telemetry_test_state, *};
+use super::{
+    tests::{TEST_DELIVERY_MODES, lock_telemetry_test_state},
+    *,
+};
+
+static ID_LOOKUP_GATE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
+pub(super) fn before_id_lookup() {
+    let gate = ID_LOOKUP_GATE.lock().unwrap().take();
+    if let Some(gate) = gate {
+        gate();
+    }
+}
 
 #[test]
 fn deferred_terminal_report_keeps_original_snapshot_and_clears_once() {
@@ -13,14 +25,32 @@ fn deferred_terminal_report_keeps_original_snapshot_and_clears_once() {
         .unwrap()
         .session_id
         .clone();
-    let report = prepare_session_end(
-        "old-provider",
-        "old-model",
-        SessionEndReason::NormalExit,
-        false,
-        true,
-    )
-    .unwrap();
+    let (prepared, ready) = std::sync::mpsc::channel();
+    let (entered, blocked) = std::sync::mpsc::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    *ID_LOOKUP_GATE.lock().unwrap() = Some(Box::new(move || {
+        entered.send(()).unwrap();
+        let _ = gate.recv_timeout(Duration::from_secs(5));
+    }));
+    let worker = std::thread::spawn(move || {
+        let report = prepare_session_end(
+            "old-provider",
+            "old-model",
+            SessionEndReason::NormalExit,
+            false,
+            true,
+        )
+        .unwrap();
+        prepared.send(()).unwrap();
+        report.emit();
+    });
+    let preparation = ready.recv_timeout(Duration::from_secs(1));
+    blocked.recv_timeout(Duration::from_secs(1)).unwrap();
+    if preparation.is_err() {
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        panic!("installation-ID filesystem lookup must not run during capture");
+    }
     assert!(SESSION_STATE.lock().unwrap().is_none());
     assert!(
         prepare_session_end(
@@ -42,7 +72,8 @@ fn deferred_terminal_report_keeps_original_snapshot_and_clears_once() {
         .clone();
     TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
     TEST_DELIVERY_MODES.lock().unwrap().clear();
-    std::thread::spawn(move || report.emit()).join().unwrap();
+    release.send(()).unwrap();
+    worker.join().unwrap();
     let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap();
     let terminal: Vec<_> = payloads
         .iter()

@@ -161,6 +161,8 @@ pub(super) fn update_session_start_history(
 }
 
 pub(super) fn get_or_create_id() -> Option<String> {
+    #[cfg(test)]
+    super::deferred_terminal_tests::before_id_lookup();
     let path = telemetry_id_path()?;
     if let Some(id) = read_existing_id() {
         return Some(id);

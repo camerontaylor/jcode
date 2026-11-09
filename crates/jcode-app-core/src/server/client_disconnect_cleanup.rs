@@ -422,17 +422,12 @@ pub(super) async fn cleanup_client_connection(
     Ok(None)
 }
 
-fn dispatch_terminal_reporting(report: Option<crate::telemetry::DeferredLifecycleEvent>) {
+fn dispatch_terminal_reporting(report: Option<crate::agent::terminal_reporting::TerminalReport>) {
     #[cfg(test)]
     let gate = grace_tests::take_reporting_gate();
-    if report.is_none() {
-        #[cfg(not(test))]
+    let Some(report) = report else {
         return;
-        #[cfg(test)]
-        if gate.is_none() {
-            return;
-        }
-    }
+    };
     // Reporting owns the already captured session. Never await filesystem
     // profiling or HTTP delivery while holding presence or an async worker.
     tokio::task::spawn_blocking(move || {
@@ -440,9 +435,7 @@ fn dispatch_terminal_reporting(report: Option<crate::telemetry::DeferredLifecycl
         if let Some(gate) = gate {
             gate();
         }
-        if let Some(report) = report {
-            report.emit();
-        }
+        report.emit();
     });
 }
 
