@@ -1,5 +1,48 @@
 use super::*;
 
+pub fn end_session(provider_end: &str, model_end: &str) {
+    end_session_with_reason(provider_end, model_end, SessionEndReason::NormalExit);
+}
+
+/// Owned terminal telemetry: the process session slot has already been captured.
+/// Emitting may scan the filesystem and must run outside async registry locks.
+pub struct DeferredLifecycleEvent(Box<dyn FnOnce() + Send>);
+
+impl DeferredLifecycleEvent {
+    pub fn emit(self) {
+        (self.0)();
+    }
+}
+
+pub fn prepare_session_end(
+    provider: &str,
+    model: &str,
+    reason: SessionEndReason,
+    crashed: bool,
+    background: bool,
+) -> Option<DeferredLifecycleEvent> {
+    prepare_lifecycle_event(
+        if crashed {
+            "session_crash"
+        } else {
+            "session_end"
+        },
+        provider,
+        model,
+        reason,
+        true,
+        background,
+    )
+}
+
+pub fn end_session_with_reason(provider_end: &str, model_end: &str, reason: SessionEndReason) {
+    emit_lifecycle_event("session_end", provider_end, model_end, reason, true);
+}
+
+pub fn record_crash(provider_end: &str, model_end: &str, reason: SessionEndReason) {
+    emit_lifecycle_event("session_crash", provider_end, model_end, reason, true);
+}
+
 pub(super) fn emit_lifecycle_event(
     event_name: &'static str,
     provider_end: &str,
@@ -7,155 +50,119 @@ pub(super) fn emit_lifecycle_event(
     reason: SessionEndReason,
     clear_state: bool,
 ) {
-    if !is_enabled() {
-        return;
+    if let Some(report) = prepare_lifecycle_event(
+        event_name,
+        provider_end,
+        model_end,
+        reason,
+        clear_state,
+        false,
+    ) {
+        report.emit();
     }
-    // Superseding a session does not exit the process. In particular, a new
-    // desktop panel constructs an Agent here while other sessions are active.
-    // Waiting for turn_end/session_end/todo delivery added up to three HTTP
-    // timeouts to that panel's creation, including one under SESSION_STATE.
-    // Keep the same ordered payloads on the worker, and reserve bounded flushes
-    // for lifecycle events where the process may actually be about to exit.
-    let delivery = if matches!(reason, SessionEndReason::Superseded) {
+}
+
+pub(super) fn prepare_lifecycle_event(
+    event_name: &'static str,
+    provider_end: &str,
+    model_end: &str,
+    reason: SessionEndReason,
+    clear_state: bool,
+    background: bool,
+) -> Option<DeferredLifecycleEvent> {
+    // Deferred reporting consumes the ended slot even when telemetry is
+    // disabled or its installation ID later becomes unavailable. Retaining a
+    // dead slot would let a later report close a successor's session instead.
+    let id = if background {
+        None
+    } else {
+        if !is_enabled() {
+            return None;
+        }
+        Some(get_or_create_id()?)
+    };
+    let ended_at = Instant::now();
+    let delivery = if background || matches!(reason, SessionEndReason::Superseded) {
         DeliveryMode::Background
     } else {
         DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT)
     };
-    let id = match get_or_create_id() {
-        Some(id) => id,
-        None => return,
-    };
-    let state = {
+    let mut state = {
         let mut guard = match SESSION_STATE.lock() {
-            Ok(g) => g,
-            Err(_) => return,
+            Ok(guard) => guard,
+            Err(_) => return None,
         };
-        let now = Instant::now();
-        if let Some(active) = guard.as_mut() {
-            // Shutdown is the last chance to persist a single-prompt turn.
-            // Session replacement, unlike shutdown, can use the background queue.
-            finalize_current_turn(&id, active, now, reason.as_str(), delivery);
+        if let (Some(id), Some(active)) = (id.as_deref(), guard.as_mut()) {
+            finalize_current_turn(id, active, ended_at, reason.as_str(), delivery);
         }
-        let state = match guard.as_ref() {
-            Some(s) => SessionTelemetry {
-                session_id: s.session_id.clone(),
-                correlation_id: s.correlation_id.clone(),
-                started_at: s.started_at,
-                started_at_utc: s.started_at_utc,
-                provider_start: s.provider_start.clone(),
-                model_start: s.model_start.clone(),
-                parent_session_id: s.parent_session_id.clone(),
-                turns: s.turns,
-                had_user_prompt: s.had_user_prompt,
-                had_assistant_response: s.had_assistant_response,
-                assistant_responses: s.assistant_responses,
-                first_assistant_response_ms: s.first_assistant_response_ms,
-                first_tool_call_ms: s.first_tool_call_ms,
-                first_tool_success_ms: s.first_tool_success_ms,
-                first_file_edit_ms: s.first_file_edit_ms,
-                first_test_pass_ms: s.first_test_pass_ms,
-                tool_calls: s.tool_calls,
-                tool_failures: s.tool_failures,
-                executed_tool_calls: s.executed_tool_calls,
-                executed_tool_successes: s.executed_tool_successes,
-                executed_tool_failures: s.executed_tool_failures,
-                tool_latency_total_ms: s.tool_latency_total_ms,
-                tool_latency_max_ms: s.tool_latency_max_ms,
-                file_write_calls: s.file_write_calls,
-                tests_run: s.tests_run,
-                tests_passed: s.tests_passed,
-                input_tokens: s.input_tokens,
-                output_tokens: s.output_tokens,
-                cache_read_input_tokens: s.cache_read_input_tokens,
-                cache_creation_input_tokens: s.cache_creation_input_tokens,
-                total_tokens: s.total_tokens,
-                feature_memory_used: s.feature_memory_used,
-                feature_swarm_used: s.feature_swarm_used,
-                feature_web_used: s.feature_web_used,
-                feature_email_used: s.feature_email_used,
-                feature_mcp_used: s.feature_mcp_used,
-                feature_side_panel_used: s.feature_side_panel_used,
-                feature_goal_used: s.feature_goal_used,
-                feature_selfdev_used: s.feature_selfdev_used,
-                feature_background_used: s.feature_background_used,
-                feature_subagent_used: s.feature_subagent_used,
-                feature_todo_used: s.feature_todo_used,
-                unique_mcp_servers: s.unique_mcp_servers.clone(),
-                transport_https: s.transport_https,
-                transport_persistent_ws_fresh: s.transport_persistent_ws_fresh,
-                transport_persistent_ws_reuse: s.transport_persistent_ws_reuse,
-                transport_cli_subprocess: s.transport_cli_subprocess,
-                transport_native_http2: s.transport_native_http2,
-                transport_other: s.transport_other,
-                agent_active_ms_total: s.agent_active_ms_total,
-                agent_model_ms_total: s.agent_model_ms_total,
-                agent_tool_ms_total: s.agent_tool_ms_total,
-                session_idle_ms_total: s.session_idle_ms_total,
-                agent_blocked_ms_total: s.agent_blocked_ms_total,
-                time_to_first_agent_action_ms: s.time_to_first_agent_action_ms,
-                time_to_first_useful_action_ms: s.time_to_first_useful_action_ms,
-                spawned_agent_count: s.spawned_agent_count,
-                background_task_count: s.background_task_count,
-                background_task_completed_count: s.background_task_completed_count,
-                subagent_task_count: s.subagent_task_count,
-                subagent_success_count: s.subagent_success_count,
-                swarm_task_count: s.swarm_task_count,
-                swarm_success_count: s.swarm_success_count,
-                user_cancelled_count: s.user_cancelled_count,
-                tool_cat_read_search: s.tool_cat_read_search,
-                tool_cat_write: s.tool_cat_write,
-                tool_cat_shell: s.tool_cat_shell,
-                tool_cat_web: s.tool_cat_web,
-                tool_cat_memory: s.tool_cat_memory,
-                tool_cat_subagent: s.tool_cat_subagent,
-                tool_cat_swarm: s.tool_cat_swarm,
-                tool_cat_email: s.tool_cat_email,
-                tool_cat_side_panel: s.tool_cat_side_panel,
-                tool_cat_goal: s.tool_cat_goal,
-                tool_cat_mcp: s.tool_cat_mcp,
-                tool_cat_other: s.tool_cat_other,
-                tool_cat_todo: s.tool_cat_todo,
-                todo_gate_ownership_count: s.todo_gate_ownership_count,
-                todo_gate_feedback_loop_count: s.todo_gate_feedback_loop_count,
-                todo_gate_alignment_count: s.todo_gate_alignment_count,
-                todo_gate_intent_count: s.todo_gate_intent_count,
-                todo_gate_completion_count: s.todo_gate_completion_count,
-                todo_gate_spike_count: s.todo_gate_spike_count,
-                command_login_used: s.command_login_used,
-                command_model_used: s.command_model_used,
-                command_usage_used: s.command_usage_used,
-                command_resume_used: s.command_resume_used,
-                command_memory_used: s.command_memory_used,
-                command_swarm_used: s.command_swarm_used,
-                command_goal_used: s.command_goal_used,
-                command_selfdev_used: s.command_selfdev_used,
-                command_feedback_used: s.command_feedback_used,
-                command_other_used: s.command_other_used,
-                previous_session_gap_secs: s.previous_session_gap_secs,
-                sessions_started_24h: s.sessions_started_24h,
-                sessions_started_7d: s.sessions_started_7d,
-                active_sessions_at_start: s.active_sessions_at_start,
-                other_active_sessions_at_start: s.other_active_sessions_at_start,
-                max_concurrent_sessions: s.max_concurrent_sessions,
-                current_turn: None,
-                resumed_session: s.resumed_session,
-                start_event_sent: s.start_event_sent,
-                error_provider_timeout: s.error_provider_timeout,
-                error_auth_failed: s.error_auth_failed,
-                error_tool_error: s.error_tool_error,
-                error_mcp_error: s.error_mcp_error,
-                error_rate_limited: s.error_rate_limited,
-                provider_switches: s.provider_switches,
-                model_switches: s.model_switches,
-                todo: s.todo.clone(),
-            },
-            None => return,
-        };
         if clear_state {
-            *guard = None;
+            guard.take()?
+        } else {
+            guard.as_ref()?.clone()
         }
-        state
     };
+    state.time_to_first_agent_action_ms = time_to_first_agent_action_ms(&state);
+    state.time_to_first_useful_action_ms = time_to_first_useful_action_ms(&state);
+    let snapshot = LifecycleSnapshot {
+        duration: ended_at.duration_since(state.started_at),
+        ended_at_utc: Utc::now(),
+        state,
+    };
+    let provider_end = provider_end.to_owned();
+    let model_end = model_end.to_owned();
+    Some(DeferredLifecycleEvent(Box::new(move || {
+        let mut snapshot = snapshot;
+        let id = match id {
+            Some(id) => id,
+            None => {
+                if !is_enabled() {
+                    return;
+                }
+                let Some(id) = get_or_create_id() else {
+                    return;
+                };
+                finalize_current_turn(
+                    &id,
+                    &mut snapshot.state,
+                    ended_at,
+                    reason.as_str(),
+                    delivery,
+                );
+                id
+            }
+        };
+        emit_lifecycle_snapshot(
+            event_name,
+            &provider_end,
+            &model_end,
+            reason,
+            delivery,
+            id,
+            snapshot,
+        );
+    })))
+}
+
+struct LifecycleSnapshot {
+    state: SessionTelemetry,
+    duration: Duration,
+    ended_at_utc: chrono::DateTime<Utc>,
+}
+
+fn emit_lifecycle_snapshot(
+    event_name: &'static str,
+    provider_end: &str,
+    model_end: &str,
+    reason: SessionEndReason,
+    delivery: DeliveryMode,
+    id: String,
+    snapshot: LifecycleSnapshot,
+) {
+    let LifecycleSnapshot {
+        state,
+        duration,
+        ended_at_utc,
+    } = snapshot;
     let errors = current_error_counts(&state);
     if !session_has_meaningful_activity(&state, &errors) {
         return;
@@ -163,7 +170,6 @@ pub(super) fn emit_lifecycle_event(
     if !state.start_event_sent {
         let _ = emit_session_start_for_state(id.clone(), &state, delivery);
     }
-    let duration = state.started_at.elapsed();
     let session_success = state.had_assistant_response
         || state.executed_tool_successes > 0
         || state.tests_passed > 0
@@ -187,7 +193,6 @@ pub(super) fn emit_lifecycle_event(
     let project_profile = detect_project_profile();
     let (active_days_7d, active_days_30d) = update_active_days(&id);
     let days_since_install = days_since_install(&id);
-    let ended_at_utc = Utc::now();
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let session_stop_reason = infer_session_stop_reason(
         event_name,
@@ -200,8 +205,8 @@ pub(super) fn emit_lifecycle_event(
         workflow_coding_used,
     );
     let agent_role = infer_agent_role(&state);
-    let time_to_first_agent_action_ms = time_to_first_agent_action_ms(&state);
-    let time_to_first_useful_action_ms = time_to_first_useful_action_ms(&state);
+    let time_to_first_agent_action_ms = state.time_to_first_agent_action_ms;
+    let time_to_first_useful_action_ms = state.time_to_first_useful_action_ms;
     let todo_event = todo_session_event(
         &state,
         reason,
