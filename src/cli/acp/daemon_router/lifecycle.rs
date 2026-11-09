@@ -1,5 +1,33 @@
 // Turn lifecycle routing. Included in daemon_router to preserve its private scope.
 impl RouterState {
+    /// A transport failure is not a request retry. Release uncertain requests,
+    /// retaining the peer identity until the replacement subscription reconciles
+    /// it. Timers cannot resend the old transport's waiting steers.
+    pub(super) fn transport_lost(&mut self) -> Vec<RouteAction> {
+        self.closed = true;
+        self.pending.clear();
+        self.waiting.clear();
+        self.probes.clear();
+        self.own_turn.as_mut().map_or_else(Vec::new, |own| {
+            // Keep the observed identity for Stop and snapshot reconciliation,
+            // but its failed prompt must never receive output or a second end.
+            let actions = Self::adopted_bracket_end(
+                own,
+                Some("The daemon connection was lost; execution outcome is unknown.".into()),
+            );
+            own.bracket_open = false;
+            actions
+        })
+    }
+
+    pub(super) fn can_reconnect(&self) -> bool {
+        !self.view_closed && !self.session_id.is_empty()
+    }
+
+    pub(super) fn transport_restored(&mut self) {
+        self.closed = false;
+    }
+
     /// `session/cancel`: withdraw every prompt still waiting for a turn. The
     /// caller still cancels the running turn.
     pub(super) fn stop(&mut self) -> Vec<RouteAction> {
@@ -107,9 +135,27 @@ impl RouterState {
         if replaced {
             actions.extend(self.retire_runtime());
         }
+        if self.own_turn.as_ref().is_some_and(|own| {
+            !self.pending.contains_key(&own.request_id)
+                && (own.identity.runtime_generation != runtime_generation
+                    || Some(own.identity.turn_id) != turn_id)
+        }) {
+            self.own_turn = None;
+        }
         let (Some(turn_id), Some(origin)) = (turn_id, active_origin) else {
             // No active turn, or one nobody announces (a debug path that
             // claims a turn id without publishing): nothing to mirror.
+            if self
+                .own_turn
+                .as_ref()
+                .is_some_and(|own| !self.pending.contains_key(&own.request_id))
+            {
+                self.own_turn = None;
+            }
+            actions.extend(self.close_peer_turn(
+                TurnEndStatus::Cancelled,
+                Some("The daemon snapshot reports no active turn.".into()),
+            ));
             return actions;
         };
         let identity = TurnIdentity {
@@ -334,6 +380,17 @@ impl RouterState {
             if ours.is_empty() {
                 let request_id = own.request_id;
                 self.deliver(request_id, event);
+            } else if !self.pending.contains_key(&own.request_id) {
+                // Recovery retained the observed turn after its original
+                // prompt failed. A newly confirmed steer becomes its output
+                // recipient; the failed prompt is never resurrected.
+                let mut members = ours.into_iter();
+                let Some(primary) = members.next() else {
+                    return Vec::new();
+                };
+                own.request_id = primary;
+                own.joined = members.collect();
+                own.adopted = true;
             } else {
                 own.joined.extend(ours);
             }

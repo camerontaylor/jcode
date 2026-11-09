@@ -136,3 +136,31 @@ wording: “When role is none, turnId is null.” This also covers a withdrawn i
 that was never inserted. Inserted origin/steer waits retain their identity when
 ended locally. Existing owner-aware close and peer notification semantics stay
 in place.
+
+## Daemon transport recovery
+
+The adapter retries connection establishment to its captured socket for at most
+10 seconds after EOF or a read error. It negotiates capabilities and subscribes
+to the original native session before replacing the writer. It does not launch
+a daemon, discover a replacement endpoint, replay history, or resend uncertain
+requests. Requests pending on the lost transport fail through their existing
+error path. New requests during recovery fail rather than queueing for retry.
+
+The logical attachment retains its client identity, skill selection, view state,
+turn fence and peer mapper. A retained observed turn is reconciled against the
+new daemon snapshot; retaining an identity does not mean execution resumed.
+Peer brackets are not reopened for an unchanged turn. A subsequent confirmed
+steer can receive output from a retained turn without reviving its failed prompt.
+
+Recovery omits Subscribe's working directory: the daemon resolves it from the
+existing target, rejecting a missing target instead of using the new-session
+fallback. Daemons without this target-resolution contract fail recovery safely.
+Close, detach and releasing the attachment stop recovery; exhausted recovery
+leaves explicit session/load available through its existing attach contract.
+
+Private Unix-socket tests in `src/cli/acp/tests/reconnect.rs` cover EOF recovery,
+the next prompt, original socket capture, missing target rejection, bounded
+unavailability and detach during a stalled handshake. Router tests cover peer
+identity, uncertain requests, snapshot reconciliation and subsequent steering.
+These are deterministic transport mocks, not a live provider or shared-daemon
+re-exec experiment. No shared daemon was restarted for this change.

@@ -953,3 +953,60 @@ fn a_live_peer_turn_always_announces_its_prompt() {
 
 #[path = "daemon_router_tests/settlement.rs"]
 mod settlement;
+
+#[test]
+fn reconnect_retains_peer_bracket_and_stop_identity_without_retry() {
+    let mut router = attached_router();
+    let mut uncertain = router.register(70, PendingKind::Reply);
+    router.route(turn_started(1, peer(5), Some("peer prompt")));
+    assert!(router.transport_lost().is_empty());
+    assert!(matches!(
+        uncertain.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+    router.transport_restored();
+    assert!(
+        router
+            .route(turn_state(1, Some((1, Some(peer(5)), Some("peer prompt")))))
+            .is_empty()
+    );
+    assert_eq!(router.active_turn_identity(), Some(identity(1)));
+    let ended = router.route(turn_state(1, None));
+    assert_eq!(ended.len(), 1);
+    assert!(matches!(ended[0], RouteAction::PeerTurnEnded { .. }));
+    assert!(router.route(turn_state(1, None)).is_empty());
+    assert_eq!(router.active_turn_identity(), None);
+}
+
+#[test]
+fn reconnect_closed_and_detached_views_cannot_resubscribe() {
+    let mut router = attached_router();
+    assert!(router.can_reconnect());
+    router.detach_view();
+    assert!(!router.can_reconnect());
+    let mut router = attached_router();
+    router.close_view();
+    assert!(!router.can_reconnect());
+}
+
+#[test]
+fn reconnect_uncertain_owned_prompt_fails_once_and_retains_observed_identity() {
+    let mut router = attached_router();
+    let mut prompt = router.register(77, PendingKind::Prompt);
+    router.route(turn_started(1, ours(77), Some("mine")));
+    while prompt.try_recv().is_ok() {}
+    assert!(router.transport_lost().is_empty());
+    assert!(matches!(
+        prompt.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+    router.transport_restored();
+    assert!(
+        router
+            .route(turn_state(1, Some((1, Some(ours(77)), Some("mine")))))
+            .is_empty()
+    );
+    assert_eq!(router.active_turn_identity(), Some(identity(1)));
+    assert!(router.route(turn_state(1, None)).is_empty());
+    assert_eq!(router.active_turn_identity(), None);
+}
