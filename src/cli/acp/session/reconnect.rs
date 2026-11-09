@@ -57,6 +57,8 @@ impl DaemonSession {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
+                supports_elicitation_form: false,
+                applet_elicitation: false,
                 supports_server_failover: true,
                 supports_turn_identity: capabilities.turn_origin,
                 crash_on_disconnect: false,

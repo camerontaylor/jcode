@@ -223,8 +223,9 @@ Each commit is pushed to `fork/acp-elicitation` as it lands.
 
 ## Implementation progress
 
-- Commit 2 is partially implemented: form payloads, schema/content validation,
-  and four protocol tests are present. Wire additions are still outstanding.
+- Commit 2 is implemented: form payloads, validation, wire additions, and
+  protocol regression tests. The server capability is published with the broker
+  implementation rather than advertising it before it can handle requests.
 - The validator uses `jsonschema` (already used by the SDK), with the transitive
   `ElicitationSchema` definitions extracted verbatim from the pinned v2 schema
   into `crates/jcode-protocol/src/elicitation-schema.json`. ACP nullable optional
@@ -233,3 +234,8 @@ Each commit is pushed to `fork/acp-elicitation` as it lands.
   Commits 3–6 and all end-to-end acceptance proofs remain outstanding.
 - Local protocol library clippy passes. All-target clippy encounters existing
   `useless_vec` errors at `protocol_tests/core_events.rs:985` and `:999`.
+
+## Deviations
+
+- Publish `elicitation_form` with the broker (commit 4), so intermediate commits
+  do not advertise an unimplemented server capability.

@@ -168,6 +168,14 @@ pub enum TurnEndStatus {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    #[serde(rename = "elicitation_request")]
+    ElicitationRequest(crate::elicitation::FormElicitation),
+    #[serde(rename = "elicitation_resolved")]
+    ElicitationResolved {
+        session_id: String,
+        elicitation_id: String,
+        outcome: crate::elicitation::ElicitationResolution,
+    },
     /// Authoritative attachment boundary, sent before the corresponding History.
     #[serde(rename = "turn_state")]
     TurnState {
