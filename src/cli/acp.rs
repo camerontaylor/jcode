@@ -12,6 +12,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
+mod client_requests;
+
 const ACP_PROTOCOL_VERSION: u64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +68,7 @@ struct AcpRuntime {
     /// .notices` at `initialize`. ACP v1 forbids `notice` updates otherwise, so
     /// informational notices are withheld rather than faked as messages.
     client_session_notices: Arc<AtomicBool>,
+    client_requests: Arc<client_requests::ClientRequests>,
 }
 
 impl AcpRuntime {
@@ -86,6 +89,7 @@ impl AcpRuntime {
             request_id_base: random_request_id_base(),
             connection_seq: Arc::new(AtomicU64::new(0)),
             client_session_notices: Arc::new(AtomicBool::new(false)),
+            client_requests: Arc::new(client_requests::ClientRequests::default()),
         }
     }
 
@@ -98,6 +102,7 @@ impl AcpRuntime {
             line.clear();
             let n = reader.read_line(&mut line).await?;
             if n == 0 {
+                self.client_requests.clear();
                 return Ok(());
             }
             if line.trim().is_empty() {
@@ -123,14 +128,7 @@ impl AcpRuntime {
 
     async fn handle_message(&self, message: JsonRpcMessage) -> Result<()> {
         let Some(method) = message.method.as_deref() else {
-            if let Some(id) = message.id {
-                self.write_error_value(
-                    id,
-                    JSONRPC_INVALID_REQUEST,
-                    "JSON-RPC request missing method".to_string(),
-                )
-                .await?;
-            }
+            self.client_requests.route(message);
             return Ok(());
         };
 

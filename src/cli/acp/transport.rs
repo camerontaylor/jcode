@@ -12,6 +12,8 @@ pub(super) struct JsonRpcMessage {
     pub(super) id: Option<Value>,
     pub(super) method: Option<String>,
     pub(super) params: Value,
+    pub(super) result: Option<Value>,
+    pub(super) error: Option<Value>,
 }
 
 impl JsonRpcMessage {
@@ -37,6 +39,8 @@ impl JsonRpcMessage {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             params: object.get("params").cloned().unwrap_or(Value::Null),
+            result: object.get("result").cloned(),
+            error: object.get("error").cloned(),
         })
     }
 }
