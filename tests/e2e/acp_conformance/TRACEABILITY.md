@@ -69,7 +69,7 @@ behavior of the clause, not a browser/client UI promise.
 | C-CONFIG-P01 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
 | C-CONFIG-P02 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
 | C-CONFIG-P03 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
-| C-CONFIG-P04 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P04 | acp_conformance_compact_command_compacts_real_history; acp_conformance_subagent_command_spawns_live_worker; acp_conformance_config_commands_v1; unit: advertised_commands_parse_to_real_dispatch_variants |
 | C-CONFIG-P05 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
 | C-CONFIG-P06 | Deferred v2 command insertion/echo |
 | C-CONFIG-P07 | acp_skill_clear_round_trip; unit: skill_selection_reads_the_canonical_metadata_field |
@@ -159,7 +159,7 @@ behavior of the clause, not a browser/client UI promise.
 | C-CORPUS-P02-I4 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
 | C-CORPUS-P02-I5 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
 | C-CORPUS-P02-I6 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P02-I7 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P02-I7 | Corpus recordings 07 and 12; acp_conformance_compact_command_compacts_real_history; acp_conformance_subagent_command_spawns_live_worker; consumer replay is Paseo-side |
 | C-CORPUS-P02-I8 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
 | C-SDK-P03-R1 | Deferred v2/SDK track; no v1 wire requirement |
 | C-SDK-P03-R2 | Deferred v2/SDK track; no v1 wire requirement |
@@ -277,10 +277,13 @@ The original atlas report was observational and its hypotheses are superseded.
 
 Indexed does not mean independently tested end to end. Remaining limits:
 
-- C-CONFIG-P04: compact/subagent discovery and parsing are pinned; full daemon
-  compaction scheduling and spawned-worker lifetime are not exercised by this
-  ACP suite. Those mechanisms are outside the new boundary harness; no claim
-  that launch completion equals worker completion is tested here.
+- C-CONFIG-P04: `commands_v1.rs` now exercises real daemon compaction and
+  worker lifetime. The compaction test verifies the summarization input and
+  that the next provider call receives the applied summary instead of older
+  history, retaining recent turns. The subagent test distinguishes the launch
+  tool receipt from a child session's live delta and completed turn. Native
+  provider compaction, visible-window spawn and worker failure/cancellation
+  remain outside these two focused command tests.
 - C-CONTENT-P04 and the client-side halves of list/config/capability clauses:
   consumer rendering, own-echo suppression, diagnostic deduplication, reconnect
   UI and capability gating belong to the Paseo consumer tests.

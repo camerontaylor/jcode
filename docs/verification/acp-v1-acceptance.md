@@ -21,8 +21,13 @@ Verified starting-head Fork CI:
   e2e tests were ignored. These counts are not a claim that the ignored live
   provider and scale tests passed.
 
-Later changes require their own exact-head CI results. A green starting-head
-run does not certify a changed source tree or an installed consumer release.
+The acceptance repair/fixture head
+`5fa1db619a52084128be56a15a024b3e831325a1` also passed both jobs in
+Fork CI `42907124856` and `42907113965`. These runs include the newly selected
+deterministic regressions, the Desktop capability repair and the skill-clear
+fixture. Later changes, including the command workflow tests below, require
+their own exact-head CI results. None of these agent-side runs certifies an
+installed consumer release.
 
 ## Original criteria and existing evidence
 
@@ -40,7 +45,8 @@ consumer's resulting state.
 | Phase 1: steer, adopt and recover stranded input | `acp_conformance_shared_observe_steer`, `acp_conformance_seeded_three_client_invariants`, retirement tests | Passed in starting-head e2e CI |
 | Phase 1: stop then immediately prompt | `acp_conformance_interleavings`, `acp_conformance_stop_observed_bash_wait` | Passed in starting-head e2e CI |
 | Phase 1: close an observing view without stopping work | `acp_conformance_close_owner_aware_v1`, `acp_conformance_observer_close_bracket_contract` | Passed in starting-head e2e CI |
-| Phase 1: model, effort, skills and commands | `acp_conformance_config_commands_v1`, `acp_conformance_config_peer_update_contract`, `acp_skill_clear_round_trip` | Passed in starting-head e2e CI, consumer controls still require live evidence |
+| Phase 1: model, effort, skills and command discovery | `acp_conformance_config_commands_v1`, `acp_conformance_config_peer_update_contract`, `acp_skill_clear_round_trip` | Passed in starting-head e2e CI, consumer controls need separate evidence |
+| Phase 1: compact history and launch a live subagent | `acp_conformance_compact_command_compacts_real_history`, `acp_conformance_subagent_command_spawns_live_worker` | Added actual daemon-workflow tests, named local run passed; final-head CI required |
 | Phase 1 D1: atomic cancellation relative to replacement | `cancellation_dispatch_cannot_signal_a_successor`, `completed_turn_is_not_reported_interrupted_by_a_late_stop`, `late_stop_preserves_task_for_completion_reconciliation` | Existing deterministic regressions, added to Fork CI in this acceptance slice |
 | Phase 1 D2: capture cancellation epoch at claim | `cancel_after_turn_claim_is_preserved` | Existing deterministic regression, added to Fork CI in this acceptance slice |
 | Phase 1: completion, failure, panic and producer abort | `turn_event_channel_tests`, `acp_conformance_panicking_producer_is_failed`, `acp_conformance_aborted_producer_after_stop_is_cancelled` | Wire tests passed, deterministic publication regressions added to Fork CI |
@@ -67,6 +73,32 @@ The existing tests are now selected explicitly in Fork CI. This closes a
 verification omission, not a missing production implementation. The filters
 cover the turn event channel, cancellation at claim, turn ownership, protocol
 turn identity and the stored-session catalog facade.
+
+The acceptance run also exposed a real Desktop response-tool allow-list defect.
+The explicit UI capability registered `user_response`, but the turn tool filter
+then hid it. Commit `c92bdffad54e2a360db2591b6ce6cc70df97e308` preserves that
+capability through both definition filtering and dispatch validation, without
+overriding an explicit SDK enabled/disabled tool list. The exact named
+`user_response_socket_registration_follows_explicit_capability` regression
+passed after repair and is selected in Fork CI.
+
+Commit `5fa1db619a52084128be56a15a024b3e831325a1` adds the real-wire
+`12-skill-selection-clear-v1.jsonl` transcript. The skill round-trip test
+passed both recording and normal replay. The named corpus-integrity test
+passed across all 12 transcript files, checking direction, contiguous sequence,
+JSON-RPC shape, paired requests/responses and an executable replay reference
+for every file. This is agent-side evidence, not consumer replay evidence.
+
+The new `commands_v1.rs` tests close a separate evidence gap: command
+advertisement and parsing did not establish actual daemon scheduling. The
+compaction test now witnesses a real summarization call and proves that the
+next provider request replaces older history with that summary while retaining
+recent turns. The subagent test separates the launch tool receipt from the
+spawned child's mid-turn attach, gated live output and completed terminal.
+The named `commands_v1` filter passed all three selected tests (the two new
+workflows plus the existing config-command regression). This is mock-provider
+workflow evidence, not a claim about provider-native compaction, visible-window
+spawning or a paid external model.
 
 The historical D3-pending notes in `p1-cancel-race.md` are superseded by the
 integrated R1 result in `r1-single-lifecycle.md`. Keeping the shared
