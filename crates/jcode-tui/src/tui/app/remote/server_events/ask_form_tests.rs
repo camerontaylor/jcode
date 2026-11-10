@@ -117,6 +117,16 @@ impl Fixture {
         app.is_remote = true;
         app.remote_session_id = Some(session.to_string());
         ask_form::on_remote_loop_start(&mut app);
+        // GitHub runners have no provider credentials, which makes
+        // `suggestion_prompts()` return the login hint and the first-run
+        // welcome outrank the form, so key assertions would depend on the
+        // machine's auth state. Canary builds suppress the suggestion cards;
+        // use that to model an established attached session deterministically.
+        app.session.is_canary = true;
+        assert!(
+            !app.onboarding_welcome_active(),
+            "ask_form fixtures must not start on the first-run welcome screen"
+        );
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let remote = {
             let _guard = runtime.enter();
