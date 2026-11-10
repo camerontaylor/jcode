@@ -16,8 +16,13 @@ impl Agent {
                 .await;
         }
         let mut allowed = self.allowed_tools.clone();
-        if applet && let Some(allowed) = allowed.as_mut() {
-            allowed.insert("applet".into());
+        if let Some(allowed) = allowed.as_mut() {
+            if applet {
+                allowed.insert("applet".into());
+            }
+            if desktop {
+                allowed.insert("user_response".into());
+            }
         }
         self._tool_policy_registration = crate::tool::register_session_tool_policy(
             &self.session.id,
