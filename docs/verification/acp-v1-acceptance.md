@@ -107,5 +107,28 @@ not a second lifecycle or unfinished removal of `TurnEnded`.
 
 ## Consumer and final-head acceptance
 
-In progress. Do not infer completed Phase 3 acceptance, consumer release
-acceptance, or an opened v2 gate from the starting-head results above.
+The real Paseo connector completed all 12 live scenarios with zero skips:
+import/replay, bidirectional steering, one correlated execution with concurrent
+steering and exact nonzero usage, immediate prompt after Stop, Stop of a peer
+turn, bidirectional model/effort propagation, textual and explicit skills with
+sticky selection and null clear, owner-aware close, and both originator and
+observer detach. The five direct ACP companion probes also passed. These are
+separate evidence layers: direct probes do not substitute for consumer tests.
+
+The reproducible runner is `scripts/live-acceptance/run-live-acceptance.sh`.
+It uses an isolated real daemon and the consumer's source modules, records
+binary and consumer provenance, and uses a deterministic local model backend.
+Runtime production source is `c92bdffad54e2a360db2591b6ce6cc70df97e308`;
+subsequent changes in this acceptance series are tests, documentation and CI.
+The consumer replays all 12 canonical tapes through its actual ACP connector:
+15 tests pass with both its vendored snapshot and the canonical source corpus.
+
+Consumer fixes include nested prompt-correlation parsing, balanced shared-turn
+settlement, exact skill/null propagation, and explicit detach serialized with
+close/reload in one lifecycle lane. Deferred regressions verify that detach
+never closes a successor runtime or closes after an unsupported/failed detach.
+
+Final integration still requires green CI on the exact submitted and merged
+heads. The canonical companion strategy state records those immutable heads
+and run IDs once available. This source acceptance is not a consumer release
+or shared-daemon deployment, and does not open the v2 gate.

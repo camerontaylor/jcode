@@ -1,0 +1,642 @@
+// Shared plumbing for the live Paseo/jcode v1 acceptance harness.
+//
+// Every ACP or daemon byte in these harnesses is produced by the real jcode
+// binary. Only the model backend is scripted: a local OpenAI-compatible HTTP
+// server whose responses the harness releases deliberately, so turn order is
+// deterministic and no provider tokens are spent.
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { connect, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createInterface } from "node:readline";
+
+export const SKILL_MARKER = "LIVE_ACCEPTANCE_SKILL_MARKER_7c1e";
+export const DEFAULT_MODEL = "gpt-5.2";
+export const ALT_MODEL = "gpt-5.2-mini";
+
+export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+export async function waitFor<T>(
+  label: string,
+  probe: () => T | undefined | null | false | Promise<T | undefined | null | false>,
+  timeoutMs = 20_000,
+  intervalMs = 50,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const value = await probe();
+      if (value) return value as T;
+      last = value;
+    } catch (error) {
+      last = error;
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(
+    `timed out after ${timeoutMs}ms waiting for ${label}; last=${safeJson(last).slice(0, 800)}`,
+  );
+}
+
+export function safeJson(value: unknown): string {
+  if (value === undefined) return "undefined";
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/// The daemon wire carries turn identity as `{runtime_generation, turn_id}`
+/// while the ACP adapter renders the same identity as `"<generation>:<id>"`.
+/// Compare the two by a single normalized key, never by raw shape.
+export function turnIdentityKey(identity: unknown): string {
+  if (typeof identity === "string") return identity;
+  if (identity && typeof identity === "object") {
+    const value = identity as { runtime_generation?: unknown; turn_id?: unknown };
+    if (value.runtime_generation !== undefined && value.turn_id !== undefined) {
+      return `${String(value.runtime_generation)}:${String(value.turn_id)}`;
+    }
+  }
+  return safeJson(identity);
+}
+
+export function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        typeof part === "string"
+          ? part
+          : typeof part === "object" && part
+            ? String((part as Record<string, unknown>).text ?? "")
+            : "",
+      )
+      .join("");
+  }
+  return "";
+}
+
+export function bodyText(body: unknown): string {
+  const messages = (body as { messages?: Array<{ content?: unknown }> } | undefined)?.messages;
+  return Array.isArray(messages) ? messages.map((m) => messageText(m.content)).join("\n") : "";
+}
+
+export function lastUserText(body: unknown): string {
+  const messages = (body as { messages?: Array<{ role?: string; content?: unknown }> } | undefined)
+    ?.messages;
+  if (!Array.isArray(messages)) return "";
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user") return messageText(messages[index].content);
+  }
+  return "";
+}
+
+/** Finds a nested key/value that looks like an effort setting. Returns [key, value]. */
+export function findEffort(value: unknown, depth = 0): [string, string] | null {
+  if (depth > 6 || value === null || typeof value !== "object") return null;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (
+      typeof child === "string" &&
+      /effort|reasoning|verbosity/i.test(key) &&
+      child.length > 0
+    ) {
+      return [key, child];
+    }
+  }
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    const found = findEffort(child, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+export interface ModelRequest {
+  body: Record<string, unknown>;
+  response: ServerResponse;
+  /** True once a reply/abort has been written. */
+  settled: boolean;
+}
+
+export interface MockUsage {
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens?: number;
+}
+
+export interface MockModel {
+  baseUrl: string;
+  requests: ModelRequest[];
+  pending: ModelRequest[];
+  close(): Promise<void>;
+  takeContaining(text: string, timeoutMs?: number): Promise<ModelRequest>;
+  replyText(request: ModelRequest, text: string, usage?: MockUsage): void;
+  replyToolCall(request: ModelRequest, options: {
+    id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+  }): void;
+  abort(request: ModelRequest): void;
+}
+
+function sse(res: ServerResponse, events: Array<Record<string, unknown> | "[DONE]">) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+  for (const event of events) {
+    res.write(`data: ${typeof event === "string" ? event : JSON.stringify(event)}\n\n`);
+  }
+  res.end();
+}
+
+function chunk(
+  model: string,
+  delta: Record<string, unknown>,
+  finishReason: string | null,
+  usage?: MockUsage,
+): Record<string, unknown> {
+  const frame: Record<string, unknown> = {
+    id: "live-acceptance",
+    object: "chat.completion.chunk",
+    model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  };
+  if (usage) {
+    frame.usage = {
+      prompt_tokens: usage.promptTokens,
+      completion_tokens: usage.completionTokens,
+      total_tokens: usage.promptTokens + usage.completionTokens,
+      ...(usage.cachedTokens === undefined
+        ? {}
+        : { prompt_tokens_details: { cached_tokens: usage.cachedTokens } }),
+    };
+  }
+  return frame;
+}
+
+export async function startMockModel(
+  models: string[] = [DEFAULT_MODEL, ALT_MODEL],
+): Promise<MockModel> {
+  const requests: ModelRequest[] = [];
+  const pending: ModelRequest[] = [];
+
+  const handler = async (request: IncomingMessage, response: ServerResponse) => {
+    let raw = "";
+    for await (const part of request) raw += part;
+    const url = request.url ?? "";
+    if (url.includes("/models")) {
+      response.setHeader("Content-Type", "application/json");
+      response.end(
+        JSON.stringify({ object: "list", data: models.map((id) => ({ id, object: "model" })) }),
+      );
+      return;
+    }
+    let body: Record<string, unknown> = {};
+    try {
+      body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    } catch {
+      body = {};
+    }
+    const model = typeof body.model === "string" ? body.model : DEFAULT_MODEL;
+    const tools = Array.isArray(body.tools) ? body.tools : [];
+    // jcode also asks for background session summaries. Those tool-free
+    // completions must not consume a foreground turn gate.
+    if (tools.length === 0) {
+      if (body.stream === false) {
+        response.setHeader("Content-Type", "application/json");
+        response.end(
+          JSON.stringify({
+            id: "auxiliary",
+            object: "chat.completion",
+            model,
+            choices: [
+              { index: 0, message: { role: "assistant", content: "E2E session" }, finish_reason: "stop" },
+            ],
+          }),
+        );
+      } else {
+        sse(response, [
+          chunk(model, { role: "assistant", content: "E2E session" }, null),
+          chunk(model, {}, "stop"),
+          "[DONE]",
+        ]);
+      }
+      return;
+    }
+    const entry: ModelRequest = { body, response, settled: false };
+    requests.push(entry);
+    pending.push(entry);
+  };
+
+  const server: Server = createServer((request, response) => {
+    void handler(request, response).catch((error) => {
+      try {
+        response.destroy(error instanceof Error ? error : undefined);
+      } catch {
+        // already gone
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("mock model has no TCP port");
+
+  const take = (entry: ModelRequest) => {
+    entry.settled = true;
+    const index = pending.indexOf(entry);
+    if (index >= 0) pending.splice(index, 1);
+  };
+
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    requests,
+    pending,
+    async close() {
+      for (const entry of pending.splice(0)) {
+        try {
+          entry.response.destroy();
+        } catch {
+          // already gone
+        }
+      }
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+    async takeContaining(text, timeoutMs = 20_000) {
+      return waitFor(
+        `model request containing ${JSON.stringify(text)}`,
+        () => pending.find((entry) => bodyText(entry.body).includes(text)),
+        timeoutMs,
+      );
+    },
+    replyText(entry, text, usage) {
+      if (entry.settled) throw new Error("model request already settled");
+      take(entry);
+      const model = typeof entry.body.model === "string" ? entry.body.model : DEFAULT_MODEL;
+      sse(entry.response, [
+        chunk(model, { role: "assistant", content: text }, null),
+        chunk(model, {}, "stop", usage),
+        "[DONE]",
+      ]);
+    },
+    replyToolCall(entry, options) {
+      if (entry.settled) throw new Error("model request already settled");
+      take(entry);
+      const model = typeof entry.body.model === "string" ? entry.body.model : DEFAULT_MODEL;
+      sse(entry.response, [
+        chunk(
+          model,
+          {
+            role: "assistant",
+            tool_calls: [
+              {
+                index: 0,
+                id: options.id,
+                type: "function",
+                function: { name: options.name, arguments: JSON.stringify(options.arguments) },
+              },
+            ],
+          },
+          null,
+        ),
+        chunk(model, {}, "tool_calls"),
+        "[DONE]",
+      ]);
+    },
+    abort(entry) {
+      if (entry.settled) return;
+      take(entry);
+      try {
+        entry.response.destroy();
+      } catch {
+        // already gone
+      }
+    },
+  };
+}
+
+export interface LiveWorkspace {
+  root: string;
+  cwd: string;
+  home: string;
+  runtime: string;
+  socketPath: string;
+  binDir: string;
+  cleanup(): Promise<void>;
+}
+
+export async function createWorkspace(prefix = "jcode-live-"): Promise<LiveWorkspace> {
+  const root = await mkdtemp(path.join(tmpdir(), prefix));
+  const cwd = path.join(root, "work");
+  const home = path.join(root, "home");
+  const runtime = path.join(root, "runtime");
+  const binDir = path.join(root, "bin");
+  await Promise.all([mkdir(cwd, { recursive: true }), mkdir(home, { recursive: true }), mkdir(runtime, { recursive: true }), mkdir(binDir, { recursive: true })]);
+  const skillDir = path.join(cwd, ".jcode", "skills", "acceptance-skill");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    path.join(skillDir, "SKILL.md"),
+    `---\nname: acceptance-skill\ndescription: Live acceptance probe skill.\n---\n\nWhen this skill is active, include the marker ${SKILL_MARKER} in your answer.\n`,
+    "utf8",
+  );
+  return {
+    root,
+    cwd,
+    home,
+    runtime,
+    socketPath: path.join(root, "jcode.sock"),
+    binDir,
+    async cleanup() {
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+export interface JcodeDaemon {
+  child: ChildProcess;
+  socketPath: string;
+  logs: string[];
+  env: NodeJS.ProcessEnv;
+  stop(): Promise<void>;
+}
+
+export function daemonEnv(workspace: LiveWorkspace, modelBaseUrl: string, model = DEFAULT_MODEL): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    HOME: process.env.HOME,
+    JCODE_NO_TELEMETRY: "1",
+    JCODE_HOME: workspace.home,
+    JCODE_RUNTIME_DIR: workspace.runtime,
+    JCODE_SOCKET: workspace.socketPath,
+    JCODE_OPENAI_COMPAT_API_BASE: modelBaseUrl,
+    JCODE_OPENAI_COMPAT_DEFAULT_MODEL: model,
+    OPENAI_COMPAT_API_KEY: "isolated-live-acceptance-key",
+    PATH: `${workspace.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+  };
+}
+
+export async function startJcodeDaemon(options: {
+  binary: string;
+  workspace: LiveWorkspace;
+  modelBaseUrl: string;
+  model?: string;
+}): Promise<JcodeDaemon> {
+  const env = daemonEnv(options.workspace, options.modelBaseUrl, options.model);
+  const logs: string[] = [];
+  const child = spawn(
+    options.binary,
+    [
+      "--socket",
+      options.workspace.socketPath,
+      "--provider",
+      "openai-compatible",
+      "--model",
+      options.model ?? DEFAULT_MODEL,
+      "serve",
+    ],
+    { cwd: options.workspace.cwd, env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  child.stdout?.on("data", (data) => logs.push(String(data)));
+  child.stderr?.on("data", (data) => logs.push(String(data)));
+  await waitFor(
+    "jcode daemon socket",
+    () => {
+      if (child.exitCode !== null) {
+        throw new Error(`jcode daemon exited ${child.exitCode}\n${logs.join("").slice(-4000)}`);
+      }
+      return existsSync(options.workspace.socketPath);
+    },
+    30_000,
+  );
+  return {
+    child,
+    socketPath: options.workspace.socketPath,
+    logs,
+    env,
+    async stop() {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+      child.kill("SIGTERM");
+      const settled = await Promise.race([
+        closed.then(() => true),
+        sleep(3_000).then(() => false),
+      ]);
+      if (!settled) {
+        child.kill("SIGKILL");
+        await Promise.race([closed, sleep(2_000)]);
+      }
+    },
+  };
+}
+
+export interface PeerEvent {
+  [key: string]: any;
+}
+
+export interface LivePeer {
+  socket: Socket;
+  events: PeerEvent[];
+  send(message: Record<string, unknown>): void;
+  subscribe(workingDir: string, clientInstanceId: string, targetSessionId?: string): Promise<PeerEvent>;
+  message(id: number, content: string): void;
+  softInterrupt(id: number, content: string, urgent?: boolean): void;
+  cancel(id: number): void;
+  /// Protocol request that mutates shared config and fans out to other attachments.
+  setReasoningEffort(id: number, effort: string): void;
+  setModel(id: number, model: string): void;
+  destroy(): void;
+  turnStarts(): PeerEvent[];
+  turnEnds(end: "completed" | "cancelled" | "failed"): PeerEvent[];
+  identityFor(content: string): string | undefined;
+}
+
+export async function connectPeer(socketPath: string): Promise<LivePeer> {
+  const socket = connect(socketPath);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  const events: PeerEvent[] = [];
+  const lines = createInterface({ input: socket });
+  lines.on("line", (line) => {
+    try {
+      events.push(JSON.parse(line) as PeerEvent);
+    } catch {
+      events.push({ type: "unparsed", line });
+    }
+  });
+  const peer: LivePeer = {
+    socket,
+    events,
+    send(message) {
+      socket.write(`${JSON.stringify(message)}\n`);
+    },
+    async subscribe(workingDir, clientInstanceId, targetSessionId) {
+      peer.send({
+        type: "subscribe",
+        id: 1,
+        supports_turn_identity: true,
+        working_dir: workingDir,
+        client_instance_id: clientInstanceId,
+        ...(targetSessionId ? { target_session_id: targetSessionId } : {}),
+      });
+      return waitFor(
+        "peer session id",
+        () => events.find((event) => event.type === "session"),
+        15_000,
+      );
+    },
+    message(id, content) {
+      peer.send({ type: "message", id, content });
+    },
+    softInterrupt(id, content, urgent = true) {
+      peer.send({ type: "soft_interrupt", id, content, urgent });
+    },
+    cancel(id) {
+      peer.send({ type: "cancel", id });
+    },
+    setReasoningEffort(id, effort) {
+      peer.send({ type: "set_reasoning_effort", id, effort });
+    },
+    setModel(id, model) {
+      peer.send({ type: "set_model", id, model });
+    },
+    destroy() {
+      lines.close();
+      socket.destroy();
+    },
+    turnStarts() {
+      return events.filter((event) => event.type === "turn_started");
+    },
+    turnEnds(end) {
+      return events.filter((event) => event.type === "turn_event" && event.end === end);
+    },
+    identityFor(content) {
+      return events.find(
+        (event) => event.type === "turn_started" && event.user_content === content,
+      )?.identity;
+    },
+  };
+  return peer;
+}
+
+export function binaryProvenance(binary: string) {
+  const version = spawnSync(binary, ["--version"], { encoding: "utf8" });
+  const digest = spawnSync("sha256sum", [binary], { encoding: "utf8" });
+  return {
+    binary,
+    resolved: existsSync(binary) ? binary : null,
+    version: (version.stdout ?? "").trim() || (version.stderr ?? "").trim(),
+    sha256: (digest.stdout ?? "").split(/\s+/)[0] ?? null,
+    stat: version.status,
+  };
+}
+
+export function linkBinary(binary: string, binDir: string, name = "jcode"): string {
+  const target = path.join(binDir, name);
+  spawnSync("ln", ["-sf", binary, target]);
+  return target;
+}
+
+export interface Evidence {
+  startedAt: string;
+  provenance: Record<string, unknown>;
+  environment: Record<string, unknown>;
+  scenarios: Record<string, { status: "pass" | "fail" | "skip"; detail?: unknown; error?: string }>;
+  notes: string[];
+}
+
+export function newEvidence(): Evidence {
+  return {
+    startedAt: new Date().toISOString(),
+    provenance: {},
+    environment: {},
+    scenarios: {},
+    notes: [],
+  };
+}
+
+export function recordScenario(
+  evidence: Evidence,
+  name: string,
+  status: "pass" | "fail" | "skip",
+  payload?: { detail?: unknown; error?: unknown },
+) {
+  evidence.scenarios[name] = {
+    status,
+    ...(payload?.detail !== undefined ? { detail: payload.detail } : {}),
+    ...(payload?.error !== undefined ? { error: String(payload.error) } : {}),
+  };
+}
+
+export async function runScenario(
+  evidence: Evidence,
+  name: string,
+  body: () => Promise<unknown>,
+): Promise<boolean> {
+  const selected = (process.env.JCODE_ACCEPTANCE_SCENARIOS ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (selected.length > 0 && !selected.some((entry) => name === entry || name.startsWith(entry))) {
+    recordScenario(evidence, name, "skip");
+    persistIncremental(evidence);
+    return true;
+  }
+  try {
+    const detail = await body();
+    recordScenario(evidence, name, "pass", { detail });
+    persistIncremental(evidence);
+    return true;
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.stack ?? error.message
+        : `${safeJson(error)}${(error as { code?: number })?.code !== undefined ? ` code=${(error as { code?: number }).code}` : ""}`;
+    recordScenario(evidence, name, "fail", { error: message });
+    persistIncremental(evidence);
+    return false;
+  }
+}
+
+/// Keep per-scenario evidence durable even when a later floating promise or
+/// shutdown path kills the process before the final write.
+function persistIncremental(evidence: Evidence) {
+  const file = process.env.JCODE_ACCEPTANCE_OUT;
+  if (!file) return;
+  try {
+    writeEvidence(file, evidence);
+  } catch {
+    // Evidence must never change scenario behavior.
+  }
+}
+
+export function writeEvidence(file: string, evidence: Evidence) {
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+}
+
+export function summaryLine(evidence: Evidence): string {
+  const entries = Object.entries(evidence.scenarios);
+  const passed = entries.filter(([, value]) => value.status === "pass").length;
+  const failed = entries.filter(([, value]) => value.status === "fail").length;
+  const skipped = entries.filter(([, value]) => value.status === "skip").length;
+  return `${passed} passed, ${failed} failed, ${skipped} skipped`;
+}
+
+export function requireBinary(): string {
+  const binary = process.env.JCODE_E2E_BINARY;
+  if (!binary || !path.isAbsolute(binary)) {
+    throw new Error(
+      "Set JCODE_E2E_BINARY to an absolute, current jcode executable (real build, not target/debug from Nov 9)",
+    );
+  }
+  if (!existsSync(binary)) throw new Error(`JCODE_E2E_BINARY does not exist: ${binary}`);
+  return binary;
+}
