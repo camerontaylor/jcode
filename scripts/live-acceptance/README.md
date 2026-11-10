@@ -11,9 +11,10 @@ connector drives it.
 | --- | --- | --- |
 | Connector harness | `jcode-live-acceptance.ts` | Real Paseo daemon + `plugins/jcode-provider` + real `jcode acp` child: import/replay, forward steer, reverse steer, single-settlement turn correlation (concurrent steer into one held execution, one terminal, one usage total), Stop then immediate prompt, Stop of an observed peer turn, model/effort propagation both directions, textual and explicit skill selection with `null` clear, owner-aware close, observer detach (peer work survives, updates stop, session reloads), and explicit detach that preserves inserted work. |
 | ACP companion probe | `jcode-acp-probe.ts` | Real `jcode acp` process: `interfaceVersion`/extensions/`sharedControl` (all four booleans), prompt correlation roles (`origin`/`steer`/`none`), explicit `_meta.jcode.skill` select and `null` clear, `_jcode/detach` semantics and `-32602`, config options and legacy aliases. |
+| Barrier regression | `jcode-live-barriers.ts` | Deterministic proof of the harness's causal barriers through the real daemon: a raw-attachment terminal withheld past the consumer's settle is still waited for; a held origin model call cannot be released until the daemon has admitted the steer (`pending_soft_interrupts` plus, for a peer steer, its `ack` id). Delivery is gated, never slept or retried. |
 | Runner | `run-live-acceptance.sh` | Provenance gate, isolated environment, evidence directory. |
 
-Both run their own `jcode serve` on a private socket with private
+Each harness runs its own `jcode serve` on a private socket with private
 `JCODE_HOME`, `JCODE_RUNTIME_DIR` and (for the connector) `PASEO_HOME`. They
 never talk to the shared daemon and never change user config. The model backend
 is a local OpenAI-compatible HTTP server with deliberately released responses,
@@ -57,13 +58,23 @@ set, otherwise to `<repo>/target/live-acceptance/live-run-<utc>`:
 - `provenance.txt` - binary version, sha256, consumer head/branch/dirt, node
 - `connector.evidence.json`, `connector.log`
 - `probe.evidence.json`, `probe.log`
+- `barriers.evidence.json`, `barriers.log`
 - `summary.txt`
 
 Each evidence file has `provenance`, `environment.isolated`, and a `scenarios`
 object with `pass`/`fail` and the observed wire/state detail. The scripted
 model can attach an OpenAI streaming `usage` chunk to a reply; `s04` uses
 distinct per-call counters to prove the connector reports one execution total
-instead of dropping or double-counting a call.
+instead of dropping or double-counting a call. A failed scenario is also
+printed to the job log immediately, and the runner prints the same shared
+bounded failure lines from the evidence file if the harness exits nonzero, so
+a discarded evidence directory cannot hide which scenario failed or why.
+
+The connector's steering scenarios hold the origin model call until
+`pending_soft_interrupts` (and the peer `ack`) prove daemon admission, then
+wait for the exact turn's scoped `soft_interrupt_injected` and terminal. They
+never treat consumer idle or a timeline echo as admission, and they never
+sample the raw attachment once after `waitIdle`.
 
 Useful debug knobs for the connector harness:
 
@@ -71,6 +82,7 @@ Useful debug knobs for the connector harness:
   prefixes; the rest are recorded as `skip`.
 - `JCODE_ACCEPTANCE_KEEP=1` keeps the isolated workspace and prints its path
   instead of deleting it.
+- `JCODE_ACCEPTANCE_ONLY=connector|probe|barriers` runs a single harness.
 
 ## Honest scope limits
 

@@ -128,6 +128,19 @@ settlement, exact skill/null propagation, and explicit detach serialized with
 close/reload in one lifecycle lane. Deferred regressions verify that detach
 never closes a successor runtime or closes after an unsupported/failed detach.
 
+A post-merge consumer CI run exposed a repeatability gap: it reported two
+connector failures but discarded their scenario errors. The original failure
+names and causes cannot be recovered from the surviving log. Source review
+separately identified real harness defects: sampling the peer channel after
+consumer idle, and releasing the origin model before witnessing steer admission.
+The runner now uses exact-turn terminal/injection barriers and daemon queue/ack
+admission witnesses, and prints bounded failure details. Two additional gated
+real-daemon regressions prove delayed terminal delivery and delayed admission.
+Three complete Node 22 runs passed all 12 connector scenarios, five probes and
+two barrier regressions with zero skips. These regressions strengthen the
+acceptance evidence; they do not replace consumer scenarios or prove the lost
+CI failures had a particular cause.
+
 Final integration still requires green CI on the exact submitted and merged
 heads. The canonical companion strategy state records those immutable heads
 and run IDs once available. This source acceptance is not a consumer release

@@ -11,7 +11,7 @@
 #                         $JCODE_SCRATCH_DIR/live-acceptance/... when set,
 #                         otherwise <repo>/target/live-acceptance/...)
 #   JCODE_EXPECTED_PROVENANCE substring that must appear in `jcode --version`
-#   JCODE_ACCEPTANCE_ONLY connector|probe
+#   JCODE_ACCEPTANCE_ONLY connector|probe|barriers
 #
 # The harness creates its own daemon socket, JCODE_HOME, JCODE_RUNTIME_DIR and
 # Paseo home. It never touches the shared daemon or user config.
@@ -23,8 +23,8 @@ binary="${JCODE_E2E_BINARY:-}"
 only="${JCODE_ACCEPTANCE_ONLY:-all}"
 
 case "$only" in
-  all | connector | probe) ;;
-  *) printf 'live-acceptance: JCODE_ACCEPTANCE_ONLY must be all, connector or probe (got %s)\n' "$only" >&2; exit 2 ;;
+  all | connector | probe | barriers) ;;
+  *) printf 'live-acceptance: JCODE_ACCEPTANCE_ONLY must be all, connector, probe or barriers (got %s)\n' "$only" >&2; exit 2 ;;
 esac
 
 fail() {
@@ -81,6 +81,24 @@ fi
   printf 'started_utc=%s\n' "$stamp"
 } | tee "$out_dir/provenance.txt"
 
+# Surface failed scenario names and bounded errors from the evidence file.
+# CI discards the runner's filesystem, so the job log must carry the reason.
+# The formatter is shared with the harnesses (report-evidence.ts); this wrapper
+# only decides which file to report.
+report_evidence_failures() {
+  local name="$1"
+  local evidence="$out_dir/$name.evidence.json"
+  if [[ ! -f "$evidence" ]]; then
+    printf 'FAILED %s: harness exited without writing evidence (%s)\n' "$name" "$evidence" >&2
+    return 0
+  fi
+  (
+    cd "$consumer_root"
+    node --conditions=source --import tsx \
+      "$repo_root/scripts/live-acceptance/report-evidence.ts" "$evidence" "$name"
+  ) >&2
+}
+
 run_one() {
   local name="$1"
   local harness="$2"
@@ -94,6 +112,9 @@ run_one() {
   ) 2>&1 | tee "$out_dir/$name.log"
   local status="${PIPESTATUS[0]}"
   set -e
+  if [[ "$status" -ne 0 ]]; then
+    report_evidence_failures "$name"
+  fi
   printf '%s exit=%s\n' "$name" "$status" | tee -a "$out_dir/summary.txt"
   return "$status"
 }
@@ -105,8 +126,12 @@ fi
 if [[ "$only" == "all" || "$only" == "probe" ]]; then
   run_one probe "$repo_root/scripts/live-acceptance/jcode-acp-probe.ts" || status=1
 fi
+if [[ "$only" == "all" || "$only" == "barriers" ]]; then
+  run_one barriers "$repo_root/scripts/live-acceptance/jcode-live-barriers.ts" || status=1
+fi
 
 printf '\nevidence directory: %s\n' "$out_dir"
 printf 'connector evidence: %s\n' "$out_dir/connector.evidence.json"
 printf 'probe evidence:     %s\n' "$out_dir/probe.evidence.json"
+printf 'barrier evidence:   %s\n' "$out_dir/barriers.evidence.json"
 exit "$status"

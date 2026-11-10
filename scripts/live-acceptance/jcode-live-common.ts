@@ -439,17 +439,44 @@ export interface PeerEvent {
   [key: string]: any;
 }
 
+export interface PeerStateSnapshot {
+  id: number;
+  sessionId: string;
+  isProcessing: boolean;
+  pendingSoftInterrupts: number;
+}
+
+/// Harness-only inbound delivery gate. Holding a predicate buffers matching
+/// raw peer lines, so a regression test can reproduce delivery inversion (for
+/// example a scoped terminal that the consumer has already moved past but the
+/// raw attachment has not delivered yet) without touching the daemon. Scenarios
+/// never hold the gate; they use the positive barriers below.
+export interface PeerGate {
+  hold(predicate: (event: PeerEvent) => boolean): void;
+  /// Delivers buffered lines and stops holding. Returns how many were buffered.
+  release(): number;
+  buffered(): number;
+  holding(): boolean;
+}
+
 export interface LivePeer {
   socket: Socket;
   events: PeerEvent[];
   send(message: Record<string, unknown>): void;
   subscribe(workingDir: string, clientInstanceId: string, targetSessionId?: string): Promise<PeerEvent>;
   message(id: number, content: string): void;
-  softInterrupt(id: number, content: string, urgent?: boolean): void;
+  softInterrupt(id: number, content: string, urgent?: boolean, clientId?: string): void;
   cancel(id: number): void;
   /// Protocol request that mutates shared config and fans out to other attachments.
   setReasoningEffort(id: number, effort: string): void;
   setModel(id: number, model: string): void;
+  /// `{type:"state"}` round-trip. `pendingSoftInterrupts` is the daemon's
+  /// authoritative admission count: a steer that no attachment has handed to
+  /// the session queue yet is not in it.
+  state(timeoutMs?: number): Promise<PeerStateSnapshot>;
+  /// The daemon's `{type:"ack", id}` for a soft interrupt this peer sent.
+  ackFor(id: number): PeerEvent | undefined;
+  gate: PeerGate;
   destroy(): void;
   turnStarts(): PeerEvent[];
   turnEnds(end: "completed" | "cancelled" | "failed"): PeerEvent[];
@@ -463,14 +490,44 @@ export async function connectPeer(socketPath: string): Promise<LivePeer> {
     socket.once("error", reject);
   });
   const events: PeerEvent[] = [];
+  const gateState: {
+    predicate: ((event: PeerEvent) => boolean) | null;
+    buffered: string[];
+  } = { predicate: null, buffered: [] };
+  const gate: PeerGate = {
+    hold(predicate) {
+      gateState.predicate = predicate;
+    },
+    release() {
+      gateState.predicate = null;
+      const buffered = gateState.buffered.splice(0);
+      for (const line of buffered) events.push(parsePeerLine(line));
+      return buffered.length;
+    },
+    buffered() {
+      return gateState.buffered.length;
+    },
+    holding() {
+      return gateState.predicate !== null;
+    },
+  };
+  function parsePeerLine(line: string): PeerEvent {
+    try {
+      return JSON.parse(line) as PeerEvent;
+    } catch {
+      return { type: "unparsed", line };
+    }
+  }
   const lines = createInterface({ input: socket });
   lines.on("line", (line) => {
-    try {
-      events.push(JSON.parse(line) as PeerEvent);
-    } catch {
-      events.push({ type: "unparsed", line });
+    const event = parsePeerLine(line);
+    if (gateState.predicate?.(event)) {
+      gateState.buffered.push(line);
+      return;
     }
+    events.push(event);
   });
+  let requestId = 1000;
   const peer: LivePeer = {
     socket,
     events,
@@ -495,8 +552,14 @@ export async function connectPeer(socketPath: string): Promise<LivePeer> {
     message(id, content) {
       peer.send({ type: "message", id, content });
     },
-    softInterrupt(id, content, urgent = true) {
-      peer.send({ type: "soft_interrupt", id, content, urgent });
+    softInterrupt(id, content, urgent = true, clientId) {
+      peer.send({
+        type: "soft_interrupt",
+        id,
+        content,
+        urgent,
+        ...(clientId === undefined ? {} : { client_id: clientId }),
+      });
     },
     cancel(id) {
       peer.send({ type: "cancel", id });
@@ -507,6 +570,26 @@ export async function connectPeer(socketPath: string): Promise<LivePeer> {
     setModel(id, model) {
       peer.send({ type: "set_model", id, model });
     },
+    async state(timeoutMs = 15_000) {
+      const id = requestId++;
+      peer.send({ type: "state", id });
+      const reply = await waitFor(
+        `peer state reply ${id}`,
+        () => events.find((event) => event.type === "state" && event.id === id),
+        timeoutMs,
+        25,
+      );
+      return {
+        id,
+        sessionId: String(reply.session_id ?? ""),
+        isProcessing: Boolean(reply.is_processing),
+        pendingSoftInterrupts: Number(reply.pending_soft_interrupts ?? 0),
+      };
+    },
+    ackFor(id) {
+      return events.find((event) => event.type === "ack" && event.id === id);
+    },
+    gate,
     destroy() {
       lines.close();
       socket.destroy();
@@ -524,6 +607,142 @@ export async function connectPeer(socketPath: string): Promise<LivePeer> {
     },
   };
   return peer;
+}
+
+/// Turn-scoped raw-attachment views. Every barrier and assertion below reads
+/// through these so one turn's terminal can never be answered by another
+/// turn's event, a previous scenario's late terminal, or an unscoped reply.
+export function peerTerminals(
+  peer: LivePeer,
+  identity: unknown,
+  end: "completed" | "cancelled" | "failed",
+): PeerEvent[] {
+  const key = turnIdentityKey(identity);
+  return peer
+    .turnEnds(end)
+    .filter((event) => turnIdentityKey(event.identity) === key);
+}
+
+export function peerTurnStarts(peer: LivePeer, identity: unknown): PeerEvent[] {
+  const key = turnIdentityKey(identity);
+  return peer
+    .turnStarts()
+    .filter((event) => turnIdentityKey(event.identity) === key);
+}
+
+/// Scoped `soft_interrupt_injected` events for one turn, optionally narrowed to
+/// one steer text. This is the daemon's own statement that the steer entered
+/// this execution rather than opening another one.
+export function peerInjections(
+  peer: LivePeer,
+  identity: unknown,
+  content?: string,
+): any[] {
+  const key = turnIdentityKey(identity);
+  return peer.events
+    .filter(
+      (event) =>
+        event.type === "turn_event" &&
+        turnIdentityKey(event.identity) === key &&
+        event.event?.type === "soft_interrupt_injected" &&
+        (content === undefined || event.event?.content === content),
+    )
+    .map((event) => event.event);
+}
+
+/// Positive barrier: wait until the daemon itself has published this turn's
+/// scoped terminal. A consumer-side idle flag does not imply the raw
+/// attachment has received the terminal yet, so callers must not sample the
+/// event list once after `waitIdle`.
+export async function waitForPeerTerminal(
+  peer: LivePeer,
+  identity: unknown,
+  end: "completed" | "cancelled" | "failed",
+  timeoutMs = 15_000,
+): Promise<PeerEvent[]> {
+  await waitFor(
+    `peer ${end} terminal for turn ${turnIdentityKey(identity)}`,
+    () => {
+      const matches = peerTerminals(peer, identity, end);
+      return matches.length > 0 ? matches : undefined;
+    },
+    timeoutMs,
+  );
+  return peerTerminals(peer, identity, end);
+}
+
+/// Positive barrier for the injection witness, scoped to the exact turn.
+export async function waitForPeerInjection(
+  peer: LivePeer,
+  identity: unknown,
+  content: string,
+  timeoutMs = 15_000,
+): Promise<any> {
+  return waitFor(
+    `daemon injection of ${JSON.stringify(content)} into turn ${turnIdentityKey(identity)}`,
+    () => peerInjections(peer, identity, content)[0],
+    timeoutMs,
+  );
+}
+
+export interface AdmissionWitness {
+  state: PeerStateSnapshot;
+  /// Present when the caller sent the steer itself and supplied `ackId`.
+  ack: PeerEvent | null;
+}
+
+/// Positively witness daemon admission of a steer. Admission means the session
+/// queue holds it (`pending_soft_interrupts`) and, for a steer this peer sent,
+/// the daemon acknowledged that request id. An ACP prompt response, a timeline
+/// echo, or consumer idle is not admission.
+export async function waitForPeerAdmission(
+  peer: LivePeer,
+  options: { ackId?: number; minPending?: number; label?: string; timeoutMs?: number } = {},
+): Promise<AdmissionWitness> {
+  const minPending = options.minPending ?? 1;
+  const label = options.label ?? "steer";
+  return waitFor(
+    `daemon admission of ${label}`,
+    async () => {
+      const state = await peer.state();
+      if (state.pendingSoftInterrupts < minPending) return undefined;
+      const ack = options.ackId === undefined ? null : peer.ackFor(options.ackId) ?? null;
+      if (options.ackId !== undefined && ack === null) return undefined;
+      return { state, ack };
+    },
+    options.timeoutMs ?? 15_000,
+    25,
+  );
+}
+
+/// The causal order the repaired steering scenarios require: the held origin
+/// model call is released only after the daemon admission promise resolves.
+/// `inspect` runs while the origin is still held, so a caller can assert that
+/// the steer did not open a second execution. There is no sleep, retry, or
+/// timeout-to-green path here: a missing admission keeps the origin held and
+/// fails the scenario.
+export async function holdModelUntilAdmitted<T>(options: {
+  admission: () => Promise<T>;
+  release: () => void;
+  inspect?: (witness: T) => void;
+  label?: string;
+}): Promise<T> {
+  let witness: T;
+  try {
+    witness = await options.admission();
+  } catch (error) {
+    throw new Error(
+      `held ${options.label ?? "origin"} model call was not released: admission never arrived (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  if (witness === undefined || witness === null || (witness as unknown) === false) {
+    throw new Error(
+      `held ${options.label ?? "origin"} model call was not released: admission produced no witness`,
+    );
+  }
+  options.inspect?.(witness);
+  options.release();
+  return witness;
 }
 
 export function binaryProvenance(binary: string) {
@@ -600,9 +819,45 @@ export async function runScenario(
         ? error.stack ?? error.message
         : `${safeJson(error)}${(error as { code?: number })?.code !== undefined ? ` code=${(error as { code?: number }).code}` : ""}`;
     recordScenario(evidence, name, "fail", { error: message });
+    // Fail fast on the console as well: CI keeps the job log even when the
+    // evidence file on the runner is discarded.
+    console.error(boundedFailureLine(name, message));
     persistIncremental(evidence);
     return false;
   }
+}
+
+/// Bounded so a stack repeated across scenarios cannot flood a CI log.
+export function boundedFailureLine(name: string, raw: unknown, limit = 1200): string {
+  const text = String(raw ?? "failed without an error")
+    .replace(/\s+/g, " ")
+    .trim();
+  const suffix = text.length > limit ? ` … [${text.length - limit} chars truncated]` : "";
+  return `FAILED ${name}: ${text.slice(0, limit)}${suffix}`;
+}
+
+/// One line per failure plus one line for skips, with a total budget.
+export function failureLines(evidence: Evidence, perError = 1200, total = 6000): string[] {
+  const failed = Object.entries(evidence.scenarios).filter(([, value]) => value.status === "fail");
+  const skipped = Object.entries(evidence.scenarios)
+    .filter(([, value]) => value.status === "skip")
+    .map(([name]) => name);
+  const lines: string[] = [];
+  let budget = total;
+  let emitted = 0;
+  for (const [name, value] of failed) {
+    if (budget <= 0) break;
+    const limit = Math.max(160, Math.min(perError, budget));
+    const line = boundedFailureLine(name, value.error, limit);
+    lines.push(line);
+    budget -= line.length;
+    emitted += 1;
+  }
+  if (emitted < failed.length) {
+    lines.push(`... ${failed.length - emitted} more failed scenarios were truncated`);
+  }
+  if (skipped.length > 0) lines.push(`SKIPPED ${skipped.join(", ")}`);
+  return lines;
 }
 
 /// Keep per-scenario evidence durable even when a later floating promise or

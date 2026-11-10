@@ -21,6 +21,7 @@ import {
   connectPeer,
   createWorkspace,
   daemonEnv,
+  failureLines,
   findEffort,
   lastUserText,
   newEvidence,
@@ -49,7 +50,9 @@ async function loadSdk(): Promise<any> {
   return import(pathToFileURL(requireFromConsumer.resolve("@agentclientprotocol/sdk")).href);
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+// The SDK is loaded from the consumer checkout at runtime. Untyped calls
+// return JSON objects, while explicitly typed calls keep their result type.
+function withTimeout<T = Record<string, any>>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
     promise,
     sleep(ms).then(() => {
@@ -581,6 +584,7 @@ async function main() {
     writeEvidence(evidencePath, evidence);
     console.log(`evidence: ${evidencePath}`);
     console.log(`scenarios: ${summaryLine(evidence)}`);
+    for (const line of failureLines(evidence)) console.error(line);
     await workspace.cleanup().catch(() => undefined);
     if (Object.values(evidence.scenarios).some((scenario) => scenario.status === "fail")) {
       process.exitCode = 1;

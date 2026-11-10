@@ -21,10 +21,14 @@ import {
   bodyText,
   connectPeer,
   createWorkspace,
+  failureLines,
   findEffort,
+  holdModelUntilAdmitted,
   lastUserText,
   linkBinary,
   newEvidence,
+  peerTerminals,
+  peerTurnStarts,
   requireBinary,
   runScenario,
   safeJson,
@@ -33,6 +37,9 @@ import {
   summaryLine,
   turnIdentityKey,
   waitFor,
+  waitForPeerAdmission,
+  waitForPeerInjection,
+  waitForPeerTerminal,
   writeEvidence,
   type JcodeDaemon,
   type LivePeer,
@@ -277,34 +284,82 @@ async function main() {
 
     // --- s02: forward steering through the connector -----------------------
     await runScenario(evidence, "s02-forward-steer", async () => {
-      peer!.message(20, "PEER-TURN");
-      const peerRequest = await nextRequest("PEER-TURN");
-      const steerPromise = send("FORWARD-STEER", {
+      const ORIGIN = "PEER-TURN";
+      const STEER = "FORWARD-STEER";
+      peer!.message(20, ORIGIN);
+      const peerRequest = await nextRequest(ORIGIN);
+      const identity = await waitFor(
+        "daemon identity for PEER-TURN",
+        () => peer!.identityFor(ORIGIN),
+        15_000,
+      );
+      if ((await peer!.state()).pendingSoftInterrupts !== 0) {
+        throw new Error("a stray soft interrupt was already queued before the steer");
+      }
+
+      const steerPromise = send(STEER, {
         activeTurnBehavior: "steer",
       });
-      model.replyText(peerRequest, "PEER-INTERMEDIATE");
+      // Keep the origin model call held until the daemon has actually admitted
+      // the steer. Releasing as soon as the send returned would let the origin
+      // finish first, so a consumer-side echo could be mistaken for steering.
+      const admission = await holdModelUntilAdmitted({
+        label: ORIGIN,
+        admission: () => waitForPeerAdmission(peer!, { label: STEER }),
+        inspect: () => {
+          if (model.pending.length !== 1 || model.pending[0] !== peerRequest) {
+            throw new Error(
+              `the steer opened a second model call before admission: ${safeJson(
+                model.pending.map((entry) => bodyText(entry.body).slice(0, 120)),
+              )}`,
+            );
+          }
+        },
+        release: () => model.replyText(peerRequest, "PEER-INTERMEDIATE"),
+      });
       await steerPromise;
-      const steerRequest = await nextRequest("FORWARD-STEER");
+      const steerRequest = await nextRequest(STEER);
+      if (steerRequest === peerRequest) throw new Error("steer reused the origin model request");
       model.replyText(steerRequest, "FORWARD-ANSWER");
       await waitIdle();
+      // Consumer idle is not the daemon terminal. Wait for this exact turn's
+      // scoped terminal (and the scoped injection) before scoring anything.
+      const completed = await waitForPeerTerminal(peer!, identity, "completed");
+      const injection = await waitForPeerInjection(peer!, identity, STEER);
 
       const texts = userTexts(await timeline());
-      const expected = ["BASELINE", "PEER-TURN", "FORWARD-STEER"];
+      const expected = ["BASELINE", ORIGIN, STEER];
       if (JSON.stringify(texts) !== JSON.stringify(expected)) {
         throw new Error(`unexpected user messages: ${safeJson(texts)}`);
       }
-      const identity = peer!.identityFor("PEER-TURN");
-      const starts = peer!.turnStarts().filter((event) => turnIdentityKey(event.identity) === turnIdentityKey(identity));
-      const completed = peer!.turnEnds("completed").filter((event) => turnIdentityKey(event.identity) === turnIdentityKey(identity));
-      const cancelled = peer!.turnEnds("cancelled").filter((event) => turnIdentityKey(event.identity) === turnIdentityKey(identity));
+      const starts = peerTurnStarts(peer!, identity);
+      const cancelled = peerTerminals(peer!, identity, "cancelled");
       if (starts.length !== 1) throw new Error(`expected one turn start, got ${starts.length}`);
       if (completed.length !== 1) throw new Error(`expected one completion, got ${completed.length}`);
       if (cancelled.length !== 0) throw new Error("forward steer cancelled the turn");
+      const extraStarts = peer!.turnStarts().filter((event) => event.user_content === STEER);
+      if (extraStarts.length !== 0) {
+        throw new Error(
+          `the steer opened a separate daemon turn: ${safeJson(extraStarts.map((event) => event.identity))}`,
+        );
+      }
+      if (!Array.isArray(injection.client_ids) || injection.client_ids.length === 0) {
+        throw new Error("the injected forward steer carried no client ids");
+      }
       return {
         steerJoinedIdentity: identity,
+        admission: {
+          pendingSoftInterrupts: admission.state.pendingSoftInterrupts,
+          originHeldUntilAdmitted: true,
+        },
         turnStarts: starts.length,
         turnCompletions: completed.length,
         turnCancellations: cancelled.length,
+        injection: {
+          point: injection.point,
+          clientIds: injection.client_ids.length,
+          scopedToOrigin: true,
+        },
         request: requestSummary(steerRequest),
         texts,
       };
@@ -312,33 +367,95 @@ async function main() {
 
     // --- s03: reverse steering from the peer ------------------------------
     await runScenario(evidence, "s03-reverse-steer", async () => {
-      const prompt = send("FOREGROUND");
-      const foregroundRequest = await nextRequest("FOREGROUND");
-      peer!.softInterrupt(21, "REVERSE-STEER");
-      model.replyText(foregroundRequest, "FOREGROUND-INTERMEDIATE");
+      const ORIGIN = "FOREGROUND";
+      const STEER = "REVERSE-STEER";
+      const STEER_REQUEST_ID = 21;
+      const STEER_CLIENT_ID = "reverse-steer-21";
+      const prompt = send(ORIGIN);
+      const foregroundRequest = await nextRequest(ORIGIN);
+      const identity = await waitFor(
+        "daemon identity for the Paseo-origin turn",
+        () => peer!.identityFor(ORIGIN),
+        15_000,
+      );
+      if (!identity) throw new Error("no daemon identity for the Paseo-origin turn");
+      if ((await peer!.state()).pendingSoftInterrupts !== 0) {
+        throw new Error("a stray soft interrupt was already queued before the reverse steer");
+      }
+
+      peer!.softInterrupt(STEER_REQUEST_ID, STEER, false, STEER_CLIENT_ID);
+      // The peer's own steer must be acknowledged and visible in the session
+      // queue before the origin model call is released. A timeline echo alone
+      // only proves the consumer displayed something.
+      const admission = await holdModelUntilAdmitted({
+        label: ORIGIN,
+        admission: () =>
+          waitForPeerAdmission(peer!, { ackId: STEER_REQUEST_ID, label: STEER }),
+        inspect: (witness) => {
+          if (!witness.ack) throw new Error(`no daemon ack for steer id ${STEER_REQUEST_ID}`);
+          if (model.pending.length !== 1 || model.pending[0] !== foregroundRequest) {
+            throw new Error(
+              `the reverse steer opened a second model call before admission: ${safeJson(
+                model.pending.map((entry) => bodyText(entry.body).slice(0, 120)),
+              )}`,
+            );
+          }
+        },
+        release: () => model.replyText(foregroundRequest, "FOREGROUND-INTERMEDIATE"),
+      });
       await prompt;
       await waitFor(
         "peer steer text in Paseo timeline",
-        async () => userTexts(await timeline()).includes("REVERSE-STEER"),
+        async () => userTexts(await timeline()).includes(STEER),
         15_000,
       );
-      const steerRequest = await nextRequest("REVERSE-STEER");
+      const steerRequest = await nextRequest(STEER);
+      if (steerRequest === foregroundRequest) {
+        throw new Error("steer reused the foreground model request");
+      }
       model.replyText(steerRequest, "REVERSE-ANSWER");
       await waitIdle();
+      const completed = await waitForPeerTerminal(peer!, identity, "completed");
+      const injection = await waitForPeerInjection(peer!, identity, STEER);
 
       const texts = userTexts(await timeline());
-      const expected = ["BASELINE", "PEER-TURN", "FORWARD-STEER", "FOREGROUND", "REVERSE-STEER"];
+      const expected = ["BASELINE", "PEER-TURN", "FORWARD-STEER", ORIGIN, STEER];
       if (JSON.stringify(texts) !== JSON.stringify(expected)) {
         throw new Error(`unexpected user messages: ${safeJson(texts)}`);
       }
-      const identity = peer!.identityFor("FOREGROUND");
-      if (!identity) throw new Error("no daemon identity for the Paseo-origin turn");
-      const completed = peer!.turnEnds("completed").filter((event) => turnIdentityKey(event.identity) === turnIdentityKey(identity));
-      const cancelled = peer!.turnEnds("cancelled").filter((event) => turnIdentityKey(event.identity) === turnIdentityKey(identity));
-      if (completed.length !== 1 || cancelled.length !== 0) {
-        throw new Error(`turn terminal mismatch completed=${completed.length} cancelled=${cancelled.length}`);
+      const starts = peerTurnStarts(peer!, identity);
+      const cancelled = peerTerminals(peer!, identity, "cancelled");
+      if (starts.length !== 1 || completed.length !== 1 || cancelled.length !== 0) {
+        throw new Error(
+          `turn terminal mismatch starts=${starts.length} completed=${completed.length} cancelled=${cancelled.length}`,
+        );
       }
-      return { foregroundTurnIdentity: identity, texts, request: requestSummary(steerRequest) };
+      const extraStarts = peer!.turnStarts().filter((event) => event.user_content === STEER);
+      if (extraStarts.length !== 0) {
+        throw new Error(
+          `the reverse steer opened a separate daemon turn: ${safeJson(extraStarts.map((event) => event.identity))}`,
+        );
+      }
+      if (!Array.isArray(injection.client_ids) || !injection.client_ids.includes(STEER_CLIENT_ID)) {
+        throw new Error(
+          `the injected reverse steer did not carry ${STEER_CLIENT_ID}: ${safeJson(injection.client_ids)}`,
+        );
+      }
+      return {
+        foregroundTurnIdentity: identity,
+        admission: {
+          pendingSoftInterrupts: admission.state.pendingSoftInterrupts,
+          ackId: admission.ack?.id,
+          originHeldUntilAdmitted: true,
+        },
+        injection: {
+          point: injection.point,
+          clientIds: injection.client_ids,
+          scopedToOrigin: true,
+        },
+        texts,
+        request: requestSummary(steerRequest),
+      };
     });
 
     // --- s04: one execution, several prompt responses, settled once ------
@@ -358,20 +475,44 @@ async function main() {
       const expectedInput = originUsage.promptTokens + steerUsage.promptTokens;
       const expectedOutput = originUsage.completionTokens + steerUsage.completionTokens;
       const requestsBefore = model.requests.length;
+      // A late idle from s03 can arrive after this subscription opens and
+      // would otherwise become the first recorded transition. Establish the
+      // causal baseline first: this execution's evidence starts at its own
+      // running snapshot.
+      const baseline = await agent();
+      const baselineStatus = String(baseline.status ?? "");
+      const baselineTurnId = baseline.activeTurn?.turnId ?? null;
+      if (baselineStatus !== "idle" || baselineTurnId !== null) {
+        throw new Error(
+          `scenario did not start from an idle baseline: ${safeJson({ status: baselineStatus, activeTurnId: baselineTurnId })}`,
+        );
+      }
       const snapshots: Array<{
         lifecycle: string;
         activeTurnId: string | null;
         usage: Record<string, unknown> | null;
       }> = [];
+      let executionObserved = false;
+      let baselineSnapshotsIgnored = 0;
       const unsubscribe = paseo.daemon.agentManager.subscribe(
         (event: any) => {
           if (event.type !== "agent_state") return;
           if (event.agent.id !== agentId) return;
-          snapshots.push({
+          const snapshot = {
             lifecycle: String(event.agent.lifecycle),
             activeTurnId: event.agent.activeTurnId ?? null,
             usage: event.agent.lastUsage ?? null,
-          });
+          };
+          if (!executionObserved) {
+            // Leading non-running snapshots are baseline or a late idle from
+            // the previous scenario, not this execution's transitions.
+            if (snapshot.lifecycle !== "running") {
+              baselineSnapshotsIgnored += 1;
+              return;
+            }
+            executionObserved = true;
+          }
+          snapshots.push(snapshot);
         },
         { agentId, replayState: false },
       );
@@ -407,7 +548,23 @@ async function main() {
           10_000,
         );
 
-        model.replyText(originRequest, "CORRELATION-ANSWER", originUsage);
+        // Paseo accepting the steer is not daemon admission. Keep the origin
+        // model call held until the session queue holds the steer, then assert
+        // it did not start an execution of its own.
+        const admission = await holdModelUntilAdmitted({
+          label: ORIGIN,
+          admission: () => waitForPeerAdmission(peer!, { label: STEER }),
+          inspect: () => {
+            if (model.pending.length !== 1 || model.pending[0] !== originRequest) {
+              throw new Error(
+                `the steer opened a second model call before daemon admission: ${safeJson(
+                  model.pending.map((entry) => bodyText(entry.body).slice(0, 120)),
+                )}`,
+              );
+            }
+          },
+          release: () => model.replyText(originRequest, "CORRELATION-ANSWER", originUsage),
+        });
         const steerRequest = await nextRequest(STEER);
         if (steerRequest === originRequest) {
           throw new Error("steer reused the origin model request");
@@ -425,6 +582,10 @@ async function main() {
         await steer;
         await waitIdle();
 
+        // Consumer idle is not the daemon terminal: wait for the exact shared
+        // turn's scoped terminal and its scoped injection before scoring.
+        const completed = await waitForPeerTerminal(peer!, daemonIdentity, "completed");
+        const injection = await waitForPeerInjection(peer!, daemonIdentity, STEER);
         if (model.requests.length - requestsBefore !== 2) {
           throw new Error(
             `expected exactly two model calls in one execution, got ${model.requests.length - requestsBefore}`,
@@ -438,20 +599,6 @@ async function main() {
           .filter((event) => event.user_content === STEER);
         if (otherStarts.length !== 0) {
           throw new Error("the steer opened a second daemon turn");
-        }
-        const injection = peer!.events
-          .filter(
-            (event) =>
-              event.type === "turn_event" &&
-              turnIdentityKey(event.identity) === turnIdentityKey(daemonIdentity),
-          )
-          .map((event) => event.event)
-          .find(
-            (inner: any) =>
-              inner?.type === "soft_interrupt_injected" && inner.content === STEER,
-          );
-        if (!injection) {
-          throw new Error("the steer was not injected into the origin's daemon turn");
         }
         if (!Array.isArray(injection.client_ids) || injection.client_ids.length === 0) {
           throw new Error("the injected steer carried no client ids");
@@ -516,6 +663,12 @@ async function main() {
           paseoLocalTurnId: during.turnId,
           daemonTurnIdentity: daemonIdentity,
           daemonCompletions: completedFor(daemonIdentity),
+          terminalBarrier: { completedEvents: completed.length },
+          admission: {
+            pendingSoftInterrupts: admission.state.pendingSoftInterrupts,
+            originHeldUntilAdmitted: true,
+          },
+          baselineSnapshotsIgnored,
           modelCalls: model.requests.length - requestsBefore,
           injectedSteer: {
             point: injection.point,
@@ -1137,6 +1290,7 @@ async function main() {
     writeEvidence(evidencePath, evidence);
     console.log(`evidence: ${evidencePath}`);
     console.log(`scenarios: ${summaryLine(evidence)}`);
+    for (const line of failureLines(evidence)) console.error(line);
     if (process.env.JCODE_ACCEPTANCE_KEEP === "1") {
       console.log(`kept isolated workspace: ${workspace.root}`);
     } else {
