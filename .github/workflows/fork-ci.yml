@@ -255,6 +255,7 @@ jobs:
           for filter in \
             server::client_lifecycle::turn_event_channel_tests \
             cancel_after_turn_claim_is_preserved \
+            user_response_socket_registration_follows_explicit_capability \
             agent::turn_ownership::tests; do
             python3 .github/scripts/run_with_timeout.py 600 \
               "$cargo_bin" test --locked --target x86_64-unknown-linux-gnu \
