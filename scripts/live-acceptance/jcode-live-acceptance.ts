@@ -1,7 +1,7 @@
 // Live v1 acceptance through the real Paseo ACP connector.
 //
 // The consumer modules are imported from the consumer-owned checkout
-// (PASEO_CONSUMER_ROOT, default /home/ctaylor/repos/paseo-v1-acceptance). No
+// (PASEO_CONSUMER_ROOT, supplied by run-live-acceptance.sh). No
 // consumer source is copied or stubbed: the real Paseo daemon creates the real
 // `jcode acp` child and this harness drives it exactly as the app does.
 //
@@ -40,7 +40,7 @@ import {
 } from "./jcode-live-common.ts";
 
 const CONSUMER_ROOT =
-  process.env.PASEO_CONSUMER_ROOT ?? "/home/ctaylor/repos/paseo-v1-acceptance";
+  process.env.PASEO_CONSUMER_ROOT ?? process.cwd();
 
 async function loadConsumer(relativePath: string): Promise<any> {
   return import(pathToFileURL(path.join(CONSUMER_ROOT, relativePath)).href);

@@ -1,5 +1,5 @@
-// Live ACP companion probe for contract surfaces the Paseo connector does not
-// expose yet: capability/attachment advertisement, prompt-response correlation,
+// Live ACP companion probe, independently checking capability advertisement,
+// prompt-response correlation,
 // explicit skill selection and `null` clear, `_jcode/detach`, and config
 // aliases.
 //
@@ -40,7 +40,7 @@ import {
 } from "./jcode-live-common.ts";
 
 const CONSUMER_ROOT =
-  process.env.PASEO_CONSUMER_ROOT ?? "/home/ctaylor/repos/paseo-v1-acceptance";
+  process.env.PASEO_CONSUMER_ROOT ?? process.cwd();
 
 async function loadSdk(): Promise<any> {
   // Resolve the ACP SDK from the consumer checkout so the probe and the

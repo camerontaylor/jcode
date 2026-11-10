@@ -88,6 +88,7 @@ run_one() {
   set +e
   (
     cd "$consumer_root"
+    PASEO_CONSUMER_ROOT="$consumer_root" \
     JCODE_ACCEPTANCE_OUT="$out_dir/$name.evidence.json" \
       node --conditions=source --import tsx "$harness"
   ) 2>&1 | tee "$out_dir/$name.log"
