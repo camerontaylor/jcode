@@ -22,6 +22,13 @@ that resembles a placeholder. Missing fields, changed content, identity splits
 or collapses and notification reordering fail comparison.
 The checked-in records contain original emitted values.
 
+The harness also validates the corpus itself, not only the replay: every
+`.jsonl` file must be referenced by an `acp_fixture::check` call, each record
+must carry exactly `seq`, `dir` and `msg` with a monotonic sequence number,
+`msg` must be framed JSON-RPC 2.0, and every request in either direction must
+have its response. That keeps the client half, which the replay comparison
+does not read, usable as the consumer's executable contract.
+
 Run on a development host with sufficient memory, following AGENTS.md:
 
 ```sh
@@ -57,11 +64,8 @@ No timer sleeps establish protocol ordering.
 
 - `08-negotiation-legacy-v1.jsonl`: future-version negotiation, full adapter metadata, extension errors, ignored prompt metadata, legacy shared-control refusal and omitted correlation. Uses the existing test-only Unix daemon stub, with no runtime capability switch.
 
-Wire tests also exercise observer detach, queued-input withdrawal, adopted-steer detach,
-parameter errors and observer-close brackets. All contract-gap tests are enabled.
-
-Number 06 is intentionally absent: acceptance scenario 6 in the contract is
-the deferred v2 delivery track, not a missing v1 recording.
+- `09-elicitation-form-v1.jsonl`: opted-in form elicitation. This pulled-forward
+  optional feature has its own transcript, separate from the mid-turn attach case.
 
 - `09-midturn-attach-v1.jsonl`: observer attaches to a gated active turn;
   exactly one start/terminal pair preserves its identity. Replayed by the
@@ -71,3 +75,13 @@ the deferred v2 delivery track, not a missing v1 recording.
   ACP-owned turn; peer user chunk and its message identity precede affected output.
 - `11-import-repeated-user-replay-v1.jsonl`: two deliberately equal stored
   user rows imported and loaded twice; distinct IDs and grouping stay stable.
+- `12-skill-selection-clear-v1.jsonl`: explicit metadata selection, textual
+  selection and an explicit `skill: null` clear. Each selection-only response
+  has `turnId: null` and `role: none`, and clearing emits no activation notice
+  or model turn. Recorded and replayed by `acp_skill_clear_round_trip`.
+
+Wire tests also exercise observer detach, queued-input withdrawal, adopted-steer detach,
+parameter errors and observer-close brackets. All contract-gap tests are enabled.
+
+Number 06 is intentionally absent: acceptance scenario 6 in the contract is
+the deferred v2 delivery track, not a missing v1 recording.

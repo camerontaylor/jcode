@@ -992,3 +992,5 @@ mod tool_wait;
 mod clause_index;
 
 mod retirement;
+
+mod commands_v1;

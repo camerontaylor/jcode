@@ -51,7 +51,7 @@ behavior of the clause, not a browser/client UI promise.
 | C-DISCOVERY-P08 | acp_conformance_negotiation_legacy_v1; acp_capability_metadata_identifies_each_attachment; unit: initialize_advertises_jcode_capability_meta_in_every_profile |
 | C-OPERATIONS-P01 | acp_conformance_create_list_load; acp_conformance_list_metadata_and_pagination; acp_conformance_close_owner_aware_v1; acp_conformance_config_commands_v1; UI/pagination cursor handling is consumer-side |
 | C-OPERATIONS-P02 | acp_conformance_create_list_load; acp_conformance_list_metadata_and_pagination; acp_conformance_close_owner_aware_v1; acp_conformance_config_commands_v1; UI/pagination cursor handling is consumer-side |
-| C-SHARED-P01 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; known-fail: acp_conformance_transport_loss_withdraws_waiting_steer |
+| C-SHARED-P01 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; acp_conformance_transport_loss_withdraws_waiting_steer |
 | C-V2CLOSE-P01 | Deferred v2/SDK track; no v1 wire requirement |
 | C-V2CLOSE-P02 | Deferred v2/SDK track; no v1 wire requirement |
 | C-V2CLOSE-P03 | Deferred v2/SDK track; no v1 wire requirement |
@@ -69,7 +69,7 @@ behavior of the clause, not a browser/client UI promise.
 | C-CONFIG-P01 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
 | C-CONFIG-P02 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
 | C-CONFIG-P03 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
-| C-CONFIG-P04 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
+| C-CONFIG-P04 | acp_conformance_compact_command_compacts_real_history; acp_conformance_subagent_command_spawns_live_worker; acp_conformance_config_commands_v1; unit: advertised_commands_parse_to_real_dispatch_variants |
 | C-CONFIG-P05 | acp_conformance_config_commands_v1; acp_conformance_config_peer_update_contract; acp_conformance_busy_config_errors_are_atomic; acp_conformance_peer_config_serializes_after_active_turn; acp_skill_clear_round_trip; unit: advertised_commands_parse_to_real_dispatch_variants, unknown_escaped_and_path_like_slash_text_is_untouched, a_busy_session_rejects_an_explicit_skill_selection_before_insertion |
 | C-CONFIG-P06 | Deferred v2 command insertion/echo |
 | C-CONFIG-P07 | acp_skill_clear_round_trip; unit: skill_selection_reads_the_canonical_metadata_field |
@@ -86,10 +86,10 @@ behavior of the clause, not a browser/client UI promise.
 | C-ERRORS-P03 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
 | C-ERRORS-P04 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
 | C-ERRORS-P05 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
-| C-ACCEPTANCE-P01 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P01 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P02 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P03 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-ACCEPTANCE-P01 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P01 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P02 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P03 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
 | C-SDK-P01 | Deferred v2/SDK track; no v1 wire requirement |
 | C-SDK-P02 | Deferred v2/SDK track; no v1 wire requirement |
 | C-SDK-P03 | Deferred v2/SDK track; no v1 wire requirement |
@@ -132,10 +132,10 @@ behavior of the clause, not a browser/client UI promise.
 | C-OPERATIONS-P01-R8 | acp_conformance_create_list_load; acp_conformance_list_metadata_and_pagination; acp_conformance_close_owner_aware_v1; acp_conformance_config_commands_v1; UI/pagination cursor handling is consumer-side |
 | C-OPERATIONS-P01-R9 | acp_conformance_create_list_load; acp_conformance_list_metadata_and_pagination; acp_conformance_close_owner_aware_v1; acp_conformance_config_commands_v1; UI/pagination cursor handling is consumer-side |
 | C-OPERATIONS-P01-R10 | acp_conformance_create_list_load; acp_conformance_list_metadata_and_pagination; acp_conformance_close_owner_aware_v1; acp_conformance_config_commands_v1; UI/pagination cursor handling is consumer-side |
-| C-SHARED-P01-R1 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; known-fail: acp_conformance_transport_loss_withdraws_waiting_steer |
-| C-SHARED-P01-R2 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; known-fail: acp_conformance_transport_loss_withdraws_waiting_steer |
-| C-SHARED-P01-R3 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; known-fail: acp_conformance_transport_loss_withdraws_waiting_steer |
-| C-SHARED-P01-R4 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; known-fail: acp_conformance_transport_loss_withdraws_waiting_steer |
+| C-SHARED-P01-R1 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; acp_conformance_transport_loss_withdraws_waiting_steer |
+| C-SHARED-P01-R2 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; acp_conformance_transport_loss_withdraws_waiting_steer |
+| C-SHARED-P01-R3 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; acp_conformance_transport_loss_withdraws_waiting_steer |
+| C-SHARED-P01-R4 | acp_conformance_shared_observe_steer; acp_conformance_detach_withdraws_pending_steer; acp_conformance_seeded_three_client_invariants; acp_conformance_transport_loss_preserves_inserted_work; acp_conformance_transport_loss_withdraws_waiting_steer |
 | C-CORRELATION-P01-I1 | acp_conformance_shared_observe_steer; acp_conformance_config_commands_v1; consumer completion deduplication is consumer-side |
 | C-CORRELATION-P01-I2 | acp_conformance_shared_observe_steer; acp_conformance_config_commands_v1; consumer completion deduplication is consumer-side |
 | C-CORRELATION-P01-I3 | acp_conformance_shared_observe_steer; acp_conformance_config_commands_v1; consumer completion deduplication is consumer-side |
@@ -149,18 +149,18 @@ behavior of the clause, not a browser/client UI promise.
 | C-ERRORS-P04-I2 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
 | C-ERRORS-P04-I3 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
 | C-ERRORS-P04-I4 | acp_conformance_framing_ids_and_errors; acp_ignored_mcp_servers_notice_follows_the_response; acp_conformance_negotiation_legacy_v1; unit: initialize_advertises_jcode_capability_meta_in_every_profile; authentication/approval UI is consumer-side |
-| C-CORPUS-P01-I1 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P01-I2 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P01-I3 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P01-I4 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P02-I1 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P02-I2 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P02-I3 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P02-I4 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P02-I5 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P02-I6 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P02-I7 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
-| C-CORPUS-P02-I8 | Corpus scenarios 01–05, 07–11 through acp_conformance tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P01-I1 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P01-I2 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P01-I3 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P01-I4 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P02-I1 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P02-I2 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P02-I3 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P02-I4 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P02-I5 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P02-I6 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
+| C-CORPUS-P02-I7 | Corpus recordings 07 and 12; acp_conformance_compact_command_compacts_real_history; acp_conformance_subagent_command_spawns_live_worker; consumer replay is Paseo-side |
+| C-CORPUS-P02-I8 | Corpus recordings 01–05, 07–12 through acp_conformance and acp_shared_session tests; v2 scenario 06 deferred; consumer replay is Paseo-side |
 | C-SDK-P03-R1 | Deferred v2/SDK track; no v1 wire requirement |
 | C-SDK-P03-R2 | Deferred v2/SDK track; no v1 wire requirement |
 | C-SDK-P03-R3 | Deferred v2/SDK track; no v1 wire requirement |
@@ -205,10 +205,9 @@ The original atlas report was observational and its hypotheses are superseded.
 - **QA-STOP**, confirmed jcode defect: the 500 ms cancel reset races bash's
   750 ms handoff. `acp_conformance_stop_observed_bash_wait` runs a real bash
   file gate and asserts canceled retirement without further model output.
-  Ignored on this lane's baseline; fix d46434b52 belongs to the separate lane.
-  Enabled companion `acp_known_defect_stop_observed_peer` pins the working
-  provider-stream case. We do not make wrong cancellation behavior a passing
-  requirement. The ignored regression can be enabled after integrating the fix.
+  The repair is integrated and this regression is enabled. It passed in
+  starting-head Fork CI `42738049168`, as did the companion
+  `acp_known_defect_stop_observed_peer` for the provider-stream case.
 - **QA-STEER**, consumer defect: jcode emits the reverse steer. The corrected,
   enabled `acp_known_defect_reverse_steer_is_mirrored` sends an actual daemon
   SoftInterrupt, observes admission, releases the provider safe point and checks
@@ -220,12 +219,11 @@ The original atlas report was observational and its hypotheses are superseded.
   session with two deliberate equal user prompts, verifies one replay per row,
   grouping/order, distinct IDs and repeat-load stability. Deduplicating equal
   text would fail this test and hide legitimate repeated submissions.
-- **ACP-LOAD-BRACKET**, newly found jcode defect: repeated mid-turn load opens
-  nested observation brackets. Ignored regression
-  `acp_conformance_repeated_midturn_load_has_one_bracket` preserves the failing
-  schedule. The ordinary generator explicitly detaches before loading an
-  already-attached view. This restriction is a known coverage gap, not a proposed
-  contract rule. Fix is assigned to the separate defect lane.
+- **ACP-LOAD-BRACKET**, repaired jcode defect: repeated mid-turn load previously
+  opened nested observation brackets. The retained-attachment repair is integrated,
+  and `acp_conformance_repeated_midturn_load_has_one_bracket` is enabled and
+  passed in starting-head Fork CI `42738049168`. The earlier baseline restriction
+  is not a current contract requirement or a remaining missing implementation.
 
 ## Generator and corpus accounting
 
@@ -244,9 +242,11 @@ The original atlas report was observational and its hypotheses are superseded.
   running; origin/steer response correlation; terminal identity; no unanswered
   requests; exact origin output before/after steer; targeted cancellation and
   successor completion; detach preserves the authoritative witness's completion.
-- Corpus files 01–05 and 07–11: ten files. 06 is the deferred v2 delivery scenario.
-  New 09 is active-turn attach, 10 reverse steer, 11 clean imported repeated user
-  rows. All are live recorded and structurally replayed via the existing helper.
+- The corpus contains twelve files: 01–05 and 07–12, with separate form and
+  mid-turn attach recordings numbered 09. Scenario 06 is deferred v2 delivery.
+  Recording 12 adds explicit skill selection and null clear through
+  `acp_skill_clear_round_trip`. Every file is recorded from the real adapter
+  and structurally replayed via the existing helper.
 
 ## Additional retirement probes and precise coverage limits
 
@@ -266,22 +266,24 @@ The original atlas report was observational and its hypotheses are superseded.
 - `acp_conformance_transport_loss_preserves_inserted_work`: abrupt origin ACP
   child loss closes the daemon socket; a surviving witness receives normal
   completion of the same inserted turn.
-- **ACP-LOST-STEER**, new known defect:
+- **ACP-LOST-STEER**, repaired jcode defect:
   `acp_conformance_transport_loss_withdraws_waiting_steer` confirms queue admission
   before killing the steering ACP child, while the provider remains gated before
-  its insertion safe point. After allowing cleanup and releasing the gate, the
-  baseline makes a second provider call for the disconnected attachment's input.
-  This execution assertion (2 calls instead of 1), not the cleanup timeout,
-  demonstrates the failed pending-input withdrawal. The assertion is ignored on
-  this baseline and assigned to the separate fix lane. Already-inserted steers
-  are intentionally outside this withdrawal expectation.
+  its insertion safe point. The baseline made a second provider call for the
+  disconnected attachment's input. Connection-owned cleanup is now integrated,
+  the regression is enabled, and it passed in starting-head Fork CI
+  `42738049168`. Already-inserted steers are intentionally outside this
+  withdrawal expectation.
 
 Indexed does not mean independently tested end to end. Remaining limits:
 
-- C-CONFIG-P04: compact/subagent discovery and parsing are pinned; full daemon
-  compaction scheduling and spawned-worker lifetime are not exercised by this
-  ACP suite. Those mechanisms are outside the new boundary harness; no claim
-  that launch completion equals worker completion is tested here.
+- C-CONFIG-P04: `commands_v1.rs` now exercises real daemon compaction and
+  worker lifetime. The compaction test verifies the summarization input and
+  that the next provider call receives the applied summary instead of older
+  history, retaining recent turns. The subagent test distinguishes the launch
+  tool receipt from a child session's live delta and completed turn. Native
+  provider compaction, visible-window spawn and worker failure/cancellation
+  remain outside these two focused command tests.
 - C-CONTENT-P04 and the client-side halves of list/config/capability clauses:
   consumer rendering, own-echo suppression, diagnostic deduplication, reconnect
   UI and capability gating belong to the Paseo consumer tests.
@@ -290,7 +292,7 @@ Indexed does not mean independently tested end to end. Remaining limits:
   observable-but-forbidden-Stop daemon capability combination is invented.
 - The generator covers short, valid bounded schedules, not all arbitrary
   unbounded histories. Abrupt transport loss is tested separately; repeated load
-  without detach is retained as a known-fail schedule. Provider faults and many
+  without detach is covered by an enabled regression. Provider faults and many
   queued steers remain in existing focused tests rather than randomized here.
 - Source/version governance, deferred v2/SDK and consumer-only clauses have
   explicit non-wire dispositions in the inventory. Wording proposals above

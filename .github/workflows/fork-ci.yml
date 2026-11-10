@@ -246,6 +246,28 @@ jobs:
             "$(rustup which cargo)" test --locked --target x86_64-unknown-linux-gnu \
             -p jcode-app-core --lib retention_readiness -- --nocapture
 
+      - name: Run shared-control cancellation and publication regressions
+        shell: bash
+        run: |
+          # ACP wire scenarios do not execute app-core's deterministic dispatch
+          # interleavings. Keep the original Phase 1 race evidence on this head.
+          cargo_bin="$(rustup which cargo)"
+          for filter in \
+            server::client_lifecycle::turn_event_channel_tests \
+            cancel_after_turn_claim_is_preserved \
+            user_response_socket_registration_follows_explicit_capability \
+            agent::turn_ownership::tests; do
+            python3 .github/scripts/run_with_timeout.py 600 \
+              "$cargo_bin" test --locked --target x86_64-unknown-linux-gnu \
+              -p jcode-app-core --lib "$filter" -- --nocapture
+          done
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$cargo_bin" test --locked --target x86_64-unknown-linux-gnu \
+            -p jcode-protocol --lib turn_identity -- --nocapture
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$cargo_bin" test --locked --target x86_64-unknown-linux-gnu \
+            -p jcode-harness-api-server --lib session_catalog -- --nocapture
+
       - name: Run disconnect telemetry responsiveness regressions
         shell: bash
         run: |

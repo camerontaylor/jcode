@@ -677,6 +677,12 @@ impl Agent {
         {
             allowed.insert("applet".into());
         }
+        if self.ui_capabilities.0
+            && enabled.is_none()
+            && let Some(allowed) = allowed.as_mut()
+        {
+            allowed.insert("user_response".into());
+        }
         let mut tools = self.registry.definitions(allowed.as_ref()).await;
         if enabled.is_none() && !self.disabled_tools.is_empty() {
             tools.retain(|tool| {
@@ -1156,6 +1162,7 @@ impl Agent {
         if let Some(allowed) = self.allowed_tools.as_ref()
             && !self.registry.tool_is_allowed(allowed, name)
             && !(name == "applet" && self.ui_capabilities.1)
+            && !(name == "user_response" && self.ui_capabilities.0)
         {
             return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));
         }
