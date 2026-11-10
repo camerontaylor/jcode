@@ -260,6 +260,12 @@ jobs:
               "$cargo_bin" test --locked --target x86_64-unknown-linux-gnu \
               -p jcode-app-core --lib "$filter" -- --nocapture
           done
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$cargo_bin" test --locked --target x86_64-unknown-linux-gnu \
+            -p jcode-protocol --lib turn_identity -- --nocapture
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$cargo_bin" test --locked --target x86_64-unknown-linux-gnu \
+            -p jcode-harness-api-server --lib session_catalog -- --nocapture
 
       - name: Run disconnect telemetry responsiveness regressions
         shell: bash
