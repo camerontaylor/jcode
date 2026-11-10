@@ -333,6 +333,10 @@ async fn acp_skill_clear_round_trip() -> Result<()> {
             "a bare clear starts no model turn: {updates:#?}"
         );
 
+        // Keep explicit selection and null-clear semantics in the shared
+        // consumer corpus, not only in this agent-side assertion.
+        crate::test_support::acp_fixture::check("12-skill-selection-clear-v1.jsonl", &acp.tape)?;
+
         // Clear with text: the text runs as a normal, unskilled turn.
         let prompt = "Reply with exactly the word: alpha";
         let ran = acp
