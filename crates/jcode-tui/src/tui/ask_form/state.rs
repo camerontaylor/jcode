@@ -369,12 +369,10 @@ impl Form {
             let value = if question.multi {
                 json!(question.selected_values())
             } else {
-                Value::String(
-                    question
-                        .confirmed
-                        .clone()
-                        .expect("answered single-select has a confirmed value"),
-                )
+                let Some(confirmed) = question.confirmed.clone() else {
+                    return Err(format!("question {} has no confirmed answer", index + 1));
+                };
+                Value::String(confirmed)
             };
             content.insert(question.field.clone(), value);
             if question.other_selected()

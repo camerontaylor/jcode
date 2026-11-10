@@ -1,6 +1,6 @@
 pub mod account_picker;
-mod ask_form;
 pub(crate) mod app;
+mod ask_form;
 pub mod justrust_status;
 
 #[derive(Clone)]

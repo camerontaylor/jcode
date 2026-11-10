@@ -181,7 +181,7 @@ fn parse_questions(input: &Value) -> Result<Vec<Question>> {
             let description = option
                 .get("description")
                 .and_then(Value::as_str)
-                .unwrap_or_default()
+                .unwrap_or("")
                 .to_string();
             let preview = option
                 .get("preview")

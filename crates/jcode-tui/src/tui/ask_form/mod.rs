@@ -276,8 +276,7 @@ pub(crate) fn render(frame: &mut ratatui::Frame, app: &dyn TuiState) {
 }
 
 /// Record the request id returned by `send_elicitation_response`.
-pub(crate) fn record_response_id(app: &mut App, request_id: u64) {
-    let _ = app;
+pub(crate) fn record_response_id(_app: &mut App, request_id: u64) {
     state::with(|state| reconcile::record_response_id(state, request_id));
 }
 

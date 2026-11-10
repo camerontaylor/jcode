@@ -54,7 +54,11 @@ fn question_index(name: &str) -> Option<u32> {
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    digits.parse().ok().filter(|index| (1..=64).contains(index))
+    let index: u32 = match digits.parse() {
+        Ok(index) => index,
+        Err(_) => return None,
+    };
+    (1..=64).contains(&index).then_some(index)
 }
 
 fn parse_question(
