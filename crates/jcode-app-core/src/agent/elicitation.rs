@@ -1,7 +1,9 @@
-//! Session UI capability changes invalidate the provider's locked tool surface.
+//! Session UI capability changes register form tools and invalidate the locked
+//! provider tool surface.
 use super::*;
 impl Agent {
     pub(crate) async fn set_form_capabilities(&mut self, desktop: bool, applet: bool) {
+        self.register_ask_user().await;
         if self.ui_capabilities == (desktop, applet) {
             return;
         }
@@ -29,6 +31,34 @@ impl Agent {
             allowed,
             self.disabled_tools.clone(),
         );
+        self.invalidate_sdk_tools();
+    }
+
+    /// Register `ask_user` once any form-capable client attaches, before the
+    /// `(desktop, applet)` early return: a TUI reports `(false, false)`.
+    ///
+    /// The registry is the source of truth, so `Agent` needs no extra field and
+    /// detaching never unregisters the tool. Registration invalidates the locked
+    /// surface once, because the first request may already have locked it.
+    async fn register_ask_user(&mut self) {
+        if !crate::elicitation::global().forms(&self.session.id) {
+            return;
+        }
+        if self
+            .registry
+            .tool_names()
+            .await
+            .iter()
+            .any(|name| name == "ask_user")
+        {
+            return;
+        }
+        self.registry
+            .register(
+                "ask_user".into(),
+                Arc::new(crate::elicitation::ask_user::AskUserTool),
+            )
+            .await;
         self.invalidate_sdk_tools();
     }
 }
