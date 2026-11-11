@@ -280,7 +280,9 @@ cp "$HOME/fixtures/${url##*/}" "$dest"
             "runtime_policy_and_preparation",
             "final_verification",
         ] {
-            assert!(stderr.contains(&format!("[cloud prepare timing] {stage} ")));
+            assert!(stderr.contains(&format!(
+                "[CLOUD_TIMING] stage=prepare operation={stage} outcome=ok duration_ms="
+            )));
         }
         eprintln!(
             "representative generated-shell fixture: cold={cold_elapsed:?} (18 capability executions), warm={warm_elapsed:?} (0 capability executions, 2 version checks)"

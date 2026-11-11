@@ -438,7 +438,8 @@ impl Target {
                 .write_all(script.as_bytes());
             let output = child.wait_with_output()?;
             for line in String::from_utf8_lossy(&output.stderr).lines() {
-                if line.starts_with("[cloud prepare timing] ")
+                if line.starts_with("[CLOUD_TIMING] stage=prepare ")
+                    || line.starts_with("[cloud prepare timing] ")
                     || line.starts_with("[cloud prepare] capability cache warm=")
                 {
                     crate::logging::info(line);

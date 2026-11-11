@@ -1808,35 +1808,31 @@ fn restore_repo(
 }
 
 fn refuse_unreturned(root: &Path, repo: &RepoManifest) -> Result<()> {
-    {
-        {
-            let root = root.to_path_buf();
-            let owners = git(
-                &root,
-                &["for-each-ref", "--format=%(refname)", SNAPSHOT_REF_PREFIX],
-            )
-            .unwrap_or_default();
-            let mut owners: Vec<&str> = owners
-                .lines()
-                .filter_map(|name| name.strip_prefix("refs/jcode-cloud/"))
-                .filter_map(|name| name.strip_suffix("/base"))
-                .collect();
-            owners.sort_unstable();
-            owners.dedup();
-            let recovery = if owners.len() == 1 {
-                format!(
-                    "Run `jcode cloud return --session {}` locally to recover that session's work first",
-                    owners[0]
-                )
-            } else {
-                "Run `jcode cloud where` to identify the earlier session, then `jcode cloud return --session <id>` locally to recover its work first".to_string()
-            };
-            bail!(
-                "{} on the cloud host has changes that were never returned; refusing to overwrite. {recovery}. No cloud working files were overwritten",
-                repo.root,
-            );
-        }
-    }
+    let root = root.to_path_buf();
+    let owners = git(
+        &root,
+        &["for-each-ref", "--format=%(refname)", SNAPSHOT_REF_PREFIX],
+    )
+    .unwrap_or_default();
+    let mut owners: Vec<&str> = owners
+        .lines()
+        .filter_map(|name| name.strip_prefix("refs/jcode-cloud/"))
+        .filter_map(|name| name.strip_suffix("/base"))
+        .collect();
+    owners.sort_unstable();
+    owners.dedup();
+    let recovery = if owners.len() == 1 {
+        format!(
+            "Run `jcode cloud return --session {}` locally to recover that session's work first",
+            owners[0]
+        )
+    } else {
+        "Run `jcode cloud where` to identify the earlier session, then `jcode cloud return --session <id>` locally to recover its work first".to_string()
+    };
+    bail!(
+        "{} on the cloud host has changes that were never returned; refusing to overwrite. {recovery}. No cloud working files were overwritten",
+        repo.root,
+    );
 }
 
 fn restore_repo_contents(

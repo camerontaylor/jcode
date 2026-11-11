@@ -331,9 +331,10 @@ fn timed_managed_stage<T>(stage: &str, operation: impl FnOnce() -> Result<T>) ->
     let start = Instant::now();
     let result = operation();
     crate::logging::info(&format!(
-        "cloud prepare: {stage} took {}ms (ok={})",
-        start.elapsed().as_millis(),
-        result.is_ok()
+        "[CLOUD_TIMING] stage=prepare operation={} outcome={} duration_ms={:.3}",
+        stage.replace(' ', "_"),
+        if result.is_ok() { "ok" } else { "error" },
+        start.elapsed().as_secs_f64() * 1000.0
     ));
     result
 }
@@ -559,7 +560,7 @@ mkdir -p "$HOME/.local/bin" "$root"
 stage_started=$(date +%s%N)
 stage_timing() {{
   stage_now=$(date +%s%N)
-  echo "[cloud prepare timing] $1 $(( (stage_now - stage_started) / 1000000 ))ms" >&2
+  echo "[CLOUD_TIMING] stage=prepare operation=$1 outcome=ok duration_ms=$(( (stage_now - stage_started) / 1000000 ))" >&2
   stage_started=$stage_now
 }}
 # Serialize cooperating preflights without terminating any running process.
