@@ -11,10 +11,8 @@ pub(super) struct DaemonSession {
     pub(super) socket_path: Option<PathBuf>,
     /// Shared with the router, which builds steer recovery requests itself.
     pub(super) next_request_id: Arc<AtomicU64>,
-    /// Client instance id of this logical attachment: `{process}/{n}`. Socket
-    /// replacement retains ownership; separate sessions
-    /// in one adapter process must not look like each other's peer, so the
-    /// per-process id is not enough.
+    /// Logical attachment id: `{process}/{n}`. Socket replacement retains ownership;
+    /// separate sessions in one adapter process must not appear as each other's peer.
     pub(super) instance_id: String,
     /// Event routing state, shared with this connection's reader task. The
     /// reader owns clones of the shared state, never the session itself, so
@@ -27,8 +25,7 @@ pub(super) struct DaemonSession {
     pub(super) prompt_tasks_done: tokio::sync::Notify,
     pub(super) catalog_refresh: Mutex<()>,
     pub(super) ui_state: Arc<Mutex<SessionUiState>>,
-    /// Workspace root reported by the ACP client, used to compose the
-    /// project-local skill overlay for slash-skill resolution.
+    /// ACP workspace root for the project-local slash-skill overlay.
     pub(super) working_dir: Option<PathBuf>,
     /// Sticky skill selection, resent with every prompt. The daemon treats a
     /// missing `active_skill` as "clear the selection", mirroring the TUI.

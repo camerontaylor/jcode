@@ -14,10 +14,9 @@ pub(super) fn append_tool(session: &mut Session, value: &serde_json::Value) -> b
     let Some(payload) = value.get("payload") else {
         return false;
     };
-    let kind = payload
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let Some(kind) = payload.get("type").and_then(|v| v.as_str()) else {
+        return false;
+    };
     let Some(id) = payload
         .get("call_id")
         .and_then(|v| v.as_str())
@@ -38,7 +37,7 @@ pub(super) fn append_tool(session: &mut Session, value: &serde_json::Value) -> b
                     None => serde_json::json!({}),
                 }
             } else {
-                serde_json::json!({"input": payload.get("input").cloned().unwrap_or_default()})
+                serde_json::json!({"input": payload.get("input").cloned().unwrap_or(serde_json::Value::Null)})
             };
             (
                 Role::Assistant,
@@ -51,7 +50,10 @@ pub(super) fn append_tool(session: &mut Session, value: &serde_json::Value) -> b
             )
         }
         "function_call_output" | "custom_tool_call_output" => {
-            let output = payload.get("output").cloned().unwrap_or_default();
+            let output = payload
+                .get("output")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             (
                 Role::User,
                 ContentBlock::ToolResult {
