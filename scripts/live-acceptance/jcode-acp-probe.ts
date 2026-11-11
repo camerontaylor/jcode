@@ -23,9 +23,11 @@ import {
   daemonEnv,
   failureLines,
   findEffort,
+  holdModelUntilAdmitted,
   lastUserText,
   newEvidence,
   requireBinary,
+  resolveConsumerRoot,
   runScenario,
   safeJson,
   sleep,
@@ -34,14 +36,15 @@ import {
   summaryLine,
   turnIdentityKey,
   waitFor,
+  waitForPeerAdmission,
+  waitForPeerInjection,
   writeEvidence,
   type JcodeDaemon,
   type LivePeer,
   type MockModel,
 } from "./jcode-live-common.ts";
 
-const CONSUMER_ROOT =
-  process.env.PASEO_CONSUMER_ROOT ?? process.cwd();
+const CONSUMER_ROOT = resolveConsumerRoot();
 
 async function loadSdk(): Promise<any> {
   // Resolve the ACP SDK from the consumer checkout so the probe and the
@@ -96,6 +99,7 @@ async function main() {
       env: daemonEnv(workspace, model.baseUrl),
       stdio: ["pipe", "pipe", "pipe"],
     });
+    if (!acp.stdin || !acp.stdout) throw new Error("jcode acp did not expose stdio pipes");
     acp.stderr?.on("data", (data) => stderr.push(String(data)));
     const stream = sdk.ndJsonStream(
       Writable.toWeb(acp.stdin) as any,
@@ -298,8 +302,36 @@ async function main() {
         15_000,
       );
       const turnId = started.params.turnId;
+      const beforeSteer = await peer!.state();
+      if (beforeSteer.pendingSoftInterrupts !== 0) {
+        throw new Error(`session queue was not empty before the steer: ${safeJson(beforeSteer)}`);
+      }
       const joinPromise = prompt("ACP-JOIN");
-      model.replyText(baseRequest, "PEER-BASE-ANSWER");
+      // The prompt write is not admission. Hold the origin model call until the
+      // daemon's own state reports the steer queued on this session, so the
+      // origin cannot finish first and turn the steer into a second origin.
+      const admission = await holdModelUntilAdmitted({
+        label: "PEER-BASE",
+        admission: () => waitForPeerAdmission(peer!, { label: "ACP-JOIN steer" }),
+        inspect: (witness) => {
+          if (witness.state.sessionId !== protocolSessionId) {
+            throw new Error(
+              `steer was admitted to ${safeJson(witness.state.sessionId)} instead of ${protocolSessionId}`,
+            );
+          }
+          if (witness.state.pendingSoftInterrupts < 1) {
+            throw new Error(`admission reported no pending steer: ${safeJson(witness)}`);
+          }
+          if (model.pending.length !== 1 || model.pending[0] !== baseRequest) {
+            throw new Error(
+              `the steer opened a second model call before admission: ${safeJson(
+                model.pending.map((entry) => bodyText(entry.body).slice(0, 120)),
+              )}`,
+            );
+          }
+        },
+        release: () => model.replyText(baseRequest, "PEER-BASE-ANSWER"),
+      });
       const joinRequest = await waitFor(
         "provider request containing steer text",
         () => model.pending.find((entry) => bodyText(entry.body).includes("ACP-JOIN")),
@@ -314,6 +346,14 @@ async function main() {
       if (correlation?.turnId !== turnId) {
         throw new Error(
           `steer turnId ${safeJson(correlation?.turnId)} != notification turnId ${safeJson(turnId)}`,
+        );
+      }
+      // The daemon's own statement that the steer entered this execution.
+      const injection = await waitForPeerInjection(peer!, turnId, "ACP-JOIN");
+      const extraStarts = peer!.turnStarts().filter((event) => event.user_content === "ACP-JOIN");
+      if (extraStarts.length !== 0) {
+        throw new Error(
+          `the steer opened a separate daemon turn: ${safeJson(extraStarts.map((event) => event.identity))}`,
         );
       }
       await waitFor(
@@ -354,6 +394,14 @@ async function main() {
         observedTurnId: turnId,
         steerRole: correlation.role,
         steerTurnId: correlation.turnId,
+        admission: {
+          sessionId: admission.state.sessionId,
+          pendingSoftInterrupts: admission.state.pendingSoftInterrupts,
+        },
+        injection: {
+          content: injection.content ?? null,
+          clientIds: injection.client_ids ?? null,
+        },
         peerTerminals: {
           completed: peer!.turnEnds("completed").map((event) => event.identity),
           cancelled: peer!.turnEnds("cancelled").map((event) => event.identity),

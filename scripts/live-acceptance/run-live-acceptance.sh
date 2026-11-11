@@ -5,8 +5,10 @@
 #   JCODE_E2E_BINARY=/abs/path/to/jcode scripts/live-acceptance/run-live-acceptance.sh
 #
 # Optional:
-#   PASEO_CONSUMER_ROOT   consumer checkout (default: sibling checkout
-#                         ../paseo-v1-acceptance next to this repository)
+#   PASEO_CONSUMER_ROOT   consumer checkout, absolute or relative (default:
+#                         sibling checkout ../paseo-v1-acceptance next to this
+#                         repository). Resolved to its physical absolute path
+#                         before any harness or evidence path uses it.
 #   JCODE_ACCEPTANCE_OUT_DIR  evidence directory (default:
 #                         $JCODE_SCRATCH_DIR/live-acceptance/... when set,
 #                         otherwise <repo>/target/live-acceptance/...)
@@ -36,6 +38,13 @@ fail() {
 [[ "$binary" = /* ]] || fail "JCODE_E2E_BINARY must be an absolute path: $binary"
 [[ -x "$binary" ]] || fail "JCODE_E2E_BINARY is not executable: $binary"
 [[ -d "$consumer_root" ]] || fail "consumer checkout not found: $consumer_root"
+# A caller may pass a relative root (for example ../paseo-v1-acceptance).
+# Resolve the physical checkout before anything else uses it: the harnesses
+# hand it to createRequire, which needs an absolute path, and evidence must
+# record the real checkout even when it was named through a symlink.
+resolved_consumer_root="$(cd -- "$consumer_root" && pwd -P)" ||
+  fail "consumer checkout is not reachable: $consumer_root"
+consumer_root="$resolved_consumer_root"
 [[ -x "$consumer_root/node_modules/.bin/tsx" ]] || fail "consumer checkout has no tsx: $consumer_root"
 [[ -f "$consumer_root/plugins/jcode-provider/index.server.ts" ]] || fail "consumer jcode provider plugin missing"
 

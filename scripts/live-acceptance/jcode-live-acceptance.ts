@@ -30,6 +30,7 @@ import {
   peerTerminals,
   peerTurnStarts,
   requireBinary,
+  resolveConsumerRoot,
   runScenario,
   safeJson,
   startJcodeDaemon,
@@ -46,8 +47,7 @@ import {
   type MockModel,
 } from "./jcode-live-common.ts";
 
-const CONSUMER_ROOT =
-  process.env.PASEO_CONSUMER_ROOT ?? process.cwd();
+const CONSUMER_ROOT = resolveConsumerRoot();
 
 async function loadConsumer(relativePath: string): Promise<any> {
   return import(pathToFileURL(path.join(CONSUMER_ROOT, relativePath)).href);

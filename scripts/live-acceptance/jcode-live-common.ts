@@ -6,7 +6,7 @@
 // deterministic and no provider tokens are spent.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -883,6 +883,16 @@ export function summaryLine(evidence: Evidence): string {
   const failed = entries.filter(([, value]) => value.status === "fail").length;
   const skipped = entries.filter(([, value]) => value.status === "skip").length;
   return `${passed} passed, ${failed} failed, ${skipped} skipped`;
+}
+
+/// Resolve the consumer checkout to its physical absolute path. A relative
+/// `PASEO_CONSUMER_ROOT` is fine for a shell `cd`, but `createRequire` and
+/// `pathToFileURL` need an absolute path, and evidence must name the real
+/// checkout. An absolute input resolves to the same physical directory.
+export function resolveConsumerRoot(
+  raw: string = process.env.PASEO_CONSUMER_ROOT ?? process.cwd(),
+): string {
+  return realpathSync(path.resolve(raw));
 }
 
 export function requireBinary(): string {

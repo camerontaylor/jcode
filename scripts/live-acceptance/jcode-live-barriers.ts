@@ -33,6 +33,7 @@ import {
   peerTerminals,
   peerTurnStarts,
   requireBinary,
+  resolveConsumerRoot,
   runScenario,
   safeJson,
   sleep,
@@ -49,7 +50,7 @@ import {
   type MockModel,
 } from "./jcode-live-common.ts";
 
-const CONSUMER_ROOT = process.env.PASEO_CONSUMER_ROOT ?? process.cwd();
+const CONSUMER_ROOT = resolveConsumerRoot();
 
 async function loadSdk(): Promise<any> {
   const requireFromConsumer = createRequire(path.join(CONSUMER_ROOT, "package.json"));
@@ -103,6 +104,7 @@ async function main() {
       env: daemonEnv(workspace, model.baseUrl),
       stdio: ["pipe", "pipe", "pipe"],
     });
+    if (!acp.stdin || !acp.stdout) throw new Error("jcode acp did not expose stdio pipes");
     acp.stderr?.on("data", (data) => stderr.push(String(data)));
     const stream = sdk.ndJsonStream(
       Writable.toWeb(acp.stdin) as any,

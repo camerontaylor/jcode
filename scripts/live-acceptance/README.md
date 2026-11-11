@@ -21,10 +21,11 @@ is a local OpenAI-compatible HTTP server with deliberately released responses,
 so turns are deterministic and no provider tokens are spent.
 
 The connector harness imports the consumer modules from
-`PASEO_CONSUMER_ROOT` by absolute path. The runner defaults it to the sibling
-checkout `../paseo-v1-acceptance` next to this repository; set it explicitly
-when the consumer lives elsewhere. It never copies, stubs, or edits consumer
-source.
+`PASEO_CONSUMER_ROOT` by absolute path. The runner accepts an absolute or
+relative value, defaults it to the sibling checkout `../paseo-v1-acceptance`
+next to this repository, and resolves it to the physical checkout before any
+harness, `createRequire` or evidence path uses it. Set it explicitly when the
+consumer lives elsewhere. It never copies, stubs, or edits consumer source.
 
 The runner starts Node with `--conditions=source`, so `@getpaseo/plugin`
 resolves to the checkout's TypeScript source rather than a possibly stale
