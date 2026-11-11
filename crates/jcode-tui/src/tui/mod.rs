@@ -1,5 +1,6 @@
 pub mod account_picker;
 pub(crate) mod app;
+mod ask_form;
 pub mod justrust_status;
 
 #[derive(Clone)]
@@ -1092,6 +1093,10 @@ pub trait TuiState {
     fn side_panel(&self) -> &crate::side_panel::SidePanelSnapshot;
     /// Whether the side panel replaces the transcript (fullscreen mode).
     fn side_panel_fullscreen(&self) -> bool {
+        false
+    }
+    /// Whether the provider-failover prompt is waiting for a decision.
+    fn pending_provider_failover_active(&self) -> bool {
         false
     }
     /// Whether to pin read images to a side pane
