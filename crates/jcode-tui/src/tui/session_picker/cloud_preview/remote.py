@@ -1,5 +1,6 @@
 # Read-only remote projection. No sidecars or canonical session writes.
 import collections
+from datetime import datetime
 import json
 import mmap
 import os
@@ -151,6 +152,61 @@ def journal_fields(data):
         yield from record
 
 
+def array_items(data, start, end):
+    if data[start] != 91:
+        raise ValueError('expected message array')
+    pos = skip_space(data, start + 1)
+    while pos < end and data[pos] != 93:
+        stop = value_end(data, pos)
+        if stop <= pos or stop > end:
+            raise ValueError('invalid message value')
+        yield pos, stop
+        pos = skip_space(data, stop)
+        if data[pos] == 44:
+            pos = skip_space(data, pos + 1)
+        elif data[pos] != 93:
+            raise ValueError('expected message separator')
+
+
+def message_id(data, start):
+    if data[start] == 123:
+        for name, a, b in fields(data, start):
+            if name == 'id':
+                value = json.loads(data[a:b])
+                return value if isinstance(value, str) else None
+    return None
+
+
+def journal_message_ids(path):
+    # Index only journal candidates, not every message in a huge snapshot.
+    ids = set()
+    if path.exists() and path.stat().st_size:
+        with path.open('rb') as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            for record in journal_records(data):
+                try:
+                    for key, start, end in record:
+                        if key == 'append_messages':
+                            for a, _ in array_items(data, start, end):
+                                mid = message_id(data, a)
+                                if mid is not None:
+                                    ids.add(mid)
+                except (ValueError, IndexError, TypeError):
+                    continue
+    return ids
+
+
+def timestamp(value):
+    try:
+        stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if stamp.tzinfo is None:
+            return None
+        fraction = re.search(r'\.(\d+)', value)
+        nanos = int((fraction.group(1) + '000000000')[:9]) if fraction else 0
+        return int(stamp.replace(microsecond=0).timestamp()), nanos
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        return None
+
+
 def recent_messages(data, start, end, messages, ranges=None):
     # Locate the tail without deserializing old message bodies. The range deque
     # is bounded even for snapshots with millions of messages.
@@ -194,20 +250,33 @@ def recent_messages(data, start, end, messages, ranges=None):
 def project(path, preview):
     session = {}
     messages = collections.deque(maxlen=MAX_MESSAGES)
+    journal = path.with_suffix('.journal.jsonl')
+    candidates = journal_message_ids(journal)
+    seen = set()
     with path.open('rb') as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
         ranges = collections.deque(maxlen=MAX_MESSAGES) if preview else None
         for key, start, end in fields(data, message_ranges=ranges):
             if key == 'messages':
+                if candidates:
+                    for a, _ in array_items(data, start, end):
+                        mid = message_id(data, a)
+                        if mid in candidates:
+                            seen.add(mid)
                 if preview:
                     recent_messages(data, start, end, messages, ranges)
             elif key not in BULKY and (preview or key in INVENTORY_FIELDS) and end - start <= 256 * 1024:
                 session[key] = json.loads(data[start:end])
-    journal = path.with_suffix('.journal.jsonl')
+    del candidates
+    snapshot_updated_at = timestamp(session.get('updated_at'))
+    in_stale_prefix = True
     if journal.exists() and journal.stat().st_size:
         with journal.open('rb') as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
             for record in journal_records(data):
                 pending_meta = {}
                 pending_messages = collections.deque(maxlen=MAX_MESSAGES)
+                new_ids = set()
+                has_messages = False
+                all_seen = True
                 try:
                     for key, start, stop in record:
                         if key == 'meta':
@@ -221,10 +290,31 @@ def project(path, preview):
                             if not route_present:
                                 meta.pop('route_api_method', None)
                             pending_meta.update(meta)
-                        elif key == 'append_messages' and preview:
-                            recent_messages(data, start, stop, pending_messages)
+                        elif key == 'append_messages':
+                            fresh = collections.deque(maxlen=MAX_MESSAGES)
+                            for a, b in array_items(data, start, stop):
+                                mid = message_id(data, a)
+                                has_messages = True
+                                all_seen = all_seen and mid is not None and mid in seen
+                                if mid is None or (mid not in seen and mid not in new_ids):
+                                    fresh.append((a, b))
+                                    if mid is not None:
+                                        new_ids.add(mid)
+                            if preview:
+                                recent_messages(data, start, stop, pending_messages, fresh)
                 except (ValueError, IndexError, TypeError):
                     continue
+                entry_updated_at = timestamp(pending_meta.get('updated_at'))
+                stale = all_seen if has_messages else (
+                    snapshot_updated_at is not None and entry_updated_at is not None
+                    and entry_updated_at <= snapshot_updated_at
+                )
+                # Match JournalReplayDedupe: only a folded prefix is stale;
+                # later entries still apply metadata while filtering messages.
+                if in_stale_prefix and stale:
+                    continue
+                in_stale_prefix = False
+                seen.update(new_ids)
                 session.update(pending_meta)
                 messages.extend(pending_messages)
     if preview:

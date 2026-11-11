@@ -320,3 +320,208 @@ fn remote_projection_ignores_stale_sidecar_and_respects_away_lease() {
     let result: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert!(result["sessions"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn remote_journal_dedupe_matches_rust_checkpoint_replay() {
+    use serde_json::{Value, json};
+    fn message(id: usize) -> Value {
+        json!({"id":id.to_string(),"role":"user","content":[{"type":"text","text":id.to_string()}]})
+    }
+    fn entry(snapshot: &Value, ids: &[usize], title: &str, stamp: &str) -> String {
+        let mut meta = snapshot.clone();
+        meta["title"] = json!(title);
+        meta["model"] = json!(title);
+        meta["working_dir"] = json!(format!("/{title}"));
+        meta["updated_at"] = json!(stamp);
+        // Match the canonical struct field order used by Rust glued salvage.
+        format!(
+            "{{\"meta\":{},\"append_messages\":{}}}",
+            meta,
+            serde_json::to_string(&ids.iter().copied().map(message).collect::<Vec<_>>()).unwrap()
+        )
+    }
+    let id = "dedupe_parity";
+    let session = Session::create_with_id(id.into(), None, Some("snapshot-new".into()));
+    let mut snapshot = serde_json::to_value(session).unwrap();
+    snapshot["updated_at"] = json!("2026-01-01T00:00:10.123456789Z");
+    snapshot["model"] = json!("snapshot-new");
+    snapshot["working_dir"] = json!("/snapshot-new");
+    snapshot["messages"] = json!((1..=100).map(message).collect::<Vec<_>>());
+    let old = "2026-01-01T00:00:01Z";
+    let fresh = "2026-01-01T00:00:11Z";
+    let stale = entry(&snapshot, &(1..=50).collect::<Vec<_>>(), "old", old);
+    let overlap = entry(
+        &snapshot,
+        &[95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 101, 105],
+        "fresh",
+        fresh,
+    );
+    let metadata = entry(&snapshot, &[], "metadata", "2026-01-01T00:00:10.123456790Z");
+    let cases = [
+        ("stale", format!("{stale}\n"), "snapshot-new", 100),
+        (
+            "mixed-overlap",
+            format!("{stale}\n{overlap}\n"),
+            "fresh",
+            105,
+        ),
+        (
+            "stale-ids-new-time",
+            entry(&snapshot, &[1, 2], "old", "2099-01-01T00:00:00Z"),
+            "snapshot-new",
+            100,
+        ),
+        (
+            "metadata-equal-offset",
+            entry(&snapshot, &[], "old", "2026-01-01T01:00:10.123456789+01:00"),
+            "snapshot-new",
+            100,
+        ),
+        (
+            "metadata-nanosecond",
+            format!("{stale}\n{metadata}\n"),
+            "metadata",
+            100,
+        ),
+        (
+            "metadata-after-fresh",
+            format!("{overlap}\n{}\n", entry(&snapshot, &[], "after", old)),
+            "after",
+            105,
+        ),
+        (
+            "glued-torn-prefix",
+            format!("{{\"meta\":{{{overlap}\n"),
+            "fresh",
+            105,
+        ),
+        (
+            "malformed-and-torn-tail",
+            format!("{stale}\nnot-json\n{overlap}\n{{\"meta\":"),
+            "fresh",
+            105,
+        ),
+    ];
+    let mut cases: Vec<_> = cases
+        .into_iter()
+        .map(|(name, journal, title, count)| (name, journal, title, count, 100))
+        .collect();
+    let new = entry(&snapshot, &(101..=110).collect::<Vec<_>>(), "fresh", fresh);
+    cases.extend([
+        ("no-journal", String::new(), "snapshot-new", 100, 100),
+        ("empty-no-journal", String::new(), "snapshot-new", 0, 0),
+        (
+            "empty-old-metadata",
+            entry(&snapshot, &[], "old", old),
+            "snapshot-new",
+            0,
+            0,
+        ),
+        ("empty-new-metadata", metadata.clone(), "metadata", 0, 0),
+        (
+            "empty-unseen-ids-old-time",
+            entry(&snapshot, &[1, 2], "unseen", old),
+            "unseen",
+            2,
+            0,
+        ),
+        (
+            "new-after-stale",
+            format!("{stale}\n{new}\n"),
+            "fresh",
+            110,
+            100,
+        ),
+        (
+            "subset-noncontiguous",
+            entry(&snapshot, &[99, 1, 50], "old", fresh),
+            "snapshot-new",
+            100,
+            100,
+        ),
+        (
+            "duplicates-after-fresh",
+            format!("{overlap}\n{}\n", entry(&snapshot, &[1, 101], "after", old)),
+            "after",
+            105,
+            100,
+        ),
+        (
+            "salvaged-stale-prefix",
+            format!("{{\"meta\":{{{stale}{new}\n"),
+            "fresh",
+            110,
+            100,
+        ),
+    ]);
+    for (case, journal, title, count, initial_count) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        let path = sessions.join(format!("{id}.json"));
+        let journal_path = path.with_extension("journal.jsonl");
+        let mut snapshot = snapshot.clone();
+        if initial_count == 0 {
+            snapshot["messages"] = json!([]);
+        }
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        if !journal.is_empty() {
+            std::fs::write(&journal_path, journal.as_bytes()).unwrap();
+        }
+        let rust = Session::load_from_path(&path).unwrap();
+        assert_eq!(rust.messages.len(), count, "Rust oracle must replay {case}");
+        assert_eq!(
+            rust.title.as_deref(),
+            Some(title),
+            "Rust oracle metadata {case}"
+        );
+        let (projected, _) =
+            parse_preview(&run_projection(home.path(), "preview", id).stdout).unwrap();
+        let expected: Vec<_> = rust
+            .messages
+            .iter()
+            .rev()
+            .take(80)
+            .rev()
+            .map(|m| m.id.as_str())
+            .collect();
+        let actual: Vec<_> = projected.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(actual, expected, "message order for {case}");
+        assert_eq!(projected.title, rust.title, "preview title for {case}");
+        assert_eq!(projected.model, rust.model, "preview model for {case}");
+        assert_eq!(
+            projected.updated_at, rust.updated_at,
+            "preview timestamp for {case}"
+        );
+        let output = run_projection(home.path(), "inventory", id);
+        let inventory: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            inventory["sessions"][0]["title"],
+            json!(rust.title),
+            "inventory {case}"
+        );
+        assert_eq!(
+            inventory["sessions"][0]["cwd"],
+            json!(rust.working_dir),
+            "inventory cwd {case}"
+        );
+        let stamp: chrono::DateTime<chrono::Utc> =
+            serde_json::from_value(inventory["sessions"][0]["updated_at"].clone()).unwrap();
+        assert_eq!(stamp, rust.updated_at, "inventory timestamp {case}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "snapshot changed for {case}"
+        );
+        if journal.is_empty() {
+            assert!(!journal_path.exists(), "journal created for {case}");
+        } else {
+            assert_eq!(
+                std::fs::read(&journal_path).unwrap(),
+                journal.as_bytes(),
+                "journal changed for {case}"
+            );
+        }
+    }
+}
