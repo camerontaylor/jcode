@@ -100,6 +100,7 @@ fn history_images_base_omits_only_matching_image_sets() {
 fn recent_history_bounds_seven_thousand_message_bootstrap() {
     let messages: Vec<_> = (0..7000)
         .map(|index| crate::protocol::HistoryMessage {
+            stored_index: Some(index),
             response_stats: None,
             role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
             content: format!("{index}: {}", "x".repeat(2000)),
@@ -131,6 +132,7 @@ fn recent_history_bounds_seven_thousand_message_bootstrap() {
 fn recent_history_preserves_archive_prompt_offset_and_rebases_images() {
     let mut messages = delta_test_messages();
     messages.insert(0, crate::protocol::HistoryMessage {
+        stored_index: None,
         response_stats: None, role: "system".to_owned(),
         content: "Earlier conversation compacted - 10 historical messages hidden from the UI. Scroll to the top to load older history. Hidden user prompts: 7.".to_owned(),
         tool_calls: None, tool_data: None,
