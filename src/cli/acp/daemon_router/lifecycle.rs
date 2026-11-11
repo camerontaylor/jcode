@@ -337,6 +337,21 @@ impl RouterState {
             } else if let Some(change) = session_state_change(&event) {
                 return vec![RouteAction::SessionState(change)];
             }
+            // Joined prompts share the outcome without duplicating streamed
+            // text or usage. Continuation events reset intermediate limits.
+            if matches!(
+                event,
+                ServerEvent::TurnStopped { .. }
+                    | ServerEvent::ProviderGuardrail { .. }
+                    | ServerEvent::Interrupted
+                    | ServerEvent::KvCacheRequest { .. }
+                    | ServerEvent::RetryRollback { .. }
+            ) {
+                let joined = own.joined.clone();
+                for member in joined {
+                    self.deliver(member, event.clone());
+                }
+            }
             self.deliver(request_id, event);
             return Vec::new();
         }

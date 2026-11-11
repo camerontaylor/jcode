@@ -971,3 +971,45 @@ fn reconnect_new_steer_can_receive_output_of_retained_owned_turn() {
     assert!(drain(&mut failed).is_empty());
     assert_eq!(router.active_turn_identity(), Some(identity(1)));
 }
+
+#[test]
+fn joined_prompts_share_limits_and_continuation_resets_without_duplicate_text() {
+    let mut router = steering_router();
+    let mut first = steer(&mut router, 77);
+    router.route(turn_started(1, ours(77), None));
+    let mut second = steer(&mut router, 78);
+    router.route(scoped(1, injected("steer 78", &[cid(78)])));
+    router.route(scoped(
+        1,
+        ServerEvent::TurnStopped {
+            reason: TurnStopReason::LimitReached,
+            message: "limit".into(),
+            provider_stop_reason: Some("max_tokens".into()),
+        },
+    ));
+    router.route(scoped(1, ServerEvent::RetryRollback { attempt: 1, max: 3 }));
+    router.route(scoped(1, delta("continued")));
+    router.route(scoped(
+        1,
+        ServerEvent::ProviderGuardrail {
+            stop_reason: Some("refusal".into()),
+            message: "blocked".into(),
+        },
+    ));
+    router.route(scoped_terminal(1, TurnEndStatus::Completed));
+    for (id, rx) in [(77, &mut first), (78, &mut second)] {
+        let events = drain(rx);
+        let mut outcome = TurnOutcome::routed();
+        for event in &events {
+            outcome.observe(event, id);
+        }
+        assert_eq!(outcome.stop_reason(false), "refusal");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::RetryRollback { .. }))
+        );
+        assert_eq!(done_count(&events, id), 1);
+        assert_eq!(texts(&events).len(), usize::from(id == 77));
+    }
+}

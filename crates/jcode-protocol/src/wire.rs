@@ -252,6 +252,9 @@ pub enum Request {
     #[serde(rename = "get_compacted_history")]
     GetCompactedHistory {
         id: u64,
+        /// Expand a recent remote window rather than archived compaction.
+        #[serde(default)]
+        recent_history: bool,
         /// Number of leading compacted messages the client wants rendered before the live tail.
         visible_messages: usize,
     },
@@ -338,6 +341,15 @@ pub enum Request {
         mode: TranscriptMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+    },
+
+    /// Live push-to-talk state for a TUI session (waveform, live text).
+    /// Fire-and-forget: the server answers `Done` once it has fanned out.
+    #[serde(rename = "voice_activity")]
+    VoiceActivity {
+        id: u64,
+        session_id: String,
+        activity: VoiceActivity,
     },
 
     /// Execute a shell command from `!cmd` in the active remote session.
@@ -924,8 +936,8 @@ pub enum Request {
 
 mod events;
 pub use events::{
-    AccountUsageSnapshot, SERVER_CAPABILITIES, SERVER_CAPABILITY_TURN_ORIGIN, ServerEvent,
-    TurnEndStatus, TurnIdentity, TurnOrigin, TurnOriginKind, server_capabilities,
+    AccountUsageSnapshot, AccountUsageWindow, SERVER_CAPABILITIES, SERVER_CAPABILITY_TURN_ORIGIN,
+    ServerEvent, TurnEndStatus, TurnIdentity, TurnOrigin, TurnOriginKind, server_capabilities,
 };
 
 impl std::fmt::Debug for Request {

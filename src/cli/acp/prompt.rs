@@ -169,7 +169,12 @@ impl AcpRuntime {
         let scope = format!("{session_id}:own:{prompt_id}");
         let mut mapper = EventMapper::with_scope(session_id.clone(), self.profile, scope.clone())
             .with_working_dir(session.working_dir.clone());
-        let mut stop_reason = "end_turn".to_string();
+        let mut outcome = if session.router.lock().await.supports_turn_origin() {
+            TurnOutcome::routed()
+        } else {
+            // Legacy streams can still contain unscoped stale interrupts.
+            TurnOutcome::default()
+        };
         let mut turn_usage = TurnUsage::default();
         let mut steers = 0u32;
         loop {
@@ -202,13 +207,29 @@ impl AcpRuntime {
                 self.write_jcode_extension_event(&session_id, &event)
                     .await?;
             }
+            outcome.observe(&event, prompt_id);
             match event {
                 ServerEvent::Ack { .. } => {}
                 ServerEvent::Done { id } if id == prompt_id => break,
-                ServerEvent::Interrupted => {
-                    stop_reason = "cancelled".to_string();
-                }
+                ServerEvent::Interrupted
+                | ServerEvent::TurnStopped { .. }
+                | ServerEvent::ProviderGuardrail { .. } => {}
                 ServerEvent::Error { id, message, .. } if id == prompt_id => {
+                    // The router's scoped cancellation is authoritative, even
+                    // if the producer finishes with an error during shutdown.
+                    if outcome.stop_reason(false) == "cancelled" {
+                        let router = session.router.lock().await;
+                        let response = streamed_prompt_response(
+                            "cancelled",
+                            &turn_usage,
+                            router.prompt_correlation(prompt_id),
+                            router.prompt_was_turnless(prompt_id),
+                        );
+                        drop(router);
+                        ticket.release().await;
+                        self.write_result(rpc_id, response).await?;
+                        return Ok(());
+                    }
                     ticket.release().await;
                     self.write_error_value(rpc_id, JSONRPC_SERVER_ERROR, message)
                         .await?;
@@ -271,7 +292,7 @@ impl AcpRuntime {
 
         let router = session.router.lock().await;
         let response = streamed_prompt_response(
-            &stop_reason,
+            outcome.stop_reason(false),
             &turn_usage,
             router.prompt_correlation(prompt_id),
             router.prompt_was_turnless(prompt_id),
