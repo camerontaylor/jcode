@@ -994,3 +994,4 @@ mod clause_index;
 mod retirement;
 
 mod commands_v1;
+mod history_replay;

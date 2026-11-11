@@ -940,6 +940,7 @@ mod transport;
 use transport::*;
 mod session;
 use session::*;
+mod history_images;
 mod presentation;
 use presentation::*;
 mod requests;

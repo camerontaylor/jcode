@@ -390,6 +390,111 @@ fn streamed_messages_carry_one_stable_message_id_each() {
 }
 
 #[test]
+fn history_replay_separates_reasoning_from_the_answer() {
+    let thought = "Inspect **file** & `code` first.";
+    let content = format!(
+        "{}\nThe *answer* stays Markdown.",
+        jcode_render_core::reasoning_line_markup(thought)
+    );
+    let messages = vec![history_message_at("assistant", &content, Some(9))];
+    let updates = history_replay_updates("session1", &messages);
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0]["update"]["sessionUpdate"], "agent_thought_chunk");
+    assert_eq!(
+        updates[0]["update"]["content"]["text"],
+        format!("{thought}\n")
+    );
+    assert_eq!(updates[1]["update"]["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(
+        updates[1]["update"]["content"]["text"],
+        "\nThe *answer* stays Markdown."
+    );
+    assert_ne!(
+        updates[0]["update"]["messageId"],
+        updates[1]["update"]["messageId"]
+    );
+    assert_eq!(updates[1]["update"]["messageId"], "session1:msg:9");
+}
+
+#[test]
+fn history_replay_does_not_reinterpret_user_or_ordinary_markdown() {
+    let user_text = jcode_render_core::reasoning_line_markup("quoted reasoning");
+    let messages = vec![
+        history_message("user", &user_text),
+        history_message("assistant", "*ordinary italics*\n"),
+    ];
+    let updates = history_replay_updates("session1", &messages);
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0]["update"]["content"]["text"], user_text);
+    assert_eq!(
+        updates[1]["update"]["content"]["text"],
+        "*ordinary italics*\n"
+    );
+    assert_eq!(updates[1]["update"]["sessionUpdate"], "agent_message_chunk");
+}
+
+#[test]
+fn history_replay_does_not_impersonate_assistant_with_diagnostics() {
+    let messages = vec![
+        history_message("system", "compaction notice"),
+        history_message("error", "provider failed"),
+        history_message("future-role", "unknown"),
+    ];
+    assert!(history_replay_updates("session1", &messages).is_empty());
+    let updates = history_replay_updates_with_notices("session1", &messages, true);
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0]["update"]["sessionUpdate"], "notice");
+    assert_eq!(updates[0]["update"]["severity"], "info");
+    assert_eq!(updates[1]["update"]["severity"], "error");
+    assert_eq!(updates[1]["update"]["description"], "provider failed");
+}
+
+#[test]
+fn history_replay_keeps_read_results_in_tool_blocks() {
+    let mut read = history_message_at("tool", "raw file contents", Some(4));
+    read.tool_data = Some(crate::message::ToolCall {
+        id: "read-1".to_string(),
+        name: "read".to_string(),
+        input: json!({"file_path": "/workspace/file.rs"}),
+        ..Default::default()
+    });
+    let messages = vec![
+        history_message("user", "read the file"),
+        read,
+        history_message("assistant", "Here is my explanation."),
+    ];
+    let updates = history_replay_updates("session1", &messages);
+    let tool = &updates[1]["update"];
+    assert_eq!(tool["sessionUpdate"], "tool_call");
+    assert_eq!(tool["toolCallId"], "read-1");
+    assert_eq!(tool["kind"], "read");
+    assert_eq!(tool["status"], "completed");
+    assert_eq!(tool["rawInput"]["file_path"], "/workspace/file.rs");
+    assert_eq!(tool["content"][0]["type"], "content");
+    assert_eq!(tool["content"][0]["content"]["text"], "raw file contents");
+    assert_eq!(tool["rawOutput"]["output"], "raw file contents");
+    assert_eq!(updates[2]["update"]["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(history_replay_updates("session1", &messages), updates);
+}
+
+#[test]
+fn history_replay_keeps_legacy_tools_out_of_chat() {
+    let messages = vec![
+        history_message("tool", "first result"),
+        history_message("tool", "second result"),
+    ];
+    let updates = history_replay_updates("session1", &messages);
+    for update in &updates {
+        assert_eq!(update["update"]["sessionUpdate"], "tool_call");
+        assert_eq!(update["update"]["name"], "tool");
+    }
+    assert_ne!(
+        updates[0]["update"]["toolCallId"],
+        updates[1]["update"]["toolCallId"]
+    );
+}
+
+#[test]
 fn history_replay_gives_every_message_a_distinct_stable_id() {
     let messages = vec![
         history_message("user", "first prompt"),
@@ -434,6 +539,18 @@ fn history_replay_gives_every_message_a_distinct_stable_id() {
         updates,
         "replay ids are stable"
     );
+}
+
+#[test]
+fn replay_ids_distinguish_prose_split_by_a_native_tool() {
+    let messages = vec![
+        history_message_at("assistant", "Before search", Some(7)),
+        history_message_at("tool", "search results", Some(7)),
+        history_message_at("assistant", "After search", Some(7)),
+    ];
+    let updates = history_replay_updates("session1", &messages);
+    assert_eq!(updates[0]["update"]["messageId"], "session1:msg:7");
+    assert_eq!(updates[2]["update"]["messageId"], "session1:msg:7:part:1");
 }
 
 #[test]

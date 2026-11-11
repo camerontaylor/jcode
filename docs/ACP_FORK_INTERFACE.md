@@ -255,6 +255,20 @@ stored replay when that message is retained. Live-only/synthetic items need
 not appear in replay. Neither version promises durable exactly-once submission
 across a broken connection. Do not automatically resend an uncertain prompt.
 
+V1 load replays tool-result rows as completed `tool_call` updates with the
+original call ID, input and output, not assistant messages. The daemon's
+rendered history does not retain per-tool error status, so replay cannot
+reconstruct that status. Explicitly marked persisted reasoning is decoded
+into `agent_thought_chunk` rather than exposing the TUI's emphasis escapes as
+answer text. Reasoning hidden by the daemon's historical display policy is
+not reconstructed. Prose split around a provider-native tool gets distinct
+message IDs even when both rows share one stored-message index.
+
+Anchored user and tool images replay as image content on their original
+prompt or tool. Unanchored or ambiguous images are omitted rather than guessed
+onto another message. System and error history rows become notices only when
+the client negotiated `session.notices`, never fabricated assistant replies.
+
 ## Shared control semantics
 
 <!-- [C-STOP-1] -->

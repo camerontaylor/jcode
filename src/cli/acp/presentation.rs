@@ -71,24 +71,88 @@ pub(super) fn turn_end_state(status: TurnEndStatus) -> &'static str {
 /// not move when rendering skips stored messages (tool-only rounds) or when the
 /// client asked for a delta, so a reload cannot overwrite the wrong item.
 /// Synthetic rows (which have no stored message) fall back to their position.
+#[cfg(test)]
 pub(super) fn history_replay_updates(
     session_id: &str,
     messages: &[crate::protocol::HistoryMessage],
 ) -> Vec<Value> {
+    history_replay_updates_with_notices(session_id, messages, false)
+}
+
+pub(super) fn history_replay_updates_with_notices(
+    session_id: &str,
+    messages: &[crate::protocol::HistoryMessage],
+    session_notices: bool,
+) -> Vec<Value> {
+    let mut stored_parts = HashMap::<usize, usize>::new();
     messages
         .iter()
         .enumerate()
-        .map(|(index, message)| {
+        .flat_map(|(index, message)| {
+            if message.role == "tool" {
+                let call = message.tool_data.as_ref();
+                let id = call
+                    .map(|call| call.id.clone())
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| format!("{session_id}:history-tool:{index}"));
+                let name = call.map(|call| call.name.as_str()).unwrap_or("tool");
+                // History has the result, but does not preserve error status.
+                // Keep the output in a tool block, never in assistant prose.
+                return vec![json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": id,
+                        "title": tool_title(name),
+                        "name": name,
+                        "kind": tool_kind(name),
+                        "status": "completed",
+                        "rawInput": call.map(|call| &call.input),
+                        "content": [{
+                            "type": "content",
+                            "content": { "type": "text", "text": message.content },
+                        }],
+                        "rawOutput": { "output": message.content },
+                    }
+                })];
+            }
             let update_name = match message.role.as_str() {
                 "user" => "user_message_chunk",
                 "assistant" => "agent_message_chunk",
-                _ => "agent_message_chunk",
+                // System continuations and provider errors are not model
+                // replies. ACP notices are legal only when negotiated.
+                "system" | "error" if session_notices => {
+                    return vec![json!({
+                        "sessionId": session_id,
+                        "update": {
+                            "sessionUpdate": "notice",
+                            "severity": if message.role == "error" { "error" } else { "info" },
+                            "title": if message.role == "error" { "Session error" } else { "Session information" },
+                            "description": message.content,
+                        }
+                    })];
+                }
+                _ => return Vec::new(),
             };
             let message_id = match message.stored_index {
-                Some(stored) => format!("{session_id}:msg:{stored}"),
+                Some(stored) => {
+                    // A provider-native tool can split one stored assistant
+                    // message into prose before and after its result.
+                    let part = stored_parts.entry(stored).or_default();
+                    let id = if *part == 0 {
+                        format!("{session_id}:msg:{stored}")
+                    } else {
+                        format!("{session_id}:msg:{stored}:part:{part}")
+                    };
+                    *part += 1;
+                    id
+                }
                 None => format!("{session_id}:history:{index}"),
             };
-            json!({
+            if message.role == "assistant" {
+                return replay_assistant_blocks(session_id, &message_id, &message.content);
+            }
+            vec![json!({
                 "sessionId": session_id,
                 "update": {
                     "sessionUpdate": update_name,
@@ -98,9 +162,48 @@ pub(super) fn history_replay_updates(
                         "text": message.content,
                     }
                 }
-            })
+            })]
         })
         .collect()
+}
+
+/// Recover only explicitly sentinel-marked TUI reasoning, not ordinary italic
+/// Markdown. Keep thought and answer chunks in separate stable id spaces.
+fn replay_assistant_blocks(session_id: &str, message_id: &str, content: &str) -> Vec<Value> {
+    let mut blocks: Vec<(bool, String)> = Vec::new();
+    for line in content.split_inclusive('\n') {
+        let thought = jcode_render_core::reasoning_line_content(line);
+        let is_thought = thought.is_some();
+        let text = match thought {
+            Some(mut text) => {
+                if line.ends_with('\n') {
+                    text.push('\n');
+                }
+                text
+            }
+            None => line.to_string(),
+        };
+        if let Some((previous_thought, previous_text)) = blocks.last_mut()
+            && *previous_thought == is_thought
+        {
+            previous_text.push_str(&text);
+        } else {
+            blocks.push((is_thought, text));
+        }
+    }
+    blocks.into_iter().enumerate().filter_map(|(index, (thought, text))| {
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(json!({
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": if thought { "agent_thought_chunk" } else { "agent_message_chunk" },
+                "messageId": if thought { format!("{message_id}:thought:{index}") } else { message_id.to_string() },
+                "content": { "type": "text", "text": text },
+            }
+        }))
+    }).collect()
 }
 
 pub(super) struct EventMapper {
@@ -114,6 +217,9 @@ pub(super) struct EventMapper {
     /// index.
     pub(super) message_scope: String,
     pub(super) message_index: u64,
+    /// Text actually emitted to this v1 client. Replacements may only extend
+    /// it, since ACP v1 chunks cannot retract previously displayed text.
+    message_text: String,
     /// Index of the reasoning block currently being streamed, in its own id
     /// space so a thought block and an assistant message never share an id.
     pub(super) thought_index: u64,
@@ -142,6 +248,7 @@ impl EventMapper {
             tool_inputs: HashMap::new(),
             message_scope,
             message_index: 0,
+            message_text: String::new(),
             thought_index: 0,
             working_dir: None,
         }
@@ -167,6 +274,21 @@ impl EventMapper {
         agent_message_chunk_with_id(text, self.message_id())
     }
 
+    fn replacement_chunks(&mut self, text: String) -> Vec<Value> {
+        let Some(suffix) = text.strip_prefix(&self.message_text) else {
+            // Keep the existing best-effort view. Reload is authoritative for
+            // edits that v1 cannot express, rather than appending a second copy.
+            return Vec::new();
+        };
+        let suffix = suffix.to_string();
+        self.message_text = text;
+        if suffix.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.agent_chunk(suffix)]
+        }
+    }
+
     pub(super) fn thought_chunk(&self, text: String) -> Value {
         json!({
             "sessionUpdate": "agent_thought_chunk",
@@ -184,6 +306,7 @@ impl EventMapper {
         match super::commands::unwrap_turn_event(event) {
             // One assistant message ended; the next chunk starts a new one.
             ServerEvent::MessageEnd { .. } => {
+                self.message_text.clear();
                 self.message_index = self.message_index.saturating_add(1);
                 self.thought_index = self.thought_index.saturating_add(1);
                 Vec::new()
@@ -196,12 +319,16 @@ impl EventMapper {
                 self.thought_index = self.thought_index.saturating_add(1);
                 Vec::new()
             }
-            ServerEvent::TextDelta { text } => vec![self.agent_chunk(text)],
-            ServerEvent::TextReplace { text } => vec![self.agent_chunk(text)],
-            // ACP chunks cannot retract prior output. Surface the corrected
-            // source links rather than silently discarding provider metadata.
-            ServerEvent::TextSuffixReplace { new_text, .. } => {
-                vec![self.agent_chunk(format!("\n{new_text}"))]
+            ServerEvent::TextDelta { text } => {
+                self.message_text.push_str(&text);
+                vec![self.agent_chunk(text)]
+            }
+            ServerEvent::TextReplace { text } => self.replacement_chunks(text),
+            ServerEvent::TextSuffixReplace { old_text, new_text } => {
+                let Some(prefix) = self.message_text.strip_suffix(&old_text) else {
+                    return Vec::new();
+                };
+                self.replacement_chunks(format!("{prefix}{new_text}"))
             }
             ServerEvent::ToolStart { id, name } => {
                 self.current_tool_id = Some(id.clone());

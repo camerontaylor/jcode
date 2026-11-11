@@ -1,5 +1,58 @@
 use super::*;
 
+#[test]
+fn v1_replacements_emit_only_genuine_extensions() {
+    let mut mapper = EventMapper::new("session1".into(), AcpProfile::Standard);
+    mapper.map_event(ServerEvent::TextDelta {
+        text: "Hello".into(),
+    });
+    let extended = mapper.map_event(ServerEvent::TextReplace {
+        text: "Hello world".into(),
+    });
+    assert_eq!(extended[0]["content"]["text"], " world");
+    assert!(
+        mapper
+            .map_event(ServerEvent::TextReplace {
+                text: "Hello world".into()
+            })
+            .is_empty()
+    );
+    assert!(
+        mapper
+            .map_event(ServerEvent::TextReplace {
+                text: "Different answer".into()
+            })
+            .is_empty()
+    );
+    let extended = mapper.map_event(ServerEvent::TextSuffixReplace {
+        old_text: "world".into(),
+        new_text: "world!".into(),
+    });
+    assert_eq!(extended[0]["content"]["text"], "!");
+    assert!(
+        mapper
+            .map_event(ServerEvent::TextSuffixReplace {
+                old_text: "world!".into(),
+                new_text: "everyone".into(),
+            })
+            .is_empty()
+    );
+    assert!(
+        mapper
+            .map_event(ServerEvent::TextSuffixReplace {
+                old_text: "not the suffix".into(),
+                new_text: "bogus".into(),
+            })
+            .is_empty()
+    );
+    mapper.map_event(ServerEvent::MessageEnd { stop_reason: None });
+    let next = mapper.map_event(ServerEvent::TextReplace {
+        text: "New message".into(),
+    });
+    assert_eq!(next[0]["content"]["text"], "New message");
+    assert_eq!(next[0]["messageId"], "session1:stream:1");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn acp_new_and_resumed_sessions_advertise_server_failover() {

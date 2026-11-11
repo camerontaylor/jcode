@@ -816,10 +816,11 @@ impl AcpRuntime {
                     if let ServerEvent::History {
                         session_id,
                         messages,
+                        images,
                         ..
                     } = request_history(&session).await?
                     {
-                        self.replay_history(&session_id, messages).await?;
+                        self.replay_history(&session_id, messages, images).await?;
                     }
                     Ok::<_, anyhow::Error>(())
                 }
@@ -887,6 +888,7 @@ impl AcpRuntime {
                 ServerEvent::History {
                     session_id,
                     messages,
+                    images,
                     provider_name,
                     provider_model,
                     available_models,
@@ -902,7 +904,7 @@ impl AcpRuntime {
                         reasoning_effort,
                     );
                     if replay_history {
-                        self.replay_history(&session_id, messages).await?;
+                        self.replay_history(&session_id, messages, images).await?;
                     }
                 }
                 ServerEvent::Done { id } if id == resume_id => break,
@@ -927,8 +929,14 @@ impl AcpRuntime {
         &self,
         session_id: &str,
         messages: Vec<crate::protocol::HistoryMessage>,
+        images: Vec<crate::session::RenderedImage>,
     ) -> Result<()> {
-        for update in history_replay_updates(session_id, &messages) {
+        for update in super::history_images::history_replay_updates_with_images(
+            session_id,
+            &messages,
+            &images,
+            self.client_session_notices.load(Ordering::SeqCst),
+        ) {
             self.write_notification("session/update", update).await?;
         }
         Ok(())

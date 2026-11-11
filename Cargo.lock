@@ -3593,6 +3593,7 @@ dependencies = [
  "jcode-provider-grok-build-runtime",
  "jcode-provider-openai-runtime",
  "jcode-provider-openrouter-runtime",
+ "jcode-render-core",
  "jcode-selfdev-types",
  "jcode-terminal-prompt",
  "jcode-tui",
