@@ -78,7 +78,9 @@ fn history(session: &str) -> ServerEvent {
         token_usage_totals: None,
         all_sessions: vec![],
         client_count: Some(1),
-        is_canary: Some(false),
+        // Matches the canary attachment `Fixture::new` models, so a history
+        // refresh does not re-enable the first-run suggestion cards.
+        is_canary: Some(true),
         reload_recovery: None,
         server_version: None,
         server_name: None,
@@ -140,7 +142,12 @@ impl Fixture {
     }
 
     fn feed(&mut self, event: ServerEvent) -> bool {
-        handle_server_event(&mut self.app, event, &mut self.remote)
+        let handled = handle_server_event(&mut self.app, event, &mut self.remote);
+        assert!(
+            !self.app.onboarding_welcome_active(),
+            "fixture left the first-run welcome screen, which outranks the form"
+        );
+        handled
     }
 
     fn key(&mut self, code: KeyCode) -> KeyOutcome {
