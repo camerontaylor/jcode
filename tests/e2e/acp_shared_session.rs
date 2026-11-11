@@ -526,6 +526,8 @@ async fn acp_client_mirrors_peer_turns_and_keeps_its_own_prompt_separate() -> Re
         let replayed: Vec<&serde_json::Value> = attached[..started_at]
             .iter()
             .filter(|notification| notification["method"] == "session/update")
+            // A resumed todo snapshot is session state, not a replayed message.
+            .filter(|notification| notification["params"]["update"]["sessionUpdate"] != "plan")
             .collect();
         assert!(
             !replayed.is_empty(),

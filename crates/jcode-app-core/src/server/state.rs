@@ -698,6 +698,7 @@ impl Drop for TurnEventChannel {
         // Dropping JoinHandle detaches the drain task. It must not be aborted:
         // already queued events still own the runtime publication reservation,
         // and the drain task still owes attachments a terminal.
+        // Unlike finish(), this detached path cannot report a drain task panic.
         if let Some(close) = self.close.take() {
             let _ = close.send(TurnEventExit::Dropped {
                 panicking: std::thread::panicking(),

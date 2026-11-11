@@ -118,7 +118,8 @@ def fields(data, pos=0, message_ranges=None):
 
 def journal_records(data):
     # Journal records are newline delimited. Validate each record's field spans
-    # before publishing any of it, and recover at the next line after damage.
+    # before publishing any of it. Match Rust's canonical-entry salvage after
+    # a torn append, including complete entries glued onto the same line.
     pos = 0
     while pos < len(data):
         pos = skip_space(data, pos)
@@ -134,11 +135,13 @@ def journal_records(data):
                 pending.append(next(scanner))
         except StopIteration as end:
             if end.value is None or end.value > line_stop:
-                pos = line_stop + 1
+                candidate = data.find(b'{"meta":', pos + 1, line_stop)
+                pos = candidate if candidate >= 0 else line_stop + 1
                 continue
             pos = end.value
         except (ValueError, IndexError):
-            pos = line_stop + 1
+            candidate = data.find(b'{"meta":', pos + 1, line_stop)
+            pos = candidate if candidate >= 0 else line_stop + 1
             continue
         yield pending
 

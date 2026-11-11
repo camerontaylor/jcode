@@ -138,6 +138,8 @@ for separator in (b'', b'\n', b' \r\n\t'):
     assert list(journal_fields(encoded)) == list(previous_journal_fields(encoded))
 for malformed in (b'{', b'{"x":[]]', b'{"x":"unterminated}'):
     assert list(journal_fields(malformed)) == []
+# A complete first entry survives a torn second entry on the same line.
+assert list(journal_fields(b'{"meta":{}} {')) == list(journal_fields(b'{"meta":{}}'))
 import tempfile
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory) / 'journal.json'
@@ -160,6 +162,18 @@ with tempfile.TemporaryDirectory() as directory:
         for preview in (True, False):
             result = project(path, preview)
             assert result['title'] == 'recovered'
+    # A torn append without newline can be followed by complete canonical
+    # entries. Recover both metadata and messages, as Rust journal replay does.
+    first = b'{"meta":{"title":"salvaged"},"append_messages":[{"role":"user","content":[{"type":"text","text":"kept"}]}]}'
+    second = b'{"meta":{"title":"newest"},"append_messages":[]}'
+    for torn in (b'{"meta":{', b'garbage', b'{"meta":{"title":"torn'):
+        journal.write_bytes(torn + first + second + b'\n')
+        for preview in (True, False):
+            result = project(path, preview)
+            assert result['title'] == 'newest'
+            if preview:
+                assert result['messages'][0]['content'][0]['text'] == 'kept'
+
 
 for malformed in (b'{', b'[', b'{"x":"unterminated}', b'["escaped\\"', b'{]', b'[{]}'):
     try:

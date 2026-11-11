@@ -605,10 +605,11 @@ pub(super) fn tool_diffs(name: &str, input: &Value, working_dir: Option<&Path>) 
 /// A plan is session state, not turn output, so it is rendered whenever the
 /// daemon's snapshot arrives — including after the turn that wrote it ended.
 /// Each update carries the complete list, as v1 requires; an emptied list is a
-/// real replacement and is still sent.
+/// real replacement and is still sent after a plan has been published. An
+/// initial empty snapshot establishes no plan and needs no notification.
 pub(super) fn plan_update(last: &mut Option<Vec<Value>>, payload: &str) -> Option<Value> {
     let entries = plan_entries(payload);
-    if last.as_ref() == Some(&entries) {
+    if (last.is_none() && entries.is_empty()) || last.as_ref() == Some(&entries) {
         return None;
     }
     *last = Some(entries.clone());

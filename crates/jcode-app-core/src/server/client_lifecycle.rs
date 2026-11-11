@@ -1555,6 +1555,8 @@ pub(super) async fn handle_client(
             }
 
             Request::PrepareDisconnect { id, preserve_work } => {
+                // Connection-scoped until the next Subscribe snapshot: session
+                // switches on this transport retain this disconnect preference.
                 if preserve_work {
                     continue_on_disconnect = true;
                 }
