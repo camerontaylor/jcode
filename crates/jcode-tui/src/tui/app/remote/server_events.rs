@@ -1907,6 +1907,9 @@ fn handle_server_event_inner(
             app.note_client_focus(true);
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
             if session_changed {
+                app.recent_history_paging = Default::default();
+                app.pending_history_anchor = None;
+                app.compacted_history_lazy.pending_request_visible = None;
                 // Drop the previous session's snapshot and polling deadlines.
                 // Otherwise attach can inherit a 1s local / 2s SSH todo delay.
                 // A resume sends its authoritative todo snapshot before the

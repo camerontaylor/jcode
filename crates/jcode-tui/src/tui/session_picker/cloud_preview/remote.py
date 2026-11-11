@@ -116,15 +116,36 @@ def fields(data, pos=0, message_ranges=None):
         pos += 1
 
 
-def journal_fields(data):
-    # fields already scans every value. Its return value is the object boundary,
-    # so journal entries need no redundant whole-container value_end scan.
+def journal_records(data):
+    # Journal records are newline delimited. Validate each record's field spans
+    # before publishing any of it, and recover at the next line after damage.
     pos = 0
     while pos < len(data):
         pos = skip_space(data, pos)
         if pos == len(data):
             break
-        pos = yield from fields(data, pos)
+        line_stop = data.find(b'\n', pos)
+        if line_stop < 0:
+            line_stop = len(data)
+        scanner = fields(data, pos)
+        pending = []
+        try:
+            while True:
+                pending.append(next(scanner))
+        except StopIteration as end:
+            if end.value is None or end.value > line_stop:
+                pos = line_stop + 1
+                continue
+            pos = end.value
+        except (ValueError, IndexError):
+            pos = line_stop + 1
+            continue
+        yield pending
+
+
+def journal_fields(data):
+    for record in journal_records(data):
+        yield from record
 
 
 def recent_messages(data, start, end, messages, ranges=None):
@@ -181,20 +202,28 @@ def project(path, preview):
     journal = path.with_suffix('.journal.jsonl')
     if journal.exists() and journal.stat().st_size:
         with journal.open('rb') as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
-            for key, start, stop in journal_fields(data):
-                if key == 'meta':
-                    meta = {}
-                    route_present = False
-                    for name, a, b in fields(data, start):
-                        if name == 'route_api_method_present':
-                            route_present = data[a:b] == b'true'
-                        if name in META_FIELDS and (preview or name in INVENTORY_FIELDS) and b - a <= 256 * 1024:
-                            meta[name] = json.loads(data[a:b])
-                    if not route_present:
-                        meta.pop('route_api_method', None)
-                    session.update(meta)
-                elif key == 'append_messages' and preview:
-                    recent_messages(data, start, stop, messages)
+            for record in journal_records(data):
+                pending_meta = {}
+                pending_messages = collections.deque(maxlen=MAX_MESSAGES)
+                try:
+                    for key, start, stop in record:
+                        if key == 'meta':
+                            meta = {}
+                            route_present = False
+                            for name, a, b in fields(data, start):
+                                if name == 'route_api_method_present':
+                                    route_present = data[a:b] == b'true'
+                                if name in META_FIELDS and (preview or name in INVENTORY_FIELDS) and b - a <= 256 * 1024:
+                                    meta[name] = json.loads(data[a:b])
+                            if not route_present:
+                                meta.pop('route_api_method', None)
+                            pending_meta.update(meta)
+                        elif key == 'append_messages' and preview:
+                            recent_messages(data, start, stop, pending_messages)
+                except (ValueError, IndexError, TypeError):
+                    continue
+                session.update(pending_meta)
+                messages.extend(pending_messages)
     if preview:
         session['messages'] = list(messages)
         for key in ('env_snapshots', 'memory_injections', 'replay_events'):

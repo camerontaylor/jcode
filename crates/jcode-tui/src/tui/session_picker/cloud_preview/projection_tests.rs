@@ -136,13 +136,8 @@ entries = [b'{}', b'{"meta":{"title":"first","title":"last"}}',
 for separator in (b'', b'\n', b' \r\n\t'):
     encoded = separator + separator.join(entries) + separator
     assert list(journal_fields(encoded)) == list(previous_journal_fields(encoded))
-for malformed in (b'{', b'{"meta":{}} {', b'{"x":[]]', b'{"x":"unterminated}'):
-    try:
-        list(journal_fields(malformed))
-    except (ValueError, IndexError):
-        pass
-    else:
-        raise AssertionError(repr(malformed))
+for malformed in (b'{', b'{"x":[]]', b'{"x":"unterminated}'):
+    assert list(journal_fields(malformed)) == []
 import tempfile
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory) / 'journal.json'
@@ -160,6 +155,12 @@ with tempfile.TemporaryDirectory() as directory:
     inventory = project(path, False)
     assert inventory['title'] == 'last' and 'messages' not in inventory
     assert before == [(p.stat().st_size, p.stat().st_mtime_ns) for p in (path, journal)]
+    for damaged in (b'{"meta":{"title":"discard"},', b'not json', b'{"meta":]', b'{"meta":{"title":garbage}}'):
+        journal.write_bytes(damaged + b'\n' + b'{"meta":{"title":"recovered"}}\n' + b'{"append_messages":[')
+        for preview in (True, False):
+            result = project(path, preview)
+            assert result['title'] == 'recovered'
+
 for malformed in (b'{', b'[', b'{"x":"unterminated}', b'["escaped\\"', b'{]', b'[{]}'):
     try:
         value_end(malformed, 0)

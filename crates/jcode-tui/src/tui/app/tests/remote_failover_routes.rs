@@ -389,6 +389,7 @@ fn test_remote_failover_ignores_confirmation_before_request_is_sent() {
                 provider_oauth_email: None,
                 provider_oauth_account_label: Some("claude-otter".into()),
                 resolved_credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+                available_reasoning_efforts: None,
                 reasoning_effort: None,
                 context_window: None,
             },
@@ -515,6 +516,7 @@ fn test_remote_failover_resends_only_after_exact_confirmation() {
                     } else {
                         jcode_provider_core::ResolvedCredential::Oauth
                     }),
+                    available_reasoning_efforts: None,
                     reasoning_effort: None,
                     context_window: None,
                 },

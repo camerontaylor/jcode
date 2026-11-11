@@ -22,6 +22,7 @@ fn recent_history_bootstrap_renders_latest_frame_without_older_transcript() {
             DisplayMessage::assistant(format!("RECENT{i:03} {}", "bounded history ".repeat(128)))
         }))
         .map(|message| crate::protocol::HistoryMessage {
+            stored_index: None,
             role: message.role,
             content: message.content,
             tool_calls: None,
@@ -144,4 +145,39 @@ fn recent_history_page_rejects_snapshot_missing_already_visible_rows() {
         DisplayMessage::assistant("even newer persisted response"),
     ];
     assert!(app.recent_history_page_contains_visible_tail(&mut newer, 192));
+}
+
+#[test]
+fn recent_history_disconnect_releases_page_fence() {
+    let mut app = recent_history_test_app();
+    app.recent_history_paging.request = Some((42, app.display_messages_version, 192));
+    app.recent_history_paging.retry_at = Some(Instant::now() + Duration::from_secs(30));
+    app.pending_history_anchor = Some(super::HistoryScrollAnchor {
+        lines_from_bottom: 3,
+        base_total: 3,
+    });
+    let mut state = remote::RemoteRunState::default();
+    remote::handle_disconnect(&mut app, &mut state, None);
+    assert!(app.recent_history_paging.request.is_none());
+    assert!(app.pending_history_anchor.is_none());
+    app.auto_scroll_paused = true;
+    app.scroll_offset = 0;
+    app.maybe_queue_compacted_history_load();
+    assert_eq!(app.take_pending_compacted_history_load(), Some(192));
+}
+
+#[test]
+fn recent_history_session_switch_releases_page_fence() {
+    let mut app = recent_history_test_app();
+    app.recent_history_paging.request = Some((42, app.display_messages_version, 192));
+    app.compacted_history_lazy.pending_request_visible = Some(192);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut connection = crate::tui::backend::RemoteConnection::dummy();
+    app.handle_server_event(
+        delta_history_event("other-session", Vec::new(), None),
+        &mut connection,
+    );
+    assert!(app.recent_history_paging.request.is_none());
+    assert!(app.compacted_history_lazy.pending_request_visible.is_none());
 }

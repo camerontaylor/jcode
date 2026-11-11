@@ -242,6 +242,22 @@ fn focused_cli_session_uses_client_registry_for_task_titled_windows() {
         super::focused_cli_session().expect("resolve focused session"),
         Some("session_fox_123".to_string())
     );
+    // Updating the same file leaves the directory timestamp unchanged. A cache
+    // hit must still read the marker instead of returning the previous target.
+    let stamp = std::fs::metadata(&registry).unwrap().modified().unwrap();
+    std::fs::write(
+        registry.join(focused_process.pid().to_string()),
+        "session_owl_456",
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::metadata(&registry).unwrap().modified().unwrap(),
+        stamp
+    );
+    assert_eq!(
+        super::focused_cli_session().unwrap(),
+        Some("session_owl_456".into())
+    );
 }
 
 #[cfg(target_os = "linux")]

@@ -1188,6 +1188,9 @@ pub(super) fn handle_disconnect(
     }
     // The cancel answer cannot arrive on a dead connection. Ask again later.
     app.soft_interrupt_recovery = None;
+    app.recent_history_paging = Default::default();
+    app.pending_history_anchor = None;
+    app.compacted_history_lazy.pending_request_visible = None;
     state.last_disconnect_reason = Some(detail.clone());
 
     let scheduled_retry =

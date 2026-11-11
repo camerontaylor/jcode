@@ -93,6 +93,7 @@ pub fn focused_jcode_session() -> Result<Option<String>> {
 ///
 /// Polled several times a second by the companion, so the full `/proc` walk
 /// is cached per focused PID until the client registry changes or 10s pass.
+/// Session markers are read on every poll, including process-tree cache hits.
 pub fn focused_cli_session() -> Result<Option<String>> {
     let Some(window) = focused_window_niri()? else {
         return Ok(None);
@@ -114,7 +115,7 @@ pub fn focused_cli_session() -> Result<Option<String>> {
     type FocusCacheEntry = (
         (u32, Option<std::time::SystemTime>),
         std::time::Instant,
-        Option<String>,
+        Vec<u32>,
     );
     static CACHE: std::sync::Mutex<Option<FocusCacheEntry>> = std::sync::Mutex::new(None);
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
@@ -122,14 +123,15 @@ pub fn focused_cli_session() -> Result<Option<String>> {
         && *cached_key == key
         && at.elapsed() < std::time::Duration::from_secs(10)
     {
-        return Ok(session.clone());
+        return Ok(resolve_session_in_tree(&window, session));
     }
-    let session = if window_is_desktop(&window) {
-        None
+    let tree = if window_is_desktop(&window) {
+        Vec::new()
     } else {
-        resolve_session_for_window(&window)
+        process_tree_for_window(&window)
     };
-    *cache = Some((key, std::time::Instant::now(), session.clone()));
+    let session = resolve_session_in_tree(&window, &tree);
+    *cache = Some((key, std::time::Instant::now(), tree));
     Ok(session)
 }
 
@@ -411,6 +413,10 @@ fn focused_window_niri() -> Result<Option<NiriFocusedWindow>> {
 }
 
 fn resolve_session_for_window(window: &NiriFocusedWindow) -> Option<String> {
+    resolve_session_in_tree(window, &process_tree_for_window(window))
+}
+
+fn process_tree_for_window(window: &NiriFocusedWindow) -> Vec<u32> {
     let children = match proc_children_map() {
         Ok(children) => Some(children),
         Err(error) => {
@@ -431,6 +437,13 @@ fn resolve_session_for_window(window: &NiriFocusedWindow) -> Option<String> {
         }
     }
 
+    tree
+}
+
+fn resolve_session_in_tree(window: &NiriFocusedWindow, tree: &[u32]) -> Option<String> {
+    if window_is_desktop(window) {
+        return None;
+    }
     // Exact: a client in this window registered the session it shows.
     let registered: Vec<String> = tree
         .iter()
