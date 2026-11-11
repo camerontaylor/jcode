@@ -29,6 +29,9 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::path::PathBuf;
 
+#[path = "import_codex_tools.rs"]
+mod codex_tools;
+
 // Keep enough recent context for a useful continuation while preventing an
 // imported multi-hundred-message transcript from dominating first paint and
 // every subsequent TUI frame. Roughly 256 KiB is also a comfortable provider
@@ -1110,15 +1113,17 @@ pub fn import_codex_session_from_path(
         if trimmed.is_empty() {
             continue;
         }
-        // Codex rollouts are dominated by reasoning, world-state, tool-output,
-        // and telemetry records. Only message records carry a user/assistant
-        // role, so reject the rest before serde allocates their often-large JSON.
-        if !json_line_has_message_role(trimmed) {
+        // Tool records have no role but must survive transcript reconstruction.
+        if !json_line_has_message_role(trimmed) && !codex_tools::may_contain_tool(trimmed) {
             continue;
         }
         let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
+        if codex_tools::append_tool(&mut session, &value) {
+            updated_at = parse_rfc3339_json(value.get("timestamp")).or(updated_at);
+            continue;
+        }
         let line_type = value
             .get("type")
             .and_then(|v| v.as_str())

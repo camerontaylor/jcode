@@ -34,7 +34,7 @@
     "crates/jcode-base/src/browser.rs": 1545,
     "crates/jcode-base/src/compaction.rs": 1833,
     "crates/jcode-base/src/gmail.rs": 1537,
-    "crates/jcode-base/src/import.rs": 1502,
+    "crates/jcode-base/src/import.rs": 1507,
     "crates/jcode-base/src/jev.rs": 1863,
     "crates/jcode-base/src/memory.rs": 1572,
     "crates/jcode-base/src/provider/catalog_routes.rs": 1596,
