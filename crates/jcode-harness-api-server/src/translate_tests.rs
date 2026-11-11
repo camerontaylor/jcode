@@ -474,6 +474,29 @@ fn wake_request_is_forwarded_with_explicit_session_and_payload() {
 }
 
 #[test]
+fn api_sessions_enable_server_account_routing_on_create_attach_and_reconnect() {
+    let mut state = BridgeState::default();
+    for request in [
+        json!({"req": "create_session", "id": 1}),
+        json!({"req": "attach_session", "id": 2, "session_id": "s1"}),
+        json!({"req": "attach_session", "id": 3, "session_id": "s1"}),
+    ] {
+        let outbound = state.api_request_to_legacy(&request);
+        let subscription = outbound
+            .iter()
+            .find_map(|outbound| match outbound {
+                Outbound::Legacy(value) if value["type"] == "subscribe" => Some(value),
+                _ => None,
+            })
+            .expect("every attachment must subscribe to the daemon");
+        assert_eq!(
+            subscription["supports_server_failover"], true,
+            "API clients must route exhausted accounts rather than retry the same account: {request}"
+        );
+    }
+}
+
+#[test]
 fn create_session_maps_to_subscribe() {
     let mut state = BridgeState::default();
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
@@ -3250,6 +3273,12 @@ fn history_image_boundaries_survive_loss_of_tool_data() {
     };
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[1].role, "tool");
+    let tool = messages[1]
+        .tool
+        .as_ref()
+        .expect("tool rows carry their call");
+    assert_eq!((tool.id.as_str(), tool.name.as_str()), ("read-1", "read"));
+    assert!(messages[0].tool.is_none());
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].history_message_index, Some(2));
     assert_eq!(

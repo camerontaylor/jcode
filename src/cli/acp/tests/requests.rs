@@ -41,10 +41,8 @@ fn plan_update_reports_an_emptied_list_as_a_replacement() {
 
 #[test]
 fn plan_update_ignores_a_payload_that_is_not_a_todo_snapshot() {
-    // Absence is legitimate: a malformed or unrelated payload yields an empty
-    // plan, never entries invented from text.
-    let update = plan_update(&mut None, "not json").expect("empty plan");
-    assert_eq!(update["entries"], json!([]));
+    // Absence establishes no plan, never entries invented from text.
+    assert!(plan_update(&mut None, "not json").is_none());
 }
 
 #[test]
@@ -696,4 +694,22 @@ fn explicit_skill_keeps_slash_commands_as_prompt_text() {
     for selection in [SkillSelection::Clear, SkillSelection::Unchanged] {
         assert!(selected_slash_command("/model foo", &selection).is_some());
     }
+}
+
+#[test]
+fn plan_update_initial_empty_resume_is_silent_but_later_clear_is_published() {
+    let mut last = None;
+    assert!(plan_update(&mut last, &todo_snapshot(json!([]))).is_none());
+    assert!(last.is_none());
+    assert!(
+        plan_update(
+            &mut last,
+            &todo_snapshot(json!([
+                {"content":"resumed work", "status":"pending"}
+            ]))
+        )
+        .is_some()
+    );
+    assert!(plan_update(&mut last, &todo_snapshot(json!([]))).is_some());
+    assert!(plan_update(&mut last, &todo_snapshot(json!([]))).is_none());
 }

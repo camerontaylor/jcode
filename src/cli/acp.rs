@@ -13,6 +13,8 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 mod client_requests;
+mod outcome;
+use outcome::TurnOutcome;
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
 
@@ -410,14 +412,16 @@ impl AcpRuntime {
                 .run_prompt(id.clone(), session, text, images, selection, &mut ticket)
                 .await;
             ticket.release().await;
-            if let Err(err) = result {
-                let _ = runtime
+            if let Err(err) = result
+                && let Err(error) = runtime
                     .write_error_value(
                         id,
                         JSONRPC_INTERNAL_ERROR,
                         format!("Prompt failed: {err:#}"),
                     )
-                    .await;
+                    .await
+            {
+                crate::logging::warn(&format!("Failed to report ACP prompt error: {error:#}"));
             }
             completed_session
                 .prompt_tasks
@@ -455,13 +459,15 @@ impl AcpRuntime {
             // next one. With no turn known (an older daemon, or a prompt not
             // yet accepted) it stays session-wide.
             let turn = session.router.lock().await.active_turn_identity();
-            let cancel_id = session.next_id();
-            let _ = session
-                .send(&Request::Cancel {
-                    id: cancel_id,
-                    turn,
-                })
-                .await;
+            if turn.is_some() || session.prompts.load(Ordering::SeqCst) > 0 {
+                let cancel_id = session.next_id();
+                let _ = session
+                    .send(&Request::Cancel {
+                        id: cancel_id,
+                        turn,
+                    })
+                    .await;
+            }
         }
         if let Some(id) = message.id {
             self.write_result(id, json!({})).await?;

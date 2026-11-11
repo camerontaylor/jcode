@@ -12,9 +12,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-app-core/src/agent/cache_request.rs": {
-      "dot_ok": 0,
       "let_underscore": 0,
-      "unwrap_or_default": 2
+      "dot_ok": 0,
+      "unwrap_or_default": 3
     },
     "crates/jcode-app-core/src/agent/environment.rs": {
       "dot_ok": 0,
@@ -222,8 +222,8 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-app-core/src/server/client_state.rs": {
-      "dot_ok": 3,
       "let_underscore": 0,
+      "dot_ok": 4,
       "unwrap_or_default": 5
     },
     "crates/jcode-app-core/src/server/comm_await.rs": {
@@ -1014,6 +1014,11 @@
     "crates/jcode-base/src/message/notifications.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-base/src/mobile_sync.rs": {
+      "let_underscore": 0,
+      "dot_ok": 2,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/model_pricing.rs": {
@@ -1817,8 +1822,8 @@
       "unwrap_or_default": 2
     },
     "crates/jcode-sdk/src/turn_retry.rs": {
-      "dot_ok": 1,
       "let_underscore": 0,
+      "dot_ok": 2,
       "unwrap_or_default": 1
     },
     "crates/jcode-selfdev-types/src/desktop.rs": {
@@ -2586,15 +2591,25 @@
       "let_underscore": 5,
       "unwrap_or_default": 6
     },
+    "crates/jcode-tui/src/tui/session_picker/cloud_preview/cache.rs": {
+      "let_underscore": 0,
+      "dot_ok": 0,
+      "unwrap_or_default": 1
+    },
     "crates/jcode-tui/src/tui/session_picker/filter.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 4
     },
     "crates/jcode-tui/src/tui/session_picker/loading.rs": {
+      "let_underscore": 4,
       "dot_ok": 28,
-      "let_underscore": 1,
       "unwrap_or_default": 18
+    },
+    "crates/jcode-tui/src/tui/session_picker/loading/mobile_inventory.rs": {
+      "let_underscore": 0,
+      "dot_ok": 3,
+      "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/session_picker/loading/pi_sessions.rs": {
       "dot_ok": 5,
@@ -2771,6 +2786,11 @@
       "let_underscore": 0,
       "unwrap_or_default": 2
     },
+    "src/cli/acp/outcome.rs": {
+      "let_underscore": 0,
+      "dot_ok": 0,
+      "unwrap_or_default": 1
+    },
     "src/cli/acp/presentation.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
@@ -2795,6 +2815,11 @@
       "dot_ok": 27,
       "let_underscore": 18,
       "unwrap_or_default": 8
+    },
+    "src/cli/cloud_move/transport.rs": {
+      "let_underscore": 1,
+      "dot_ok": 1,
+      "unwrap_or_default": 0
     },
     "src/cli/commands.rs": {
       "dot_ok": 13,
