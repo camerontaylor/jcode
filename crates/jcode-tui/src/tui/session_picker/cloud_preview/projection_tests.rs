@@ -320,3 +320,316 @@ fn remote_projection_ignores_stale_sidecar_and_respects_away_lease() {
     let result: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert!(result["sessions"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn remote_journal_dedupe_matches_rust_checkpoint_replay() {
+    use serde_json::{Value, json};
+    fn message(id: usize) -> Value {
+        json!({"id":id.to_string(),"role":"user","content":[{"type":"text","text":id.to_string()}]})
+    }
+    fn entry(snapshot: &Value, ids: &[usize], title: &str, stamp: &str) -> String {
+        let mut meta = snapshot.clone();
+        meta["title"] = json!(title);
+        meta["model"] = json!(title);
+        meta["working_dir"] = json!(format!("/{title}"));
+        meta["updated_at"] = json!(stamp);
+        // Match the canonical struct field order used by Rust glued salvage.
+        format!(
+            "{{\"meta\":{},\"append_messages\":{}}}",
+            meta,
+            serde_json::to_string(&ids.iter().copied().map(message).collect::<Vec<_>>()).unwrap()
+        )
+    }
+    let id = "dedupe_parity";
+    let session = Session::create_with_id(id.into(), None, Some("snapshot-new".into()));
+    let mut snapshot = serde_json::to_value(session).unwrap();
+    snapshot["updated_at"] = json!("2026-01-01T00:00:10.123456789Z");
+    snapshot["model"] = json!("snapshot-new");
+    snapshot["working_dir"] = json!("/snapshot-new");
+    snapshot["messages"] = json!((1..=100).map(message).collect::<Vec<_>>());
+    let old = "2026-01-01T00:00:01Z";
+    let fresh = "2026-01-01T00:00:11Z";
+    let stale = entry(&snapshot, &(1..=50).collect::<Vec<_>>(), "old", old);
+    let overlap = entry(
+        &snapshot,
+        &[95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 101, 105],
+        "fresh",
+        fresh,
+    );
+    let metadata = entry(&snapshot, &[], "metadata", "2026-01-01T00:00:10.123456790Z");
+    let cases = [
+        ("stale", format!("{stale}\n"), "snapshot-new", 100),
+        (
+            "mixed-overlap",
+            format!("{stale}\n{overlap}\n"),
+            "fresh",
+            105,
+        ),
+        (
+            "stale-ids-new-time",
+            entry(&snapshot, &[1, 2], "old", "2099-01-01T00:00:00Z"),
+            "snapshot-new",
+            100,
+        ),
+        (
+            "metadata-equal-offset",
+            entry(&snapshot, &[], "old", "2026-01-01T01:00:10.123456789+01:00"),
+            "snapshot-new",
+            100,
+        ),
+        (
+            "metadata-nanosecond",
+            format!("{stale}\n{metadata}\n"),
+            "metadata",
+            100,
+        ),
+        (
+            "metadata-after-fresh",
+            format!("{overlap}\n{}\n", entry(&snapshot, &[], "after", old)),
+            "after",
+            105,
+        ),
+        (
+            "glued-torn-prefix",
+            format!("{{\"meta\":{{{overlap}\n"),
+            "fresh",
+            105,
+        ),
+        (
+            "malformed-and-torn-tail",
+            format!("{stale}\nnot-json\n{overlap}\n{{\"meta\":"),
+            "fresh",
+            105,
+        ),
+    ];
+    let mut cases: Vec<_> = cases
+        .into_iter()
+        .map(|(name, journal, title, count)| (name, journal, title, count, 100))
+        .collect();
+    let new = entry(&snapshot, &(101..=110).collect::<Vec<_>>(), "fresh", fresh);
+    cases.extend([
+        ("no-journal", String::new(), "snapshot-new", 100, 100),
+        ("empty-no-journal", String::new(), "snapshot-new", 0, 0),
+        (
+            "empty-old-metadata",
+            entry(&snapshot, &[], "old", old),
+            "snapshot-new",
+            0,
+            0,
+        ),
+        ("empty-new-metadata", metadata.clone(), "metadata", 0, 0),
+        (
+            "empty-unseen-ids-old-time",
+            entry(&snapshot, &[1, 2], "unseen", old),
+            "unseen",
+            2,
+            0,
+        ),
+        (
+            "new-after-stale",
+            format!("{stale}\n{new}\n"),
+            "fresh",
+            110,
+            100,
+        ),
+        (
+            "subset-noncontiguous",
+            entry(&snapshot, &[99, 1, 50], "old", fresh),
+            "snapshot-new",
+            100,
+            100,
+        ),
+        (
+            "duplicates-after-fresh",
+            format!("{overlap}\n{}\n", entry(&snapshot, &[1, 101], "after", old)),
+            "after",
+            105,
+            100,
+        ),
+        (
+            "salvaged-stale-prefix",
+            format!("{{\"meta\":{{{stale}{new}\n"),
+            "fresh",
+            110,
+            100,
+        ),
+    ]);
+    for (case, journal, title, count, initial_count) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        let path = sessions.join(format!("{id}.json"));
+        let journal_path = path.with_extension("journal.jsonl");
+        let mut snapshot = snapshot.clone();
+        if initial_count == 0 {
+            snapshot["messages"] = json!([]);
+        }
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        if !journal.is_empty() {
+            std::fs::write(&journal_path, journal.as_bytes()).unwrap();
+        }
+        let rust = Session::load_from_path(&path).unwrap();
+        assert_eq!(rust.messages.len(), count, "Rust oracle must replay {case}");
+        assert_eq!(
+            rust.title.as_deref(),
+            Some(title),
+            "Rust oracle metadata {case}"
+        );
+        let (projected, _) =
+            parse_preview(&run_projection(home.path(), "preview", id).stdout).unwrap();
+        let expected: Vec<_> = rust
+            .messages
+            .iter()
+            .rev()
+            .take(80)
+            .rev()
+            .map(|m| m.id.as_str())
+            .collect();
+        let actual: Vec<_> = projected.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(actual, expected, "message order for {case}");
+        assert_eq!(projected.title, rust.title, "preview title for {case}");
+        assert_eq!(projected.model, rust.model, "preview model for {case}");
+        assert_eq!(
+            projected.updated_at, rust.updated_at,
+            "preview timestamp for {case}"
+        );
+        let output = run_projection(home.path(), "inventory", id);
+        let inventory: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            inventory["sessions"][0]["title"],
+            json!(rust.title),
+            "inventory {case}"
+        );
+        assert_eq!(
+            inventory["sessions"][0]["cwd"],
+            json!(rust.working_dir),
+            "inventory cwd {case}"
+        );
+        let stamp: chrono::DateTime<chrono::Utc> =
+            serde_json::from_value(inventory["sessions"][0]["updated_at"].clone()).unwrap();
+        assert_eq!(stamp, rust.updated_at, "inventory timestamp {case}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "snapshot changed for {case}"
+        );
+        if journal.is_empty() {
+            assert!(!journal_path.exists(), "journal created for {case}");
+        } else {
+            assert_eq!(
+                std::fs::read(&journal_path).unwrap(),
+                journal.as_bytes(),
+                "journal changed for {case}"
+            );
+        }
+    }
+}
+
+fn run_projector_checks(checks: &str) {
+    let mut child = std::process::Command::new("python3")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let definitions = REMOTE_PROJECTOR.split("if __name__ ==").next().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    write!(input, "{definitions}\n{checks}").unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn remote_timestamp_uses_microsecond_parser_without_losing_nanoseconds() {
+    run_projector_checks(
+        r#"
+import tempfile
+real_datetime = datetime
+class MicrosecondParser:
+    # Python 3.9/3.10's fromisoformat accepts only 3/6 fractional digits.
+    @staticmethod
+    def fromisoformat(value):
+        fraction = re.search(r'\.(\d+)', value)
+        if fraction and len(fraction.group(1)) not in (3, 6):
+            raise ValueError('unsupported fractional precision')
+        return real_datetime.fromisoformat(value)
+datetime = MicrosecondParser
+try:
+    for fraction, nanos in [('1',100000000), ('123',123000000), ('123456',123456000), ('123456789',123456789)]:
+        value = timestamp('2026-01-01T00:00:10.' + fraction + 'Z')
+        assert value is not None and value[1] == nanos, (fraction, value)
+    assert timestamp('2026-01-01T00:00:10.123456789Z') == timestamp('2026-01-01T01:00:10.123456789+01:00')
+    assert timestamp('2026-01-01T00:00:10.123456788Z') < timestamp('2026-01-01T00:00:10.123456789Z')
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory)/'compat.json'
+        path.write_text(json.dumps({'id':'compat','title':'snapshot','updated_at':'2026-01-01T00:00:10.123456789Z','messages':[]}))
+        path.with_suffix('.journal.jsonl').write_text(json.dumps({'meta':{'title':'stale','updated_at':'2026-01-01T00:00:10.123456788Z'},'append_messages':[]})+'\n')
+        for preview in (True,False):
+            assert project(path,preview)['title'] == 'snapshot'
+finally:
+    datetime = real_datetime
+"#,
+    );
+}
+
+#[test]
+fn remote_journal_candidates_and_replay_share_checkpoint_view() {
+    run_projector_checks(
+        r#"
+import tempfile
+original_collect = journal_message_ids
+original_open = Path.open
+message = lambda i: {'id':str(i),'role':'user','content':[{'type':'text','text':str(i)}]}
+for mutation in ('append','replace'):
+    for preview in (True,False):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'race.json'
+            journal = path.with_suffix('.journal.jsonl')
+            before = {'id':'race','title':'snapshot','updated_at':'2026-01-01T00:00:10Z','messages':[message(i) for i in range(1,101)]}
+            old_entry = json.dumps({'meta':{'title':'old','updated_at':'2026-01-01T00:00:01Z'},'append_messages':[message(1)]})+'\n'
+            new_entry = json.dumps({'meta':{'title':'late','updated_at':'2026-01-01T00:00:11Z'},'append_messages':[message(101)]})+'\n'
+            path.write_text(json.dumps(before)); journal.write_text(old_entry)
+            opens = []
+            def tracked_open(target, *args, **kwargs):
+                if target == journal and args and args[0] == 'rb':
+                    opens.append(target)
+                return original_open(target, *args, **kwargs)
+            def checkpoint_after_candidates(source):
+                result = original_collect(source)
+                # Deterministic writer barrier: publish a new snapshot containing
+                # a message appended after the candidate mapping was captured.
+                before['messages'].append(message(101))
+                before['title'] = 'checkpoint'
+                before['updated_at'] = '2026-01-01T00:00:12Z'
+                path.write_text(json.dumps(before))
+                if mutation == 'append':
+                    with journal.open('a') as writer: writer.write(new_entry)
+                else:
+                    replacement = journal.with_suffix('.replacement')
+                    replacement.write_text(old_entry + new_entry)
+                    replacement.replace(journal)
+                return result
+            Path.open = tracked_open
+            journal_message_ids = checkpoint_after_candidates
+            try:
+                result = project(path,preview)
+            finally:
+                Path.open = original_open
+                journal_message_ids = original_collect
+            assert result['title'] == 'checkpoint', (mutation,preview,result['title'])
+            assert result['updated_at'] == '2026-01-01T00:00:12Z'
+            if preview:
+                assert [m['id'] for m in result['messages']] == [str(i) for i in range(22,102)]
+            assert len(opens) == 1, opens
+            assert json.loads(path.read_text()) == before
+            assert journal.read_text() == old_entry + new_entry
+"#,
+    );
+}
