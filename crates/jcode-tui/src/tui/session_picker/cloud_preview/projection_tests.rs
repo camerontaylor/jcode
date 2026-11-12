@@ -525,3 +525,111 @@ fn remote_journal_dedupe_matches_rust_checkpoint_replay() {
         }
     }
 }
+
+fn run_projector_checks(checks: &str) {
+    let mut child = std::process::Command::new("python3")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let definitions = REMOTE_PROJECTOR.split("if __name__ ==").next().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    write!(input, "{definitions}\n{checks}").unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn remote_timestamp_uses_microsecond_parser_without_losing_nanoseconds() {
+    run_projector_checks(
+        r#"
+import tempfile
+real_datetime = datetime
+class MicrosecondParser:
+    # Python 3.9/3.10's fromisoformat accepts only 3/6 fractional digits.
+    @staticmethod
+    def fromisoformat(value):
+        fraction = re.search(r'\.(\d+)', value)
+        if fraction and len(fraction.group(1)) not in (3, 6):
+            raise ValueError('unsupported fractional precision')
+        return real_datetime.fromisoformat(value)
+datetime = MicrosecondParser
+try:
+    for fraction, nanos in [('1',100000000), ('123',123000000), ('123456',123456000), ('123456789',123456789)]:
+        value = timestamp('2026-01-01T00:00:10.' + fraction + 'Z')
+        assert value is not None and value[1] == nanos, (fraction, value)
+    assert timestamp('2026-01-01T00:00:10.123456789Z') == timestamp('2026-01-01T01:00:10.123456789+01:00')
+    assert timestamp('2026-01-01T00:00:10.123456788Z') < timestamp('2026-01-01T00:00:10.123456789Z')
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory)/'compat.json'
+        path.write_text(json.dumps({'id':'compat','title':'snapshot','updated_at':'2026-01-01T00:00:10.123456789Z','messages':[]}))
+        path.with_suffix('.journal.jsonl').write_text(json.dumps({'meta':{'title':'stale','updated_at':'2026-01-01T00:00:10.123456788Z'},'append_messages':[]})+'\n')
+        for preview in (True,False):
+            assert project(path,preview)['title'] == 'snapshot'
+finally:
+    datetime = real_datetime
+"#,
+    );
+}
+
+#[test]
+fn remote_journal_candidates_and_replay_share_checkpoint_view() {
+    run_projector_checks(
+        r#"
+import tempfile
+original_collect = journal_message_ids
+original_open = Path.open
+message = lambda i: {'id':str(i),'role':'user','content':[{'type':'text','text':str(i)}]}
+for mutation in ('append','replace'):
+    for preview in (True,False):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'race.json'
+            journal = path.with_suffix('.journal.jsonl')
+            before = {'id':'race','title':'snapshot','updated_at':'2026-01-01T00:00:10Z','messages':[message(i) for i in range(1,101)]}
+            old_entry = json.dumps({'meta':{'title':'old','updated_at':'2026-01-01T00:00:01Z'},'append_messages':[message(1)]})+'\n'
+            new_entry = json.dumps({'meta':{'title':'late','updated_at':'2026-01-01T00:00:11Z'},'append_messages':[message(101)]})+'\n'
+            path.write_text(json.dumps(before)); journal.write_text(old_entry)
+            opens = []
+            def tracked_open(target, *args, **kwargs):
+                if target == journal and args and args[0] == 'rb':
+                    opens.append(target)
+                return original_open(target, *args, **kwargs)
+            def checkpoint_after_candidates(source):
+                result = original_collect(source)
+                # Deterministic writer barrier: publish a new snapshot containing
+                # a message appended after the candidate mapping was captured.
+                before['messages'].append(message(101))
+                before['title'] = 'checkpoint'
+                before['updated_at'] = '2026-01-01T00:00:12Z'
+                path.write_text(json.dumps(before))
+                if mutation == 'append':
+                    with journal.open('a') as writer: writer.write(new_entry)
+                else:
+                    replacement = journal.with_suffix('.replacement')
+                    replacement.write_text(old_entry + new_entry)
+                    replacement.replace(journal)
+                return result
+            Path.open = tracked_open
+            journal_message_ids = checkpoint_after_candidates
+            try:
+                result = project(path,preview)
+            finally:
+                Path.open = original_open
+                journal_message_ids = original_collect
+            assert result['title'] == 'checkpoint', (mutation,preview,result['title'])
+            assert result['updated_at'] == '2026-01-01T00:00:12Z'
+            if preview:
+                assert [m['id'] for m in result['messages']] == [str(i) for i in range(22,102)]
+            assert len(opens) == 1, opens
+            assert json.loads(path.read_text()) == before
+            assert journal.read_text() == old_entry + new_entry
+"#,
+    );
+}
