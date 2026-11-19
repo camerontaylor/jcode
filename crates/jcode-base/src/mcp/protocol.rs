@@ -90,6 +90,21 @@ pub struct InitializeResult {
     pub capabilities: ServerCapabilities,
     #[serde(rename = "serverInfo")]
     pub server_info: Option<ServerInfo>,
+    /// Optional usage guidance for the model. Anything other than a string
+    /// (absent, null, a number, an object) is ignored rather than failing the
+    /// handshake.
+    #[serde(default, deserialize_with = "deserialize_string_or_none")]
+    pub instructions: Option<String>,
+}
+
+fn deserialize_string_or_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Value::deserialize(deserializer)? {
+        Value::String(text) => Some(text),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

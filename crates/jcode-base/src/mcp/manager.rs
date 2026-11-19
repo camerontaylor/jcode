@@ -442,6 +442,22 @@ impl McpManager {
         None
     }
 
+    /// Capped `instructions` from one connected server's initialize result,
+    /// or `None` when it sent none or is not connected.
+    pub async fn server_instructions(&self, server_name: &str) -> Option<String> {
+        if let Some(handle) = self.pool_handles.read().await.get(server_name)
+            && !handle.is_closed()
+        {
+            return handle.instructions();
+        }
+        if let Some(client) = self.owned_clients.read().await.get(server_name)
+            && !client.handle().is_closed()
+        {
+            return client.handle().instructions();
+        }
+        None
+    }
+
     /// Get all available tools from all connected servers
     pub async fn all_tools(&self) -> Vec<(String, McpToolDef)> {
         let mut tools = Vec::new();

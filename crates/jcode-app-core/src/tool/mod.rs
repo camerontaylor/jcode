@@ -293,6 +293,7 @@ fn accepts_large_output(input: &Value) -> bool {
 struct McpPolicyIndex {
     current: HashMap<String, (String, String)>,
     history: HashMap<(String, String), HashSet<String>>,
+    instructions: std::collections::BTreeMap<String, String>, // see mcp::instructions
 }
 
 /// Registry of available tools (Arc-wrapped for sharing)
@@ -1577,8 +1578,6 @@ impl Registry {
         working_dir: Option<std::path::PathBuf>,
     ) {
         use crate::mcp::McpManager;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
 
         let mcp_manager = if let Some(pool) = shared_pool {
             let sid = session_id.unwrap_or_else(|| "unknown".to_string());
@@ -1766,6 +1765,7 @@ impl Registry {
                         continue;
                     }
                     crate::logging::info(&format!("MCP: Connected to '{name}'"));
+                    registry.record_mcp_instructions(&mcp_manager, &name).await;
 
                     // Only this server changed. Rebuilding every server's
                     // proxies and re-reconciling the whole schema cache on each
