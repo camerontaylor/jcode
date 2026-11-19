@@ -76,6 +76,20 @@ impl Registry {
         }
     }
 
+    /// Rebuild the record from the manager's live connections, after a manual
+    /// connect, disconnect or reload. Agents keep their frozen snapshot until
+    /// their next intentional recapture.
+    pub(crate) async fn sync_mcp_instructions(&self, manager: &RwLock<McpManager>) {
+        let manager = manager.read().await;
+        let mut by_server = BTreeMap::new();
+        for server in manager.connected_servers().await {
+            if let Some(text) = manager.server_instructions(&server).await {
+                by_server.insert(server, text);
+            }
+        }
+        self.with_record(|record| record.by_server = by_server);
+    }
+
     /// Wait while initial handshakes are pending, up to the grace deadline.
     pub(crate) async fn wait_for_mcp_instructions(&self) {
         loop {
@@ -109,3 +123,7 @@ impl Registry {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_instructions_tests.rs"]
+mod tests;
