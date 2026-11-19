@@ -505,7 +505,7 @@ impl Agent {
     }
 
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
-        self.capture_mcp_instructions_snapshot();
+        self.capture_mcp_instructions_snapshot().await;
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }

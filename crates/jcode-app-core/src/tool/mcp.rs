@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 #[path = "mcp_instructions.rs"]
-mod instructions;
+pub(crate) mod instructions;
 
 #[derive(Debug, Deserialize)]
 struct McpSearchInput {

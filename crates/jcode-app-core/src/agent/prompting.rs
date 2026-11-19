@@ -129,9 +129,11 @@ impl Agent {
     }
 
     /// Freeze the connected MCP servers' instructions for this session's
-    /// system prompt, once. Never waits: a server still connecting is left out.
-    pub(super) fn capture_mcp_instructions_snapshot(&mut self) {
+    /// system prompt, once. Waits only within the short grace that follows
+    /// MCP registration; a server still connecting after it is left out.
+    pub(super) async fn capture_mcp_instructions_snapshot(&mut self) {
         if self.mcp_instructions_snapshot.is_none() {
+            self.registry.wait_for_mcp_instructions().await;
             self.mcp_instructions_snapshot = Some(self.registry.mcp_server_instructions());
         }
     }
