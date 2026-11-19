@@ -340,6 +340,10 @@ pub struct Agent {
     /// AGENTS.md is session bootstrap input. Keep the captured text stable so
     /// tool writes do not mutate the provider's cacheable prefix mid-session.
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
+    /// MCP server `instructions`, frozen at the first tool lock of a session
+    /// (`None` until then). Servers that connect later add nothing, so the
+    /// cached system prefix stays stable and no turn waits on MCP.
+    mcp_instructions_snapshot: Option<Vec<(String, String)>>,
     /// The "Available Skills" system-prompt section is session bootstrap input
     /// too. Installing a skill mid-session must not rewrite the cached system
     /// prefix (that forces a KV cache miss on everything after it), so the
@@ -408,6 +412,7 @@ impl Agent {
             .as_deref()
             .map(std::path::Path::new);
         self.agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+        self.mcp_instructions_snapshot = None;
         self.refresh_prompt_skills_snapshot();
     }
 
@@ -499,6 +504,7 @@ impl Agent {
             announced_mcp_tools: HashSet::new(),
             announced_mcp_scan_index: 0,
             agents_md_snapshot,
+            mcp_instructions_snapshot: None,
             prompt_skills_snapshot: Vec::new(),
             announced_skills: HashSet::new(),
             announced_skills_scan_index: 0,

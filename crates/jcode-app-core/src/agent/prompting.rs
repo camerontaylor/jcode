@@ -128,6 +128,16 @@ impl Agent {
         pending
     }
 
+    /// Freeze the connected MCP servers' instructions for this session's
+    /// system prompt, once. Waits only within the short grace that follows
+    /// MCP registration; a server still connecting after it is left out.
+    pub(super) async fn capture_mcp_instructions_snapshot(&mut self) {
+        if self.mcp_instructions_snapshot.is_none() {
+            self.registry.wait_for_mcp_instructions().await;
+            self.mcp_instructions_snapshot = Some(self.registry.mcp_server_instructions());
+        }
+    }
+
     /// Build split system prompt for better caching
     /// Returns static (cacheable) and dynamic (not cached) parts separately
     pub(super) fn build_system_prompt_split(
@@ -156,7 +166,7 @@ impl Agent {
             .as_ref()
             .map(std::path::PathBuf::from);
 
-        let (split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
+        let (mut split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
             skill_prompt.as_deref(),
             available_skills,
             self.session.is_canary,
@@ -164,6 +174,14 @@ impl Agent {
             working_dir.as_deref(),
             self.agents_md_snapshot.clone(),
         );
+        if let Some(section) = self
+            .mcp_instructions_snapshot
+            .as_deref()
+            .and_then(crate::mcp::instructions::build_instructions_section)
+        {
+            split.static_part.push_str("\n\n");
+            split.static_part.push_str(&section);
+        }
 
         split
     }

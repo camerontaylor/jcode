@@ -387,6 +387,7 @@ impl Agent {
             self.cache_tracker.reset();
             self.kv_cache_monitor.reset();
         }
+        self.mcp_instructions_snapshot = None; // prefix rebuilds anyway: recapture
         // Allow the late-MCP-registration recheck to fire once for the next
         // snapshot (e.g. after an explicit `mcp` reload).
         self.mcp_late_register_resolved = false;
@@ -504,6 +505,7 @@ impl Agent {
     }
 
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
+        self.capture_mcp_instructions_snapshot().await;
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }

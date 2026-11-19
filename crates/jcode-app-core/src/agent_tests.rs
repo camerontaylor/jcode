@@ -29,6 +29,9 @@ mod compile_remote;
 #[path = "agent_tests/mcp_remote_cache.rs"]
 mod mcp_remote_cache;
 
+#[path = "agent_tests/mcp_instructions.rs"]
+mod mcp_instructions;
+
 #[path = "agent_tests/elicitation.rs"]
 mod elicitation;
 

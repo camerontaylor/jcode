@@ -13,6 +13,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+#[path = "mcp_instructions.rs"]
+pub(crate) mod instructions;
 
 #[derive(Debug, Deserialize)]
 struct McpSearchInput {
@@ -938,6 +940,7 @@ impl McpManagementTool {
                 drop(manager);
                 let registry = self.registry.as_ref().and_then(|r| r.upgrade());
                 if let Some(registry) = &registry {
+                    registry.sync_mcp_instructions(&self.manager).await;
                     registry
                         .refresh_mcp_tools(
                             crate::mcp::create_mcp_tools_from_cached_many(
@@ -1057,6 +1060,7 @@ impl McpManagementTool {
             .and_then(|registry| registry.upgrade())
         {
             let removed = registry.unregister_mcp_server(&server_name).await;
+            registry.sync_mcp_instructions(&self.manager).await;
             let connected = self.manager.read().await.connected_servers().await;
             registry
                 .refresh_mcp_tools(
@@ -1093,6 +1097,7 @@ impl McpManagementTool {
                 .and_then(|registry| registry.upgrade())
             {
                 registry.unregister_prefix("mcp__").await;
+                registry.clear_mcp_instructions();
             }
             return Ok(ToolOutput::new(
                 "No servers found in config.\n\n\
@@ -1126,6 +1131,7 @@ impl McpManagementTool {
         {
             let mcp_tools = crate::mcp::create_mcp_tools(Arc::clone(&self.manager)).await;
             registry.reconcile_mcp_tools(mcp_tools).await;
+            registry.sync_mcp_instructions(&self.manager).await;
         }
 
         let enabled_count = config

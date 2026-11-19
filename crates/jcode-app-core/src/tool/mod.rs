@@ -293,6 +293,7 @@ fn accepts_large_output(input: &Value) -> bool {
 struct McpPolicyIndex {
     current: HashMap<String, (String, String)>,
     history: HashMap<(String, String), HashSet<String>>,
+    instructions: mcp::instructions::Record,
 }
 
 /// Registry of available tools (Arc-wrapped for sharing)
@@ -1577,8 +1578,6 @@ impl Registry {
         working_dir: Option<std::path::PathBuf>,
     ) {
         use crate::mcp::McpManager;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
 
         let mcp_manager = if let Some(pool) = shared_pool {
             let sid = session_id.unwrap_or_else(|| "unknown".to_string());
@@ -1631,6 +1630,7 @@ impl Registry {
         }
 
         if enabled_count > 0 {
+            self.begin_mcp_connects(enabled_count);
             crate::logging::info(&format!("MCP: Found {} server(s) in config", enabled_count));
 
             // Send immediate "connecting" status so the TUI shows loading state
@@ -1755,17 +1755,12 @@ impl Registry {
                 let mut server_counts: std::collections::BTreeMap<String, usize> =
                     std::collections::BTreeMap::new();
                 while let Some((name, result)) = connections.next().await {
-                    if let Err(error) = result {
-                        crate::logging::event_rate_limited(
-                            crate::logging::LogLevel::Error,
-                            &format!("mcp_register_failed:{name}"),
-                            std::time::Duration::from_secs(60),
-                            "MCP_REGISTER_FAILED",
-                            vec![("server", name), ("error", format!("{error:#}"))],
-                        );
+                    if !registry
+                        .finish_mcp_connect(&mcp_manager, &name, result)
+                        .await
+                    {
                         continue;
                     }
-                    crate::logging::info(&format!("MCP: Connected to '{name}'"));
 
                     // Only this server changed. Rebuilding every server's
                     // proxies and re-reconciling the whole schema cache on each

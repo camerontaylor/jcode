@@ -7,6 +7,7 @@
 
 pub mod budget;
 mod client;
+pub mod instructions;
 mod manager;
 pub mod oauth;
 pub mod pool;
