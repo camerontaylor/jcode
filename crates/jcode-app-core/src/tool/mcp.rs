@@ -1097,7 +1097,7 @@ impl McpManagementTool {
                 .and_then(|registry| registry.upgrade())
             {
                 registry.unregister_prefix("mcp__").await;
-                registry.sync_mcp_instructions(&self.manager).await;
+                registry.clear_mcp_instructions();
             }
             return Ok(ToolOutput::new(
                 "No servers found in config.\n\n\

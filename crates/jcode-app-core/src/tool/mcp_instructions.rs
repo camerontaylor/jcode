@@ -90,6 +90,12 @@ impl Registry {
         self.with_record(|record| record.by_server = by_server);
     }
 
+    /// Forget every server's instructions, when an empty config withdraws all
+    /// MCP tools without disconnecting the servers.
+    pub(crate) fn clear_mcp_instructions(&self) {
+        self.with_record(|record| record.by_server.clear());
+    }
+
     /// Wait while initial handshakes are pending, up to the grace deadline.
     pub(crate) async fn wait_for_mcp_instructions(&self) {
         loop {
