@@ -30,7 +30,8 @@ use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
 
 // Fork: releases (and so `jcode update` / auto-update) come from the
 // camerontaylor/jcode fork, which carries the Paseo ACP commands on top of
-// upstream. Versions are upstream patch * 1000 + fork build (0.99.1 -> 0.99.1001).
+// upstream. Versions are upstream patch * 1000 + fork build (1.0.2 -> 1.0.2001);
+// see scripts/fork/release-naming.md.
 const GITHUB_REPO: &str = "camerontaylor/jcode";
 /// Minimum gap between *automatic* update checks.
 ///
