@@ -1,0 +1,22 @@
+# Known-fake credentials in upstream's own redaction tests.
+# Read by CRQ from the base side only.
+
+[[exempt]]
+path   = "crates/jcode-app-core/src/server/swarm_tests.rs"
+rule   = "class:inline-secret-assignments"
+reason = "Fake credentials (DEPLOY_TOKEN, API_KEY) in upstream redaction tests"
+
+[[exempt]]
+path   = "crates/jcode-app-core/src/server/swarm_tests.rs"
+rule   = "generic-api-key"
+reason = "Fake credentials in upstream redaction tests"
+
+[[exempt]]
+path   = "crates/jcode-base/src/message/tests.rs"
+rule   = "class:inline-secret-assignments"
+reason = "Fake credentials (DB_PASSWORD, api-key) in upstream redaction tests"
+
+[[exempt]]
+path   = "crates/jcode-base/src/message/tests.rs"
+rule   = "generic-api-key"
+reason = "Fake credentials in upstream redaction tests"
