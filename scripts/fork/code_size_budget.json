@@ -2,7 +2,7 @@
   "threshold_loc": 1200,
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": 1374,
-    "crates/jcode-app-core/src/agent/turn_execution.rs": 1565,
+    "crates/jcode-app-core/src/agent/turn_execution.rs": 1567,
     "crates/jcode-app-core/src/agent/turn_loops.rs": 1349,
     "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": 1856,
     "crates/jcode-app-core/src/overnight.rs": 1275,
@@ -107,7 +107,7 @@
     "src/bin/memory_recall_bench.rs": 2667,
     "src/bin/tui_bench.rs": 1765,
     "src/cli/acp.rs": 2018,
-    "src/cli/acp/daemon_router.rs": 1306,
+    "src/cli/acp/daemon_router.rs": 1311,
     "src/cli/cloud_move.rs": 2717,
     "src/cli/commands.rs": 3393,
     "src/cli/dispatch.rs": 1513,
