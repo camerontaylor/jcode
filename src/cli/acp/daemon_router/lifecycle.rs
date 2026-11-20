@@ -26,6 +26,7 @@ impl RouterState {
 
     pub(super) fn transport_restored(&mut self) {
         self.closed = false;
+        self.todo_pushes = false;
     }
 
     /// `session/cancel`: withdraw every prompt still waiting for a turn. The
@@ -51,12 +52,27 @@ impl RouterState {
         // A todo snapshot is session state, not turn output: the daemon writes
         // the reply on the connection's event channel, which can drain after
         // the turn that produced it ended. Render it whenever it arrives.
-        if let ServerEvent::Todos { payload, .. } = event {
-            return if self.view_closed {
-                Vec::new()
-            } else {
-                vec![RouteAction::Plan { payload }]
-            };
+        if let ServerEvent::Todos {
+            session_id,
+            payload,
+            pushes,
+        } = event
+        {
+            if self.view_closed || session_id != self.session_id {
+                return Vec::new();
+            }
+            // A legacy reply must not overwrite a push already observed. New
+            // daemons mark replies true too: replies and pushes are sampled in
+            // the same client loop and queued on the same FIFO event channel.
+            if self.todo_pushes && !pushes {
+                return Vec::new();
+            }
+            self.todo_pushes |= pushes;
+            if self.last_todo_payload.as_ref() == Some(&payload) {
+                return Vec::new();
+            }
+            self.last_todo_payload = Some(payload.clone());
+            return vec![RouteAction::Plan { payload }];
         }
         // A completed todo write invalidates the session's plan snapshot. The
         // todo tool's own output is a rendered card, so the adapter asks the
@@ -70,7 +86,7 @@ impl RouterState {
         } else {
             self.route_attributed(event)
         };
-        if refresh_plan && !self.view_closed {
+        if refresh_plan && !self.view_closed && !self.todo_pushes {
             actions.push(RouteAction::Send(Request::GetTodos {
                 id: self.next_request_id(),
             }));
