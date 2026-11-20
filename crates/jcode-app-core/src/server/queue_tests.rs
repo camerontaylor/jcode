@@ -258,6 +258,8 @@ fn rejected_transport_input_is_not_admitted() {
         transport_owner: Some("closed".into()),
     }));
     assert!(queue.lock().unwrap_err().into_inner().is_empty());
+}
+
 #[tokio::test]
 async fn file_activity_notices_fold_into_the_pending_one_until_delivered() {
     use crate::server::file_activity::{FileActivityEntry, deliver_file_activity_notice};

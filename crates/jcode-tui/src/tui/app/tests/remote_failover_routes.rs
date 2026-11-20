@@ -1009,6 +1009,7 @@ fn test_remote_usage_limit_failover_collapses_into_one_line_with_account() {
                 provider_oauth_account_label: Some("openai-fox".into()),
                 resolved_credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
                 reasoning_effort: None,
+                available_reasoning_efforts: None,
                 context_window: None,
             },
             &mut remote,

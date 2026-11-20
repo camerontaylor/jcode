@@ -90,6 +90,7 @@ impl DaemonSessions {
                         system_reminder: None,
                         display_role: None,
                         status_detail: None,
+                        origin: crate::protocol::TurnOriginKind::Relay,
                     },
                     self.swarm.clone(),
                 )

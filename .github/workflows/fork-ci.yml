@@ -39,7 +39,7 @@ env:
   # scripts/fork/fmt-check.sh to work out which .rs files are fork carries.
   # UPDATE THIS when the Desvio base moves. The quality job's checkout needs it
   # locally, so it fetches full history (fetch-depth: 0).
-  FORK_UPSTREAM_BASE: 6af953607d14855f83ac9bfcbc9fc957caadc072
+  FORK_UPSTREAM_BASE: be8c61678d2eb7e49dc9540a58ddf89e3ca798ab
 
 jobs:
   quality:

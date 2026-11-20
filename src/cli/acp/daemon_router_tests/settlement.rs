@@ -855,6 +855,7 @@ fn a_todo_snapshot_is_a_session_plan_action_whenever_it_arrives() {
     let actions = router.route(ServerEvent::Todos {
         session_id: "session-1".to_string(),
         payload: payload.clone(),
+        pushes: false,
     });
     assert!(
         matches!(
@@ -875,6 +876,7 @@ fn a_todo_snapshot_during_a_turn_is_not_delivered_as_turn_output() {
     let actions = router.route(ServerEvent::Todos {
         session_id: "session-1".to_string(),
         payload,
+        pushes: false,
     });
     assert!(
         matches!(actions.as_slice(), [RouteAction::Plan { .. }]),
@@ -901,6 +903,7 @@ fn closed_views_drop_todo_snapshots_and_refreshes() {
                 .route(ServerEvent::Todos {
                     session_id: "session-1".into(),
                     payload: "[]".into(),
+                    pushes: false,
                 })
                 .is_empty()
         );

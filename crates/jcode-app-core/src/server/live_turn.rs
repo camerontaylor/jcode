@@ -108,6 +108,8 @@ pub(super) struct LiveTurnInput {
     pub system_reminder: Option<String>,
     pub display_role: Option<crate::session::StoredDisplayRole>,
     pub status_detail: Option<String>,
+    /// The kind of actor that started the turn.
+    pub origin: crate::protocol::TurnOriginKind,
 }
 
 /// Spawn `message` as a full tracked turn in a live session.
@@ -138,6 +140,7 @@ pub(super) async fn spawn_tracked_live_turn(
             system_reminder,
             display_role,
             status_detail,
+            origin,
         },
         swarm,
     )
@@ -156,6 +159,7 @@ pub(super) async fn spawn_tracked_live_turn_with_images(
         system_reminder,
         display_role,
         status_detail,
+        origin,
     } = input;
     let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
         return false;

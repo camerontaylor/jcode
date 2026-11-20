@@ -779,7 +779,9 @@ impl Agent {
             .iter()
             .flat_map(|config| config.disabled.iter().cloned())
             .collect();
-        let loader_allowed = allowed.is_none_or(|set| self.registry.tool_is_allowed(set, loader))
+        let loader_allowed = allowed
+            .as_ref()
+            .is_none_or(|set| self.registry.tool_is_allowed(set, loader))
             && !self.registry.tool_is_disabled(&self.disabled_tools, loader)
             && !self.registry.tool_is_disabled(&sdk_disabled, loader);
         crate::tool::load_tools::apply_deferral(

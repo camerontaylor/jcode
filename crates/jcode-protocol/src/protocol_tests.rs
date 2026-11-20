@@ -11,6 +11,8 @@ fn multi_client_shared_encoding_cost_probe() {
     for bytes in [24, 65_536] {
         for recipients in [1, 4] {
             let event = ServerEvent::TurnEvent {
+                end_message: None,
+                end: None,
                 identity: TurnIdentity {
                     runtime_generation: "generation".into(),
                     turn_id: 1,
