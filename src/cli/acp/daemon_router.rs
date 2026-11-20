@@ -376,6 +376,9 @@ pub(super) enum RouteAction {
 pub(super) struct RouterState {
     instance_id: String,
     session_id: String,
+    /// Learned per connection from Todos, never inferred from turn capabilities.
+    todo_pushes: bool,
+    last_todo_payload: Option<String>,
     /// The daemon advertised `turn_origin`: the connection subscribes with
     /// turn identity and routes on it. Otherwise events are read flat.
     turn_origin: bool,
@@ -412,6 +415,8 @@ impl RouterState {
         Self {
             instance_id: instance_id.into(),
             session_id: session_id.into(),
+            todo_pushes: false,
+            last_todo_payload: None,
             turn_origin: false,
             live_sessions: None,
             pending: HashMap::new(),

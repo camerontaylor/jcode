@@ -181,3 +181,59 @@ fn recent_history_session_switch_releases_page_fence() {
     assert!(app.recent_history_paging.request.is_none());
     assert!(app.compacted_history_lazy.pending_request_visible.is_none());
 }
+
+#[test]
+fn expanded_prompt_history_backfills_older_history_while_following_tail() {
+    let _lock = scroll_render_test_lock();
+    let mut app = recent_history_test_app();
+    // Only one prompt is loaded, so Alt+E would list a single row.
+    app.prompt_history_backfill = (None, 0);
+    assert!(!app.maybe_backfill_expanded_prompt_history());
+    crate::tui::ui::viewport::toggle_prompt_history_expanded();
+    let started = app.maybe_backfill_expanded_prompt_history();
+    crate::tui::ui::viewport::toggle_prompt_history_expanded();
+    assert!(started);
+    assert!(!app.auto_scroll_paused);
+    assert_eq!(app.take_pending_compacted_history_load(), Some(192));
+    app.recent_history_paging.request = Some((7, app.display_messages_version, 192));
+    assert!(app.accept_recent_history_response(7));
+    app.apply_compacted_history_window(
+        vec![
+            DisplayMessage::user("older prompt"),
+            DisplayMessage::user("latest prompt"),
+            DisplayMessage::assistant("latest answer"),
+        ],
+        Vec::new(),
+        1000,
+        192,
+        808,
+        98,
+    );
+    assert!(
+        !app.auto_scroll_paused,
+        "backfill must keep following the tail"
+    );
+}
+
+#[test]
+fn archived_history_backfill_also_preserves_tail_following() {
+    let mut app = create_test_app();
+    app.replace_display_messages(vec![DisplayMessage::assistant("current tail")]);
+    assert!(!app.recent_history_window_active());
+    app.auto_scroll_paused = false;
+    app.apply_compacted_history_window(
+        vec![
+            DisplayMessage::user("older archived prompt"),
+            DisplayMessage::assistant("current tail"),
+        ],
+        Vec::new(),
+        128,
+        64,
+        64,
+        0,
+    );
+    assert!(
+        !app.auto_scroll_paused,
+        "archived backfill must not pull the reader away from the tail"
+    );
+}

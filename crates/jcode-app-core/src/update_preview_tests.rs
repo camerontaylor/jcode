@@ -153,6 +153,33 @@ fn preview_download_requires_checksums_even_if_called_directly() {
 }
 
 #[test]
+fn upstream_described_fork_tags_update_from_preview_based_fork_releases() {
+    let tag = "v1.0.2001+fork.85.gbe8c616";
+    for (release, current, expected) in [
+        (tag, "0.99.1008+fork.p199", true),
+        (tag, "1.0.2001+fork.85.gbe8c616", false),
+        (
+            "v1.0.2002+fork.90.g0123abc",
+            "1.0.2001+fork.85.gbe8c616",
+            true,
+        ),
+        (
+            "v1.0.3001+fork.0.g0123abc",
+            "1.0.2002+fork.90.g0123abc",
+            true,
+        ),
+        ("v0.99.1008+fork.p199", "1.0.2001+fork.85.gbe8c616", false),
+    ] {
+        assert_eq!(
+            release_is_update_with(release, current, true, || panic!("release build")).unwrap(),
+            expected,
+            "{release} over {current}"
+        );
+    }
+    assert_eq!(release_identity(tag), "1.0.2001");
+}
+
+#[test]
 fn fork_release_metadata_preserves_update_identity_and_assets() {
     let tag = "v0.99.1004+fork.p199";
     for (release, current, expected) in [

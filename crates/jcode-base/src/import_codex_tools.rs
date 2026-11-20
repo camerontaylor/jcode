@@ -68,7 +68,7 @@ pub(super) fn append_tool(session: &mut Session, value: &serde_json::Value) -> b
     session.append_stored_message(StoredMessage {
         id: crate::id::new_id("msg"),
         role,
-        content: vec![block],
+        content: vec![block].into(),
         display_role: None,
         timestamp: parse_rfc3339_json(value.get("timestamp")),
         tool_duration_ms: None,

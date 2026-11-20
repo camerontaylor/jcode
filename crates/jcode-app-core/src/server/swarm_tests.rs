@@ -386,7 +386,7 @@ async fn live_status_fanout_projects_worker_events_into_broadcast() {
             id: "login".into(),
             content: "Authenticate".into(),
             status: "pending".into(),
-            completely_blocked: Some(crate::todo::TodoCompleteBlocker {
+            requires_user_auth: Some(crate::todo::TodoUserAuth {
                 reason: "Required data is permanently unavailable".into(),
             }),
             ..Default::default()
@@ -409,7 +409,7 @@ async fn live_status_fanout_projects_worker_events_into_broadcast() {
             .unwrap()
             .contains("Required data is permanently unavailable")
     );
-    assert_eq!(latest.todo_statuses, vec!["completely_blocked"]);
+    assert_eq!(latest.todo_statuses, vec!["requires_user_auth"]);
     todos.todos.push(crate::todo::TodoItem {
         id: "independent".into(),
         content: "Run tests".into(),
@@ -1119,3 +1119,56 @@ async fn departing_sole_owner_keeps_its_workers_owned() {
 
 #[path = "swarm_owner_tests.rs"]
 mod owner_notifications;
+
+#[test]
+fn swarm_detail_preview_redacts_a_credential_at_the_start_of_a_request() {
+    // Reported from the field: `swarm status` echoed the coordinator's task
+    // preview, which copied the head of a user message that began with a
+    // deliberately supplied credential.
+    // Fixture credentials are assembled at runtime so no source line looks
+    // like a real assignment to secret scanners.
+    let name = ["DEPLOY", "TOKEN"].join("_");
+    let secret = ["tok", "live", "4f9a8b7c6d5e"].join("_");
+    let request = format!(
+        "{name}={secret} use this to roll the staging cluster, then verify the rollout and report back with the pod status"
+    );
+    let preview = super::truncate_detail(&request, 120);
+    assert!(!preview.contains(&secret), "{preview}");
+    assert!(
+        preview.starts_with(&format!("{name}=[REDACTED_SECRET] use this")),
+        "{preview}"
+    );
+    assert!(preview.chars().count() <= 120);
+
+    // A token cut off by the preview limit must not survive as a prefix.
+    let cut = super::truncate_detail(
+        &format!(
+            "{} {}-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "x".repeat(96),
+            ["sk", "ant"].join("-")
+        ),
+        120,
+    );
+    assert!(!cut.contains("sk-ant-oat01"), "{cut}");
+
+    // Huge prompts are only scanned at the head, and ordinary text is unchanged.
+    let big = format!("refactor the parser {}", "y ".repeat(200_000));
+    assert!(super::truncate_detail(&big, 30).starts_with("refactor the parser"));
+    assert_eq!(
+        super::truncate_detail("hello   there\nworld", 11),
+        "hello th..."
+    );
+}
+
+#[tokio::test]
+async fn swarm_task_label_redacts_credentials() {
+    let members = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let (member, _rx) = swarm_member("worker", "agent", false);
+    members.write().await.insert("worker".to_string(), member);
+    let secret = ["abcd1234", "efgh"].concat();
+    let task = format!("{}={secret} fix the build", ["API", "KEY"].join("_"));
+    super::set_member_task_label("worker", &task, &members).await;
+    let label = members.read().await["worker"].task_label.clone().unwrap();
+    assert!(!label.contains(&secret), "{label}");
+    assert!(label.contains("fix the build"), "{label}");
+}

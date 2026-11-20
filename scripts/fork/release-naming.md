@@ -1,12 +1,30 @@
 # Fork release identity
 
-Tags use `vMAJOR.MINOR.PATCH+fork.pN`: PATCH retains upstream patch * 1000 +
-fork build; N names upstream `v1.0.0-preview.N`. The next release is
-`v0.99.1004+fork.p199`, based on upstream
-`7fd42339c907de223021bd63e5bb5df778c43a01` and custom
-`bf9f0b22f5a4374b9e90a8ac6c74750930349305`.
-`v0.99.1003` remains a valid installed release. The release workflow requires
-new-style tags even for manual dispatch, avoiding ambiguous new publication.
+Tags use `vX.Y.P+fork.N.gSHA` and record where on upstream the fork is up to
+date, like `git describe`:
+
+- `vX.Y.Z` is the newest upstream stable release tag the fork commit contains.
+- `P` is `Z * 1000 + fork build` (build 1..999, reset for each upstream
+  release). jcode compares only the numeric `X.Y.P`, so this keeps every fork
+  release ordered within and across upstream releases.
+- `N` is the number of upstream commits merged past `vX.Y.Z` (0 = exactly that
+  release), and `SHA` is the upstream commit the fork is merged up to.
+
+Example: `v1.0.2001+fork.85.gbe8c616` is fork build 1 on upstream `v1.0.2`
+plus 85 commits, up to `be8c616`. A fork release made exactly at upstream
+`v1.0.3` would be `v1.0.3001+fork.0.g<sha>`.
+
+`scripts/fork/release-tag.sh next [REF]` prints the next tag for a commit,
+taking the build number from existing fork tags for the same upstream release.
+`scripts/fork/release-tag.sh verify TAG [REF]` re-derives every field and fails
+on any mismatch; release preflight runs it on the tagged commit. Upstream
+commits are fetched with `--no-tags` and upstream tags are read with
+`ls-remote`, so upstream tags never enter the fork.
+
+Earlier releases used `vMAJOR.MINOR.PATCH+fork.pN` (N = upstream
+`v1.0.0-preview.N`), up to `v0.99.1008+fork.p199`. They remain valid installed
+versions, and `v1.0.2001` sorts above them, so they update normally. The
+workflow no longer accepts the old format for new releases.
 
 Build metadata survives the build/runtime version override. SemVer precedence
 and release identity ignore it, so patch 1003 updates to 1004, patch 1004 never
@@ -33,10 +51,10 @@ Regression tests: `release_identity_preserves_build_metadata`,
 `update_versions_follow_semver_precedence_not_build_metadata`, and
 `fork_release_metadata_preserves_update_identity_and_assets`.
 
-Release preflight runs before the build matrix. It validates the tag format,
-resolves the preview tag directly from upstream (preferring annotated tags'
-peeled commit), fetches that commit with `--no-tags`, and verifies it is an
-ancestor of the tagged fork commit. Missing upstream tags and mismatched bases
-stop the workflow before compilation. The publish job consumes the verified
-SHAs as job outputs rather than looking for upstream tags on the fork remote.
-Build checkouts retain full history for the embedded 700-commit changelog.
+Release preflight runs before the build matrix. It checks out the tag with
+full history and runs `release-tag.sh verify`, which stops the workflow before
+compilation on a malformed tag, a wrong upstream release, distance or commit,
+or a missing upstream release. The publish job consumes the verified upstream
+tag, distance and SHA as job outputs and titles the release
+`jcode fork X.Y.P (upstream vX.Y.Z+N)`. Build checkouts retain full history for
+the embedded 700-commit changelog.

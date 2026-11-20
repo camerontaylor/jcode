@@ -30,7 +30,8 @@ use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
 
 // Fork: releases (and so `jcode update` / auto-update) come from the
 // camerontaylor/jcode fork, which carries the Paseo ACP commands on top of
-// upstream. Versions are upstream patch * 1000 + fork build (0.99.1 -> 0.99.1001).
+// upstream. Versions are upstream patch * 1000 + fork build (1.0.2 -> 1.0.2001);
+// see scripts/fork/release-naming.md.
 const GITHUB_REPO: &str = "camerontaylor/jcode";
 /// Minimum gap between *automatic* update checks.
 ///
@@ -244,6 +245,8 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
 
 #[path = "update_preview.rs"]
 mod update_preview;
+#[path = "update_stable.rs"]
+mod update_stable;
 pub use update_preview::{check_for_update_with_channel_blocking, fetch_latest_preview_blocking};
 use update_preview::{
     prepare_preview_update_blocking, prepare_stable_update_blocking, preview_number,
@@ -657,16 +660,9 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
         crate::logging::info("Main channel: cargo not found, falling back to latest release");
     }
 
-    // Fallback: use latest stable release if available
-    if let Ok(release) = fetch_latest_release_blocking() {
-        let asset_name = get_asset_name();
-        let has_asset = release
-            .assets
-            .iter()
-            .any(|a| a.name.starts_with(asset_name));
-        if has_asset && release_is_update(&release)? {
-            return Ok(Some(release));
-        }
+    // Fallback: newest installable stable release, if any.
+    if let Ok(Some(release)) = update_stable::find_stable_update_blocking() {
+        return Ok(Some(release));
     }
 
     Ok(None)

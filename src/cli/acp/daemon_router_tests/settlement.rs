@@ -855,6 +855,7 @@ fn a_todo_snapshot_is_a_session_plan_action_whenever_it_arrives() {
     let actions = router.route(ServerEvent::Todos {
         session_id: "session-1".to_string(),
         payload: payload.clone(),
+        pushes: true,
     });
     assert!(
         matches!(
@@ -875,6 +876,7 @@ fn a_todo_snapshot_during_a_turn_is_not_delivered_as_turn_output() {
     let actions = router.route(ServerEvent::Todos {
         session_id: "session-1".to_string(),
         payload,
+        pushes: true,
     });
     assert!(
         matches!(actions.as_slice(), [RouteAction::Plan { .. }]),
@@ -901,6 +903,7 @@ fn closed_views_drop_todo_snapshots_and_refreshes() {
                 .route(ServerEvent::Todos {
                     session_id: "session-1".into(),
                     payload: "[]".into(),
+                    pushes: true,
                 })
                 .is_empty()
         );
@@ -1012,4 +1015,93 @@ fn joined_prompts_share_limits_and_continuation_resets_without_duplicate_text() 
         assert_eq!(done_count(&events, id), 1);
         assert_eq!(texts(&events).len(), usize::from(id == 77));
     }
+}
+
+fn todo_snapshot(payload: &str, pushes: bool) -> ServerEvent {
+    ServerEvent::Todos {
+        session_id: "session-1".into(),
+        payload: payload.into(),
+        pushes,
+    }
+}
+
+fn todo_done() -> ServerEvent {
+    ServerEvent::ToolDone {
+        id: "todo".into(),
+        name: "todo".into(),
+        output: "[]".into(),
+        error: None,
+    }
+}
+
+#[test]
+fn pushed_todos_stop_refresh_requests_and_deduplicate_snapshots() {
+    let mut router = attached_router();
+    assert!(matches!(
+        router.route(todo_snapshot("new", true)).as_slice(),
+        [RouteAction::Plan { .. }]
+    ));
+    assert!(router.route(todo_snapshot("new", true)).is_empty());
+    assert!(
+        !router
+            .route(todo_done())
+            .iter()
+            .any(|a| matches!(a, RouteAction::Send(Request::GetTodos { .. })))
+    );
+    // Capabilities belong to a connection: a replacement may be older.
+    router.transport_lost();
+    router.transport_restored();
+    assert!(
+        router
+            .route(todo_done())
+            .iter()
+            .any(|a| matches!(a, RouteAction::Send(Request::GetTodos { .. })))
+    );
+}
+
+#[test]
+fn legacy_todos_keep_refreshing_including_when_flag_is_absent() {
+    let mut router = attached_router();
+    let event =
+        decode_daemon_line(r#"{"type":"todos","session_id":"session-1","payload":"old"}"#).unwrap();
+    assert!(matches!(
+        router.route(event).as_slice(),
+        [RouteAction::Plan { .. }]
+    ));
+    assert!(
+        router
+            .route(todo_done())
+            .iter()
+            .any(|a| matches!(a, RouteAction::Send(Request::GetTodos { .. })))
+    );
+    assert!(matches!(
+        router.route(todo_snapshot("updated", false)).as_slice(),
+        [RouteAction::Plan { .. }]
+    ));
+}
+
+#[test]
+fn in_flight_todo_reply_cannot_replace_a_push_with_legacy_state() {
+    let mut router = attached_router();
+    assert!(
+        router
+            .route(todo_done())
+            .iter()
+            .any(|a| matches!(a, RouteAction::Send(Request::GetTodos { .. })))
+    );
+    assert!(matches!(
+        router.route(todo_snapshot("fresh", true)).as_slice(),
+        [RouteAction::Plan { .. }]
+    ));
+    assert!(router.route(todo_snapshot("stale", false)).is_empty());
+    // Current-daemon replies are push-enabled and FIFO, including duplicates.
+    assert!(router.route(todo_snapshot("fresh", true)).is_empty());
+    assert!(
+        matches!(router.route(todo_snapshot("newer", true)).as_slice(), [RouteAction::Plan { payload }] if payload == "newer")
+    );
+    let mut foreign = todo_snapshot("foreign", true);
+    if let ServerEvent::Todos { session_id, .. } = &mut foreign {
+        *session_id = "other".into();
+    }
+    assert!(router.route(foreign).is_empty());
 }
