@@ -4,7 +4,7 @@
 [[exempt]]
 path   = "crates/jcode-app-core/src/server/swarm_tests.rs"
 rule   = "class:inline-secret-assignments"
-reason = "Fake credentials (DEPLOY_TOKEN, API_KEY) in upstream redaction tests"
+reason = "Fake credentials in upstream redaction tests (swarm task-label redaction; fixtures arrive with the upstream merge in PR #32)"
 
 [[exempt]]
 path   = "crates/jcode-app-core/src/server/swarm_tests.rs"
@@ -14,7 +14,7 @@ reason = "Fake credentials in upstream redaction tests"
 [[exempt]]
 path   = "crates/jcode-base/src/message/tests.rs"
 rule   = "class:inline-secret-assignments"
-reason = "Fake credentials (DB_PASSWORD, api-key) in upstream redaction tests"
+reason = "Fake credentials in upstream redaction tests (message preview redaction; fixtures arrive with the upstream merge in PR #32)"
 
 [[exempt]]
 path   = "crates/jcode-base/src/message/tests.rs"
