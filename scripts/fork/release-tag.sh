@@ -25,7 +25,7 @@ set -euo pipefail
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/1jehuang/jcode}
 UPSTREAM_BRANCH=${UPSTREAM_BRANCH:-master}
 FORK_REMOTE=${FORK_REMOTE:-origin}
-TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.([1-9][0-9]{3,})\+fork\.(0|[1-9][0-9]*)\.g([0-9a-f]{7,40})$'
+TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.([1-9][0-9]*)\+fork\.(0|[1-9][0-9]*)\.g([0-9a-f]{7,40})$'
 
 die() {
   echo "release-tag: $*" >&2
