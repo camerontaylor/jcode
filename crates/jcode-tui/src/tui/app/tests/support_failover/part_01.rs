@@ -654,6 +654,18 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
         assert!(app.pending_turn);
         assert_eq!(active_provider.lock().unwrap().as_str(), "openai");
         assert_eq!(app.session.model.as_deref(), Some("gpt-5.4"));
+        // Cause, switch and retry collapse into one line.
+        let added = &app.display_messages[before..];
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert!(
+            added[0]
+                .content
+                .starts_with("✓ Usage limit reached. Switched to model: gpt-5.4"),
+            "{}",
+            added[0].content
+        );
+        assert!(added[0].content.ends_with(". Retrying."));
+        assert!(!added[0].content.contains('\n'));
         let last = app.display_messages.last().expect("display message");
         assert!(!last.content.contains("cross_provider_failover"));
         assert!(last.content.lines().count() <= 2);
@@ -667,7 +679,7 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
 }
 
 #[test]
-fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
+fn test_first_failure_immediate_switch_and_manual_safety() {
     for (mode, enabled, reason, immediate) in [
         ("countdown", true, "OAuth usage exhausted", true),
         ("countdown", false, "OAuth usage exhausted", false),
@@ -676,7 +688,7 @@ fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
             "countdown",
             true,
             "429 rate_limit_error: This request would exceed your account's rate limit. Please try again later.",
-            false,
+            true,
         ),
     ] {
         with_temp_jcode_home(|| {

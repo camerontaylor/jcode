@@ -111,9 +111,10 @@ pub fn focused_cli_session() -> Result<Option<String>> {
             None
         }
     };
-    let key = (window.pid, registry_stamp);
+    // Several windows can share one terminal PID, so key by window id too.
+    let key = (window.id, window.pid, registry_stamp);
     type FocusCacheEntry = (
-        (u32, Option<std::time::SystemTime>),
+        (Option<u64>, u32, Option<std::time::SystemTime>),
         std::time::Instant,
         Vec<u32>,
     );
@@ -277,6 +278,8 @@ fn is_jcode_client_process(pid: u32) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct NiriFocusedWindow {
+    #[serde(default)]
+    id: Option<u64>,
     pid: u32,
     title: Option<String>,
     #[serde(rename = "app_id")]
@@ -452,6 +455,14 @@ fn resolve_session_in_tree(window: &NiriFocusedWindow, tree: &[u32]) -> Option<S
     if registered.len() == 1 {
         return registered.into_iter().next();
     }
+    // One terminal process can host several windows (kitty single-instance),
+    // so its tree may hold several clients. The focused window's client
+    // records itself on FocusGained, so prefer the last-focused one of them.
+    if registered.len() > 1
+        && let Some(session) = pick_last_focused(&registered)
+    {
+        return Some(session);
+    }
 
     if let Some(title) = window.title.as_deref()
         && let Some(session_id) = resolve_session_from_window_title(title)
@@ -483,6 +494,17 @@ fn resolve_session_in_tree(window: &NiriFocusedWindow, tree: &[u32]) -> Option<S
         };
     }
     None
+}
+
+fn pick_last_focused(registered: &[String]) -> Option<String> {
+    match jcode_base::client_focus::last_focused_session() {
+        Ok(Some(session)) if registered.contains(&session) => Some(session),
+        Ok(_) => None,
+        Err(error) => {
+            jcode_base::logging::warn(&format!("Cannot read last-focused CLI session: {error:#}"));
+            None
+        }
+    }
 }
 
 fn resolve_session_from_window_title(title: &str) -> Option<String> {

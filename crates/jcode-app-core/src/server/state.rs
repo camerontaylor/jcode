@@ -90,6 +90,9 @@ pub struct FileAccess {
     pub intent: Option<String>,
     pub summary: Option<String>,
     pub detail: Option<String>,
+    /// Lines added/removed by this access (0 for reads).
+    pub added: u64,
+    pub removed: u64,
 }
 
 pub(super) fn latest_peer_touches(
@@ -437,27 +440,113 @@ pub(super) fn send_event_to_targets<'a>(
     targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
     event: ServerEvent,
 ) -> usize {
+    send_event_to_targets_recover(targets, event).unwrap_or(0)
+}
+
+/// Return the original payload when every queue is closed or rejects delivery.
+/// A caller can then use its fallback without cloning successful events first.
+fn send_event_to_targets_recover<'a>(
+    targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
+    event: ServerEvent,
+) -> Result<usize, Box<ServerEvent>> {
     let mut targets = targets.into_iter().filter(|tx| !tx.is_closed()).peekable();
     let mut delivered = 0;
     while let Some(tx) = targets.next() {
         if targets.peek().is_none() {
-            delivered += usize::from(tx.send(event).is_ok());
-            break;
+            return match tx.send(event) {
+                Ok(()) => Ok(delivered + 1),
+                Err(error) if delivered == 0 => Err(Box::new(error.0)),
+                Err(_) => Ok(delivered),
+            };
         }
         delivered += usize::from(tx.send(event.clone()).is_ok());
     }
-    delivered
+    Err(Box::new(event))
 }
+
+// Keep sends outside the session lock without allocating for the usual single
+// attachment. Multiple recipients retain their original iteration order.
+enum RecipientSnapshot {
+    Empty,
+    One(mpsc::UnboundedSender<ServerEvent>),
+    Many(Vec<mpsc::UnboundedSender<ServerEvent>>),
+}
+
+impl FromIterator<mpsc::UnboundedSender<ServerEvent>> for RecipientSnapshot {
+    fn from_iter<T: IntoIterator<Item = mpsc::UnboundedSender<ServerEvent>>>(iter: T) -> Self {
+        let mut iter = iter.into_iter();
+        let Some(first) = iter.next() else {
+            return Self::Empty;
+        };
+        let Some(second) = iter.next() else {
+            return Self::One(first);
+        };
+        let mut targets = Vec::with_capacity(iter.size_hint().0.saturating_add(2).max(4));
+        targets.push(first);
+        targets.push(second);
+        targets.extend(iter);
+        Self::Many(targets)
+    }
+}
+
+impl RecipientSnapshot {
+    fn as_slice(&self) -> &[mpsc::UnboundedSender<ServerEvent>] {
+        match self {
+            Self::Empty => &[],
+            Self::One(tx) => std::slice::from_ref(tx),
+            Self::Many(targets) => targets,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "state_fanout_tests.rs"]
+mod fanout_tests;
+
+#[cfg(test)]
+#[path = "state_turn_delivery_tests.rs"]
+mod turn_delivery_tests;
 
 pub(super) async fn fanout_session_event(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
     event: ServerEvent,
 ) -> usize {
-    super::live_status::observe(session_id, &event);
-    let targets = session_event_targets(swarm_members, session_id).await;
+    fanout_session_event_recover(swarm_members, session_id, event)
+        .await
+        .unwrap_or(0)
+}
 
-    send_event_to_targets(&targets, event)
+async fn fanout_session_event_recover(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    event: ServerEvent,
+) -> Result<usize, Box<ServerEvent>> {
+    super::live_status::observe(session_id, &event);
+    let targets = {
+        let mut members = swarm_members.write().await;
+        let Some(member) = members.get_mut(session_id) else {
+            return Err(Box::new(event));
+        };
+
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+        crate::stream_batching::note_session_targets(session_id, member.event_txs.keys());
+
+        if member.event_txs.is_empty() {
+            RecipientSnapshot::One(member.event_tx.clone())
+        } else {
+            if let Some((_, tx)) = member.event_txs.iter().next() {
+                member.event_tx = tx.clone();
+            }
+            member
+                .event_txs
+                .values()
+                .cloned()
+                .collect::<RecipientSnapshot>()
+        }
+    };
+
+    send_event_to_targets_recover(targets.as_slice(), event)
 }
 
 pub(super) async fn fanout_live_client_event(
@@ -472,10 +561,14 @@ pub(super) async fn fanout_live_client_event(
         };
 
         member.event_txs.retain(|_, tx| !tx.is_closed());
-        member.event_txs.values().cloned().collect::<Vec<_>>()
+        member
+            .event_txs
+            .values()
+            .cloned()
+            .collect::<RecipientSnapshot>()
     };
 
-    send_event_to_targets(&targets, event)
+    send_event_to_targets(targets.as_slice(), event)
 }
 
 /// Deliver `event` to every live attachment of `session_id` except the
@@ -497,9 +590,9 @@ pub(super) async fn fanout_peer_client_event(
             .iter()
             .filter(|(connection_id, _)| connection_id.as_str() != exclude_connection_id)
             .map(|(_, tx)| tx.clone())
-            .collect::<Vec<_>>()
+            .collect::<RecipientSnapshot>()
     };
-    send_event_to_targets(&targets, event)
+    send_event_to_targets(targets.as_slice(), event)
 }
 
 /// How a turn's producer released its [`TurnEventChannel`].
@@ -531,12 +624,15 @@ struct TurnEventDrain {
     cancel: crate::agent::CancelProbe,
     terminal_id: u64,
     terminal_published: bool,
+    stop_log: turn_stop_log::StopLog,
 }
 
 impl TurnEventDrain {
     async fn publish(&self, event: ServerEvent) {
-        if fanout_session_event(&self.members, &self.session_id, event.clone()).await == 0 {
-            let _ = self.fallback.send(event);
+        if let Err(event) =
+            fanout_session_event_recover(&self.members, &self.session_id, event).await
+        {
+            let _ = self.fallback.send(*event);
         }
     }
 
@@ -566,6 +662,8 @@ impl TurnEventDrain {
             }
             self.terminal_published = true;
         }
+        self.stop_log
+            .observe(&self.session_id, &self.identity, &event);
         if end.is_some() {
             // Retire the active snapshot before publication; the pin continues
             // to reserve the runtime until every accepted event is drained.
@@ -585,6 +683,7 @@ impl TurnEventDrain {
     /// Close a turn whose producer never queued a terminal.
     async fn close(mut self, exit: TurnEventExit) {
         if self.terminal_published {
+            self.stop_log.finish(&self.session_id, &self.identity);
             return;
         }
         let producer_dropped = matches!(exit, TurnEventExit::Dropped { panicking: false });
@@ -602,8 +701,12 @@ impl TurnEventDrain {
             },
         };
         self.forward_with_exit(terminal, producer_dropped).await;
+        self.stop_log.finish(&self.session_id, &self.identity);
     }
 }
+
+#[path = "turn_stop_log.rs"]
+mod turn_stop_log;
 
 /// Owns one turn's event queue and publication reservation. The drain publishes
 /// start, accepted output, then one classified scoped terminal, supplying it
@@ -642,8 +745,19 @@ impl TurnEventChannel {
             cancel: lease.cancel_probe(),
             terminal_id,
             terminal_published: false,
+            stop_log: turn_stop_log::StopLog::default(),
         };
         let task = tokio::spawn(async move {
+            // A hard process termination cannot emit TURN_STOP. This paired
+            // marker lets investigators detect a turn with no terminal record.
+            crate::logging::event_info(
+                "TURN_START",
+                [
+                    ("session", drain.session_id.clone()),
+                    ("runtime", drain.identity.runtime_generation.clone()),
+                    ("turn", drain.identity.turn_id.to_string()),
+                ],
+            );
             drain
                 .publish(ServerEvent::TurnStarted {
                     identity: drain.identity.clone(),
@@ -1086,8 +1200,55 @@ pub(super) async fn queue_soft_interrupt_for_session(
     queues: &SessionInterruptQueues,
     sessions: &super::SessionAgents,
 ) -> bool {
+    queue_soft_interrupt_with_images_for_session(
+        session_id,
+        content,
+        Vec::new(),
+        urgent,
+        source,
+        queues,
+        sessions,
+    )
+    .await
+}
+
+/// Rewrite a still-queued file-activity notice in place. Returns `false` once the
+/// notice has been delivered (or was never queued live), so the caller queues
+/// a fresh one instead.
+pub(super) async fn replace_pending_soft_interrupt(
+    session_id: &str,
+    previous: &str,
+    content: String,
+    queues: &SessionInterruptQueues,
+) -> bool {
+    let Some(queue) = queues.read().await.get(session_id).cloned() else {
+        return false;
+    };
+    let Ok(mut pending) = queue.lock() else {
+        return false;
+    };
+    match pending.iter_mut().find(|message| {
+        message.source == SoftInterruptSource::FileActivity && message.content == previous
+    }) {
+        Some(message) => {
+            message.content = content;
+            true
+        }
+        None => false,
+    }
+}
+
+pub(super) async fn queue_soft_interrupt_with_images_for_session(
+    session_id: &str,
+    content: String,
+    images: Vec<(String, String)>,
+    urgent: bool,
+    source: SoftInterruptSource,
+    queues: &SessionInterruptQueues,
+    sessions: &super::SessionAgents,
+) -> bool {
     if let Some(queue) = queues.read().await.get(session_id).cloned() {
-        return enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source);
+        return enqueue_soft_interrupt(&queue, content, images, urgent, source);
     }
 
     let queue = {
@@ -1102,7 +1263,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
 
     if let Some(queue) = queue {
         register_session_interrupt_queue(queues, session_id, queue.clone()).await;
-        enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source)
+        enqueue_soft_interrupt(&queue, content, images, urgent, source)
     } else {
         let session_exists = {
             let guard = sessions.read().await;
@@ -1117,7 +1278,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
             session_id,
             SoftInterruptMessage {
                 content,
-                images: Vec::new(),
+                images,
                 urgent,
                 source,
                 client_id: None,

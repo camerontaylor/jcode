@@ -156,6 +156,12 @@ fn acp_tool_kind_maps_core_tools() {
     assert_eq!(tool_kind("webfetch"), "fetch");
     assert_eq!(tool_kind("todo"), "think");
     assert_eq!(tool_kind("swarm"), "other");
+    // Tools ACP clients gained with the full profile should not all render
+    // as generic "other" cards.
+    assert_eq!(tool_kind("bg"), "execute");
+    assert_eq!(tool_kind("codemode"), "execute");
+    assert_eq!(tool_kind("skill_manage"), "read");
+    assert_eq!(tool_kind("websearch"), "fetch");
     // Names are matched against the table, never inferred from their spelling:
     // a tool this build does not know stays `other` even when its name sounds
     // like a known kind.

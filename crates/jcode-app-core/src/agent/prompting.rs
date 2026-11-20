@@ -146,8 +146,8 @@ impl Agent {
     ) -> crate::prompt::SplitSystemPrompt {
         if let Some(ref override_prompt) = self.session.system_prompt {
             return crate::prompt::SplitSystemPrompt {
-                static_part: override_prompt.clone(),
-                dynamic_part: String::new(),
+                static_part: self.append_session_system_prompt(override_prompt.clone()),
+                dynamic_part: crate::screen_context::dynamic_prompt(self.session_id()),
             };
         }
 
@@ -183,7 +183,23 @@ impl Agent {
             split.static_part.push_str(&section);
         }
 
+        split.static_part = self.append_session_system_prompt(split.static_part);
         split
+            .dynamic_part
+            .push_str(&crate::screen_context::dynamic_prompt(self.session_id()));
+        split
+    }
+
+    fn append_session_system_prompt(&self, mut prompt: String) -> String {
+        if let Some(append) = crate::tool::sdk::config(self.session_id())
+            .and_then(|config| config.system_prompt_append)
+        {
+            if !prompt.is_empty() {
+                prompt.push_str("\n\n");
+            }
+            prompt.push_str(&append);
+        }
+        prompt
     }
 
     /// Non-blocking memory prompt - takes pending result and spawns check for next turn

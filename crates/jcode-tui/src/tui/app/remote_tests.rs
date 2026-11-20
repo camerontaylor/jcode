@@ -76,26 +76,6 @@ fn ensure_test_jcode_home_if_unset() {
 }
 
 #[test]
-fn reload_handoff_active_when_server_flag_is_set() {
-    let state = RemoteRunState {
-        server_reload_in_progress: true,
-        ..RemoteRunState::default()
-    };
-
-    assert!(reconnect::reload_handoff_active(&state));
-}
-
-#[test]
-fn client_focus_defaults_to_true() {
-    let app = create_test_app();
-    assert!(
-        app.client_focused(),
-        "a freshly created client should start focused so terminals that never \
-         report focus events still animate/redraw normally"
-    );
-}
-
-#[test]
 fn idle_donut_pauses_while_unfocused() {
     let mut app = create_test_app();
 
@@ -1449,3 +1429,6 @@ fn startup_model_timeout_restores_prompt_and_clears_both_pending_slots() {
     rt.block_on(process_remote_followups(&mut app, &mut remote));
     assert!(!app.is_processing);
 }
+
+#[path = "remote_tests_additional_tests.rs"]
+mod additional_reload_handoff_active_when_server_flag_is_set;
