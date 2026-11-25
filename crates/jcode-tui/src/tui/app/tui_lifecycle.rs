@@ -613,6 +613,7 @@ impl App {
             pending_automatic_failover_request_id: None,
             pending_automatic_failover_started: None,
             pending_reasoning_effort: None,
+            suppress_next_reasoning_effort_message: false,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
             pending_prompt_before_history: None,
@@ -689,6 +690,7 @@ impl App {
             idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
+                .filter(|p| !crate::build::is_dynamic_loader_path(p))
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
@@ -1138,6 +1140,7 @@ impl App {
             pending_automatic_failover_request_id: None,
             pending_automatic_failover_started: None,
             pending_reasoning_effort: None,
+            suppress_next_reasoning_effort_message: false,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
             pending_prompt_before_history: None,
@@ -1214,6 +1217,7 @@ impl App {
             idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
+                .filter(|p| !crate::build::is_dynamic_loader_path(p))
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,

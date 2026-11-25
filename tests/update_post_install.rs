@@ -42,8 +42,10 @@ fn hidden_post_install_reports_ran_without_daemons() {
         .env("TMPDIR", dir.path())
         .env("JCODE_SOCKET", dir.path().join("absent.sock"))
         .output().unwrap();
-    assert!(
-        output.status.success(),
+    // The hook ran but reloaded nothing: NOTHING_RELOADED, not a failure.
+    assert_eq!(
+        output.status.code(),
+        Some(74),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );

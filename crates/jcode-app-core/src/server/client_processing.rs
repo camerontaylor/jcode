@@ -203,6 +203,7 @@ pub(super) async fn start_processing_message(
     swarm: &SwarmStatusRefs<'_>,
 ) {
     let ProcessingMessage {
+        jarvis_voice,
         id,
         content,
         images,
@@ -382,6 +383,7 @@ pub(super) async fn start_processing_message(
                 system_reminder,
                 event_tx,
                 server_failover,
+                jarvis_voice.then_some(crate::session::StoredDisplayRole::JarvisUser),
             ),
         ))
         .catch_unwind()
@@ -570,19 +572,9 @@ pub(super) async fn cancel_processing_message_for_turn(
         .as_deref()
         .unwrap_or(session_control.session_id.as_str())
         .to_string();
-    // Stopping a session also stops the workers it spawned. This runs first
-    // and on every path, including the idle one: a coordinator waiting on
-    // `await_members` has no running turn of its own while its workers do.
-    super::super::swarm::cancel_spawned_descendant_turns(
-        &session_control.session_id,
-        swarm.members,
-        swarm.swarms_by_id,
-        Some(swarm.event_history),
-        Some(swarm.event_counter),
-        Some(swarm.event_tx),
-    )
-    .await;
-    // The idle snapshot cannot acquire a target after an await.
+    // Cancel only the addressed session. Workers have independent turns.
+    // An idle snapshot settles here, before any await, so it never targets a
+    // turn that starts while the cancel is in flight.
     if observer.is_some() && identity.is_none() {
         if let Err(error) = client_event_tx.send(ServerEvent::Interrupted) {
             crate::logging::debug(&format!("Cancel recipient disconnected: {error}"));
@@ -812,6 +804,7 @@ pub(super) async fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> 
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn queue_soft_interrupt(
     id: u64,
     message: SoftInterruptMessage,

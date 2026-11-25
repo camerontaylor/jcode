@@ -89,6 +89,7 @@ fn cancel_after_turn_claim_is_preserved() -> anyhow::Result<()> {
         });
         start_processing_message(
             ProcessingMessage {
+                jarvis_voice: false,
                 id: 2,
                 content: "after the stop".to_string(),
                 images: Vec::new(),

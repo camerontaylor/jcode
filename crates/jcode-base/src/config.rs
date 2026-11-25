@@ -10,9 +10,10 @@ pub use jcode_config_types::{
     GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
     LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
-    NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere,
-    ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SponsorsConfig,
-    SwarmSpawnMode, TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    NotificationsConfig, PowerConfig, ProviderCompactionConfig, ProviderConfig,
+    ReasoningDisplayMode, ResumeOpenElsewhere, ResumeTimeMode, SafetyConfig, SessionConfig,
+    SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, TerminalConfig, UpdateChannel,
+    WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -1055,6 +1056,10 @@ impl Default for CompanionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct JarvisConfig {
+    /// Expand Jarvis requests into readable transcript, status, context and instruction sections.
+    pub show_raw_requests: bool,
+    /// Show the original user payload instead of the clean or expanded presentation.
+    pub show_exact_request_payload: bool,
     pub speech: JarvisSpeechConfig,
     pub listening: JarvisListeningConfig,
 }
@@ -1064,8 +1069,6 @@ pub struct JarvisConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JarvisListeningConfig {
-    pub max_audio_seconds_per_hour: u64,
-    pub max_classifications_per_hour: u32,
     pub max_agent_turns_per_hour: u32,
     pub action_probability: f64,
     /// Sound played when speech triggers Jarvis. Empty string disables it.
@@ -1078,10 +1081,8 @@ pub struct JarvisListeningConfig {
 impl Default for JarvisListeningConfig {
     fn default() -> Self {
         Self {
-            max_audio_seconds_per_hour: 600,
-            max_classifications_per_hour: 120,
-            max_agent_turns_per_hour: 20,
-            action_probability: 0.97,
+            max_agent_turns_per_hour: 0,
+            action_probability: 0.5,
             trigger_sound: "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga".into(),
             warm_nari: false,
         }
