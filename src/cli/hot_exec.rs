@@ -520,10 +520,8 @@ fn reload_server_after_update(reason: &str) -> bool {
 
     // The fork reloads every owned daemon socket through the new binary's
     // post-install hook; only an old binary without it needs the fallback.
-    if super::update_post_install::needs_fallback(&exe, reason) {
-        return super::update_reload::reload_all(&exe, reason);
+    match super::update_post_install::run(&exe, reason) {
+        Some(reloaded) => reloaded,
+        None => super::update_reload::reload_all(&exe, reason),
     }
-    // The post-install child printed its per-socket results; its exit status
-    // does not say whether any daemon reloaded, so do not claim a live reload.
-    false
 }

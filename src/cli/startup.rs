@@ -23,7 +23,9 @@ pub async fn run() -> Result<()> {
         if *probe {
             std::process::exit(super::update_post_install::SUPPORTED);
         }
-        super::update_reload::reload_all(&std::env::current_exe()?, reason);
+        if !super::update_reload::reload_all(&std::env::current_exe()?, reason) {
+            std::process::exit(super::update_post_install::NOTHING_RELOADED);
+        }
         return Ok(());
     }
     // Data belongs to the executable, not to the application/TUI dependency

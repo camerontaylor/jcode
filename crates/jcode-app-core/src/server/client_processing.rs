@@ -573,7 +573,8 @@ pub(super) async fn cancel_processing_message_for_turn(
         .unwrap_or(session_control.session_id.as_str())
         .to_string();
     // Cancel only the addressed session. Workers have independent turns.
-    // The idle snapshot cannot acquire a target after an await.
+    // An idle snapshot settles here, before any await, so it never targets a
+    // turn that starts while the cancel is in flight.
     if observer.is_some() && identity.is_none() {
         if let Err(error) = client_event_tx.send(ServerEvent::Interrupted) {
             crate::logging::debug(&format!("Cancel recipient disconnected: {error}"));

@@ -6,6 +6,8 @@ use std::{
 };
 
 pub(super) const SUPPORTED: i32 = 73;
+/// The hook ran but no owned daemon reloaded (0 means at least one did).
+pub(super) const NOTHING_RELOADED: i32 = 74;
 const MARKER: &str = "JCODE_POST_INSTALL_REEXEC";
 
 #[derive(Clone, Copy, Debug)]
@@ -20,9 +22,11 @@ fn fallback(outcome: Outcome, reload_started: bool) -> bool {
         || (!reload_started && matches!(outcome, Outcome::Exited(Some(2))))
 }
 
-pub(super) fn needs_fallback(exe: &Path, reason: &str) -> bool {
+/// Runs the new binary's post-install reload. `None` means the caller must
+/// fall back to reloading itself; `Some(reloaded)` reports the hook's result.
+pub(super) fn run(exe: &Path, reason: &str) -> Option<bool> {
     if std::env::var_os(MARKER).is_some() {
-        return false;
+        return Some(false);
     }
     let command = || {
         let mut cmd = Command::new(exe);
@@ -32,14 +36,23 @@ pub(super) fn needs_fallback(exe: &Path, reason: &str) -> bool {
     };
     let probe = wait(command().arg("--probe"), Duration::from_secs(10));
     if fallback(probe, false) {
-        return true;
+        return None;
     }
     if matches!(probe, Outcome::Exited(Some(SUPPORTED))) {
         // Once reload starts, even a timeout/crash may have reloaded some sockets.
         // Only failure to spawn proves no work happened.
-        return fallback(wait(&mut command(), Duration::from_secs(120)), true);
+        let outcome = wait(&mut command(), Duration::from_secs(120));
+        if fallback(outcome, true) {
+            return None;
+        }
+        return Some(reported_reload(outcome));
     }
-    false
+    Some(false)
+}
+
+/// Only a clean exit proves a reload; anything else may not have reloaded.
+fn reported_reload(outcome: Outcome) -> bool {
+    matches!(outcome, Outcome::Exited(Some(0)))
 }
 
 fn wait(command: &mut Command, timeout: Duration) -> Outcome {
@@ -79,6 +92,14 @@ mod tests {
     fn unsupported_and_spawn_failure_fall_back() {
         assert!(fallback(Outcome::Exited(Some(2)), false));
         assert!(fallback(Outcome::SpawnFailed, false));
+    }
+
+    #[test]
+    fn only_a_clean_hook_exit_reports_a_reload() {
+        assert!(reported_reload(Outcome::Exited(Some(0))));
+        assert!(!reported_reload(Outcome::Exited(Some(NOTHING_RELOADED))));
+        assert!(!reported_reload(Outcome::Exited(None)));
+        assert!(!reported_reload(Outcome::Indeterminate));
     }
 
     #[test]
