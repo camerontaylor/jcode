@@ -264,7 +264,7 @@ fn claim_update_fetch_slot() -> bool {
         return false;
     }
     // Touch before fetching so a spawn burst collapses to ~one fetch.
-    std::fs::write(&marker, b"").is_ok()
+    std::fs::write(&marker, b"1").is_ok()
 }
 
 /// `None` means this local checkout has no tracking branch, not a failed check.
@@ -417,7 +417,7 @@ pub fn run_auto_update() -> Result<()> {
 
 /// Explicit updates follow the configured channel for release and dev builds alike.
 /// Source rebuilds belong to self-dev and /rebuild, not the stable update path.
-pub fn run_update(channel: Option<&str>) -> Result<()> {
+pub fn run_update(channel: Option<&str>, set_channel_only: bool) -> Result<()> {
     let explicit_channel = channel
         .map(|value| {
             crate::config::UpdateChannel::parse(value)
@@ -426,9 +426,19 @@ pub fn run_update(channel: Option<&str>) -> Result<()> {
         .transpose()?;
     if let Some(channel) = explicit_channel {
         crate::config::Config::set_update_channel(channel)?;
+        if set_channel_only {
+            return Ok(());
+        }
         super::output::print_centered(&format!("Update channel: {channel}"));
+    } else if set_channel_only {
+        anyhow::bail!("--set-channel-only requires --channel, --prerelease, or --stable");
     }
-    super::output::print_centered("Checking GitHub for latest release...");
+    let check_label =
+        match explicit_channel.unwrap_or_else(|| crate::config::config().features.update_channel) {
+            crate::config::UpdateChannel::Preview => "Checking GitHub for latest prerelease...",
+            _ => "Checking GitHub for latest release...",
+        };
+    super::output::print_centered(check_label);
     match update::check_for_update_with_channel_blocking(explicit_channel) {
         Ok(Some(release)) => {
             super::output::print_centered(&format!(
@@ -445,8 +455,13 @@ pub fn run_update(channel: Option<&str>) -> Result<()> {
                     ));
                 })?;
             super::output::print_centered(&format!("✅ Updated to {}", release.tag_name));
-            reload_server_after_update("installed update");
-            super::output::print_centered("Restart jcode to use the new version.");
+            if reload_server_after_update("installed update") {
+                super::output::print_centered(
+                    "Live-reloaded running jcode server and connected sessions.",
+                );
+            } else {
+                super::output::print_centered("Next launch will use the new version.");
+            }
         }
         Ok(None) => {
             if repair_stale_shared_server_after_update_check() {
@@ -494,16 +509,21 @@ fn repair_stale_shared_server_after_update_check() -> bool {
     }
 }
 
-fn reload_server_after_update(reason: &str) {
+fn reload_server_after_update(reason: &str) -> bool {
     let exe = build::client_update_candidate(false)
         .map(|(path, _)| path)
         .or_else(|| std::env::current_exe().ok());
     let Some(exe) = exe else {
         crate::logging::warn("update: could not find jcode binary to reload stale server");
-        return;
+        return false;
     };
 
+    // The fork reloads every owned daemon socket through the new binary's
+    // post-install hook; only an old binary without it needs the fallback.
     if super::update_post_install::needs_fallback(&exe, reason) {
-        super::update_reload::reload_all(&exe, reason);
+        return super::update_reload::reload_all(&exe, reason);
     }
+    // The post-install child printed its per-socket results; its exit status
+    // does not say whether any daemon reloaded, so do not claim a live reload.
+    false
 }

@@ -1,29 +1,35 @@
 //! Update-side fanout. The reload protocol and force semantics remain in the CLI.
 use std::path::Path;
 
-pub(super) fn reload_all(exe: &Path, reason: &str) {
+/// Returns true when at least one running daemon accepted the reload.
+pub(super) fn reload_all(exe: &Path, reason: &str) -> bool {
     // Updates can be called from inside a Tokio runtime; probe on a dedicated thread.
     let exe = exe.to_path_buf();
     let reason = reason.to_owned();
-    let result = std::thread::spawn(move || -> anyhow::Result<()> {
+    let result = std::thread::spawn(move || -> anyhow::Result<bool> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let live = runtime.block_on(crate::server::live_daemon_sockets());
-        reload_candidates(
+        Ok(reload_candidates(
             crate::server::daemon_socket_candidates(),
             &live,
             |socket| reload_command(&exe, socket).output(),
             &reason,
             report,
-        );
-        Ok(())
+        ))
     })
     .join();
     match result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => report(&format!("update: daemon discovery failed: {error}")),
-        Err(_) => report("update: daemon discovery thread failed"),
+        Ok(Ok(reloaded)) => reloaded,
+        Ok(Err(error)) => {
+            report(&format!("update: daemon discovery failed: {error}"));
+            false
+        }
+        Err(_) => {
+            report("update: daemon discovery thread failed");
+            false
+        }
     }
 }
 
@@ -33,8 +39,9 @@ fn reload_candidates(
     mut run: impl FnMut(&Path) -> std::io::Result<std::process::Output>,
     reason: &str,
     mut report: impl FnMut(&str),
-) {
+) -> bool {
     let mut found = false;
+    let mut reloaded = false;
     for socket in sockets {
         let owned_live = live.contains(&socket);
         if !owned_live {
@@ -47,6 +54,7 @@ fn reload_candidates(
         found = true;
         match run(&socket) {
             Ok(output) if output.status.success() => {
+                reloaded = true;
                 report(&format!(
                     "update: {} after {}: {}",
                     socket.display(),
@@ -65,6 +73,7 @@ fn reload_candidates(
     if !found {
         report(NO_DAEMONS);
     }
+    reloaded
 }
 
 const NO_DAEMONS: &str = "update: no running jcode daemon found; nothing to reload.";

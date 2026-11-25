@@ -699,11 +699,16 @@ pub(super) fn live_processing_status_line(
 ) -> Line<'static> {
     let single_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let elapsed = format_elapsed(status.elapsed_ms as f32 / 1000.0);
+    let normalized_detail = status
+        .status_detail
+        .as_deref()
+        .and_then(normalize_status_detail)
+        .filter(|detail| {
+            !(status.phase == "streaming"
+                && matches!(detail.as_str(), "opening websocket" | "verifying websocket"))
+        });
     let transport = collect_transport_context_labels(
-        status
-            .status_detail
-            .as_deref()
-            .and_then(normalize_status_detail),
+        normalized_detail,
         status
             .connection_type
             .as_deref()
@@ -746,12 +751,20 @@ pub(super) fn live_processing_status_line(
             ai_color(),
         ),
         "streaming" => {
-            let mut label =
+            let phase_label = if status.stream_message_ended {
+                "finalizing…"
+            } else {
+                "streaming…"
+            };
+            let liveness =
                 streaming_liveness_label(elapsed.clone(), stale_secs, status.stream_message_ended);
+            let mut label = format!("{phase_label} {liveness}");
             if let Some(tps) = status.output_tps_milli {
                 label.push_str(&format!(" · {:.1} tps", tps as f64 / 1000.0));
             }
-            streaming_status_spans(spinner, label, status.stream_message_ended, false, "")
+            let has_warning =
+                !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
+            streaming_status_spans(spinner, label, status.stream_message_ended, has_warning, "")
         }
         "sending" | "thinking" | "connecting" => {
             let label = if status.phase == "connecting" {
@@ -1354,6 +1367,7 @@ fn overscroll_fact_spans(
         )];
         if levels.model == 0
             && let Some(effort) = &facts.effort
+            && !overscroll_model_already_includes_effort(model, effort)
         {
             group.push(Span::styled(format!(" {effort}"), muted));
         }
@@ -1361,6 +1375,32 @@ fn overscroll_fact_spans(
     }
 
     out
+}
+
+fn overscroll_is_standard_effort_word(word: &str) -> bool {
+    let trimmed = word.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']'));
+    matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+}
+
+fn overscroll_model_already_includes_effort(model: &str, effort: &str) -> bool {
+    let effort = effort.trim();
+    if effort.is_empty() {
+        return false;
+    }
+    let Some(last_word) = model.split_whitespace().last() else {
+        return false;
+    };
+    if last_word.eq_ignore_ascii_case(effort) {
+        return true;
+    }
+    // Models that encode their own thinking/effort level in their name (e.g.
+    // "Gemini 4 Neon Low") should never render a second standard effort suffix
+    // like "Gemini 4 Neon Low medium". Non-standard sentinels like "swarm"
+    // remain visible.
+    overscroll_is_standard_effort_word(last_word) && overscroll_is_standard_effort_word(effort)
 }
 
 /// Fit the facts into `max_width` by walking the compaction ladder. Returns

@@ -131,6 +131,7 @@ async fn reconnect_after_eof_keeps_session_and_sends_next_prompt_once() {
             system_reminder: None,
             active_skill: None,
             no_reply: false,
+            jarvis_voice: false,
         })
         .await
         .unwrap();

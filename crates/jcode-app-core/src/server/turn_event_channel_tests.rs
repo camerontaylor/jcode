@@ -202,6 +202,7 @@ impl TurnHarness {
     ) {
         start_processing_message(
             ProcessingMessage {
+                jarvis_voice: false,
                 id,
                 content: content.to_string(),
                 images: Vec::new(),

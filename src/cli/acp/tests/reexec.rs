@@ -34,6 +34,7 @@ async fn fake_prompt_once(session: &Arc<DaemonSession>) -> Result<String> {
             system_reminder: None,
             active_skill: None,
             no_reply: false,
+            jarvis_voice: false,
         })
         .await?;
     let mut text = String::new();

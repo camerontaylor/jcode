@@ -985,6 +985,7 @@ pub(super) fn prompt_request(
         system_reminder: None,
         active_skill,
         no_reply: false,
+        jarvis_voice: false,
     }
 }
 
@@ -1183,12 +1184,20 @@ pub(super) async fn wait_for_effort_changed(
     loop {
         match next_routed(rx).await? {
             ServerEvent::Ack { .. } => {}
-            ServerEvent::ReasoningEffortChanged { id, effort, error } if id == request_id => {
+            ServerEvent::ReasoningEffortChanged {
+                id,
+                effort,
+                model,
+                error,
+            } if id == request_id => {
                 if let Some(error) = error {
                     anyhow::bail!(error);
                 }
                 let mut state = session.ui_state.lock().await;
                 state.reasoning_effort = effort;
+                if let Some(model) = model {
+                    state.model = Some(model);
+                }
                 return Ok(());
             }
             ServerEvent::Error { id, message, .. } if id == request_id => {

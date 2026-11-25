@@ -568,6 +568,7 @@ impl RouterState {
             content: waiting.content.clone(),
             images: waiting.images.clone(),
             urgent: false,
+            jarvis_voice: false,
             client_id: Some(waiting.client_id.clone()),
         })
     }

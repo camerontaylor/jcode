@@ -545,6 +545,7 @@ fn session_state_from_peers_becomes_an_update_and_replies_still_route() {
         let actions = router.route(ServerEvent::ReasoningEffortChanged {
             id,
             effort: Some("high".into()),
+            model: None,
             error: None,
         });
         assert!(matches!(actions.as_slice(),
@@ -557,6 +558,7 @@ fn session_state_from_peers_becomes_an_update_and_replies_still_route() {
             .route(ServerEvent::ReasoningEffortChanged {
                 id: 92,
                 effort: Some("low".into()),
+                model: None,
                 error: None,
             })
             .is_empty()
