@@ -43,14 +43,19 @@ async fn cancellation_dispatch_cannot_signal_a_successor() {
             if mode == 0 { identity.as_ref() } else { None },
         );
         tokio::pin!(cancel);
-        assert!(futures::poll!(cancel.as_mut()).is_pending());
+        let first = futures::poll!(cancel.as_mut());
+        // An idle Stop (mode 2) settles from its pre-await snapshot; an owned
+        // or unscoped Stop on a live turn suspends at the fanout lock.
+        assert_eq!(first.is_pending(), mode < 2, "mode={mode}");
         drop(lease);
         let successor = harness.agent.lock().await.claim_server_turn().unwrap();
         let _registered =
             crate::turn_cancel_registry::register_active_turn(&harness.session_id, signal.clone());
         signal.reset(); // preparation of the successor clears only earlier cancellation
         drop(blocked);
-        cancel.await;
+        if first.is_pending() {
+            cancel.await;
+        }
         assert!(
             !signal.is_set(),
             "dispatch must not signal the successor (mode={mode})"

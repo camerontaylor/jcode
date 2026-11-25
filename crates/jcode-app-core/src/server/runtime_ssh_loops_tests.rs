@@ -431,9 +431,14 @@ async fn cancelled_session_does_not_restart_for_unfinished_todos() {
     );
     let session_id = agent.session_id().to_string();
     todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
+    // Fork: claiming a turn discards a cancel armed before it, so cancel the
+    // claimed turn as a Stop during that turn would.
+    let lease = agent.claim_server_turn().unwrap();
     agent.request_graceful_shutdown();
     let (tx, mut rx) = mpsc::unbounded_channel();
-    run_followups(&mut agent, tx).await.unwrap();
+    run_reserved_followups(&mut agent, &lease, tx)
+        .await
+        .unwrap();
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         read_state(&state_path(&session_id).unwrap()).unwrap().turns,
