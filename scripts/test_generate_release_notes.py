@@ -12,6 +12,8 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name("generate_release_notes.sh").resolve()
+# The fixture repo names its own origin; CI's GITHUB_REPOSITORY must not override it.
+BASE_ENV = {k: v for k, v in os.environ.items() if k != "GITHUB_REPOSITORY"}
 
 
 class GenerateReleaseNotesTests(unittest.TestCase):
@@ -68,7 +70,7 @@ class GenerateReleaseNotesTests(unittest.TestCase):
                 ]
             )
             env = {
-                **os.environ,
+                **BASE_ENV,
                 "JCODE_PUBLISHED_RELEASES_JSON": releases_fixture,
             }
             output = subprocess.check_output(
@@ -101,7 +103,7 @@ class GenerateReleaseNotesTests(unittest.TestCase):
                     }
                 )
             )
-            env = {**os.environ, "JCODE_SKIP_GITHUB_API": "1"}
+            env = {**BASE_ENV, "JCODE_SKIP_GITHUB_API": "1"}
             output = subprocess.check_output(
                 ["bash", str(root / "scripts/generate_release_notes.sh"), "v1.0.3"],
                 cwd=root,
@@ -117,7 +119,7 @@ class GenerateReleaseNotesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._init_repo(root)
-            env = {**os.environ, "JCODE_SKIP_GITHUB_API": "1"}
+            env = {**BASE_ENV, "JCODE_SKIP_GITHUB_API": "1"}
             output = subprocess.check_output(
                 ["bash", str(root / "scripts/generate_release_notes.sh"), "v1.0.3", "v1.0.2"],
                 cwd=root,
