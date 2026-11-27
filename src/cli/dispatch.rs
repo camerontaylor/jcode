@@ -808,10 +808,24 @@ async fn run_default_command(args: Args) -> Result<()> {
         .await;
     }
 
-    if server_running && explicit_provider_or_model && args.model.is_none() {
+    let initial_model_spec = if server_running {
+        client_initial_model_spec(
+            &args.provider,
+            args.model.as_deref(),
+            args.provider_profile.as_deref(),
+        )
+    } else {
+        None
+    };
+
+    if server_running && explicit_provider_or_model && initial_model_spec.is_none() {
         output::stderr_info(
-            "Server already running with its current provider settings; use --model with --provider to select this session's model. Restart the server to change its default provider.",
+            "Server already running; provider-only flags without --model only apply when starting a new server.",
         );
+        output::stderr_info(format!(
+            "Current server settings control `/model`. Pass `--model <id>` or restart server to apply: --provider {}",
+            args.provider.as_arg_value(),
+        ));
     }
 
     if server_running && explicit_tool_options {
@@ -865,6 +879,24 @@ async fn run_default_command(args: Args) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+fn client_initial_model_spec(
+    provider: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+) -> Option<String> {
+    let model = model.map(str::trim).filter(|m| !m.is_empty())?;
+    if model.contains(':') {
+        return Some(model.to_string());
+    }
+    if let Some(profile) = provider_profile.map(str::trim).filter(|p| !p.is_empty()) {
+        return Some(format!("{profile}:{model}"));
+    }
+    if *provider != ProviderChoice::Auto {
+        return Some(format!("{}:{model}", provider.as_arg_value()));
+    }
+    Some(model.to_string())
 }
 
 fn print_provider_test_coverage_report(report: &str, colorize: bool) {
