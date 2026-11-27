@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+mod fork_legacy;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalScope {
@@ -244,7 +246,9 @@ macro_rules! semantic_state {
             {
                 use serde::de::Error;
                 let raw = String::deserialize(deserializer)?;
-                Self::parse(&raw).ok_or_else(|| {
+                Self::parse(&raw)
+                    .or_else(|| crate::fork_legacy::upgrade(stringify!($name), &raw).and_then(Self::parse))
+                    .ok_or_else(|| {
                     D::Error::custom(format!(
                         concat!("invalid ", stringify!($name), " state: {}"),
                         raw
@@ -881,7 +885,11 @@ mod semantic_state_tests {
         assert!(serde_json::from_str::<ConfidenceState>("\"bogus\"").is_err());
         assert!(serde_json::from_str::<ConfidenceState>("85").is_err());
         assert!(serde_json::from_str::<ConfidenceState>("\"85\"").is_err());
-        assert!(serde_json::from_str::<IntentUnderstanding>("\"complete\"").is_err());
+        // Fork: retired "complete" is upgraded on read (see fork_legacy.rs).
+        assert_eq!(
+            serde_json::from_str::<IntentUnderstanding>("\"complete\"").unwrap(),
+            IntentUnderstanding::Clear
+        );
         assert!(serde_json::from_str::<IntentUnderstanding>("97").is_err());
     }
 
